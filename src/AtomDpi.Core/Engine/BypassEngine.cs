@@ -1,0 +1,503 @@
+using System.Buffers;
+using AtomDpi.Core.Interop;
+using AtomDpi.Core.Net;
+
+namespace AtomDpi.Core.Engine;
+
+/// <summary>
+/// The packet path.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Only the very first data packet of a TCP connection is ever touched, and only
+/// when it is a TLS ClientHello or a plaintext HTTP request head. Everything else -
+/// every ACK, every byte of payload after the handshake, all UDP, all ICMP - is
+/// never diverted in the first place, because the kernel filter excludes it. That
+/// is deliberate: ping, voice traffic and download throughput are untouched
+/// because they never enter this process.
+/// </para>
+/// <para>
+/// No per-connection state is kept either. A ClientHello is self-identifying, so
+/// there is nothing to look up, nothing to expire and nothing to grow.
+/// </para>
+/// </remarks>
+public sealed class BypassEngine : IDisposable
+{
+    /// <summary>
+    /// The kernel side filter. Narrow on purpose - the driver drops everything else
+    /// before it ever reaches user mode.
+    /// </summary>
+    private const string TcpFilter =
+        "outbound and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+
+    private const string TcpFilterV6 =
+        "outbound and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+
+    private const string QuicFilter = "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
+
+    private const int MaxPacket = 65535;
+
+    private readonly TargetMatcher _matcher;
+    private readonly ProcessPortMap? _portMap;
+    private readonly Action<string>? _log;
+    private readonly List<Thread> _workers = [];
+
+    private CancellationTokenSource _stopping = new();
+    private WinDivertHandle? _tcpHandle;
+    private WinDivertHandle? _quicHandle;
+    private volatile BypassStrategy _strategy = StrategyLibrary.Default;
+
+    public BypassEngine(TargetMatcher matcher, ProcessPortMap? portMap = null, Action<string>? log = null)
+    {
+        _matcher = matcher;
+        _portMap = portMap;
+        _log = log;
+    }
+
+    public EngineStatistics Stats { get; } = new();
+
+    public bool IsRunning => _tcpHandle?.IsOpen == true;
+
+    /// <summary>The recipe in force. Swapping it is atomic and takes effect on the next connection.</summary>
+    public BypassStrategy Strategy
+    {
+        get => _strategy;
+        set => _strategy = value;
+    }
+
+    /// <summary>
+    /// Drop new QUIC handshakes for protected processes so they fall back to TCP.
+    /// </summary>
+    /// <remarks>
+    /// QUIC hides its ClientHello behind handshake encryption, so the desync tricks
+    /// here cannot reach it. Refusing the handshake makes browsers retry over TCP
+    /// within a few hundred milliseconds, where the bypass does work. Only Initial
+    /// packets are dropped, so QUIC sessions already running are left alone.
+    /// </remarks>
+    public bool BlockQuicHandshakes { get; set; } = true;
+
+    /// <summary>Raised the first time each hostname is rewritten. Used for the activity list.</summary>
+    public event Action<string, string>? HostRewritten;
+
+    public void Start(int workerCount = 0)
+    {
+        if (IsRunning)
+        {
+            return;
+        }
+
+        if (_stopping.IsCancellationRequested)
+        {
+            _stopping.Dispose();
+            _stopping = new CancellationTokenSource();
+        }
+
+        // WinDivert rejects an IPv4-only filter clause on machines without IPv4, and
+        // some builds are pickier than others about the "ip and" prefix, so fall back.
+        _tcpHandle = OpenWithFallback();
+
+        // Deeper queues make bursts (a browser opening thirty connections at once)
+        // safe without us having to keep up in real time.
+        _tcpHandle.SetParam(WinDivertParam.QueueLength, 8192);
+        _tcpHandle.SetParam(WinDivertParam.QueueTime, 2000);
+        _tcpHandle.SetParam(WinDivertParam.QueueSize, 16 * 1024 * 1024);
+
+        if (BlockQuicHandshakes)
+        {
+            try
+            {
+                _quicHandle = WinDivertHandle.Open(QuicFilter, WinDivertLayer.Network, 1001, WinDivertFlags.None);
+                _quicHandle.SetParam(WinDivertParam.QueueLength, 2048);
+            }
+            catch (WinDivertException ex)
+            {
+                _log?.Invoke($"QUIC suppression unavailable: {ex.Message}");
+                _quicHandle = null;
+            }
+        }
+
+        var threads = workerCount > 0 ? workerCount : Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
+        for (var i = 0; i < threads; i++)
+        {
+            StartWorker($"AtomDpi.Tcp{i}", () => TcpLoop(_tcpHandle));
+        }
+
+        if (_quicHandle is not null)
+        {
+            StartWorker("AtomDpi.Quic", () => QuicLoop(_quicHandle));
+        }
+
+        Stats.StartedAt = DateTimeOffset.UtcNow;
+        _log?.Invoke($"Engine running with {threads} worker thread(s); strategy '{_strategy.Id}'.");
+    }
+
+    private WinDivertHandle OpenWithFallback()
+    {
+        try
+        {
+            return WinDivertHandle.Open(TcpFilter, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+        }
+        catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+        {
+            _log?.Invoke("Primary filter rejected; retrying without the IPv4 clause.");
+            return WinDivertHandle.Open(TcpFilterV6, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+        }
+    }
+
+    private void StartWorker(string name, Action body)
+    {
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                body();
+            }
+            catch (Exception ex)
+            {
+                Stats.AddError();
+                _log?.Invoke($"{name} stopped: {ex.Message}");
+            }
+        })
+        {
+            IsBackground = true,
+            Name = name,
+            // Above normal keeps the desync latency down without starving anything.
+            Priority = ThreadPriority.AboveNormal,
+        };
+
+        _workers.Add(thread);
+        thread.Start();
+    }
+
+    private void TcpLoop(WinDivertHandle handle)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(MaxPacket);
+        var scratch = ArrayPool<byte>.Shared.Rent(MaxPacket);
+
+        try
+        {
+            while (!_stopping.IsCancellationRequested)
+            {
+                var address = default(WinDivertAddress);
+                if (!handle.Receive(buffer.AsSpan(0, MaxPacket), out var length, ref address))
+                {
+                    return;
+                }
+
+                if (length == 0)
+                {
+                    continue;
+                }
+
+                var packet = buffer.AsSpan(0, length);
+
+                try
+                {
+                    if (!TryRewrite(handle, packet, scratch, ref address))
+                    {
+                        handle.Send(packet, ref address);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Stats.AddError();
+                    _log?.Invoke($"Packet rewrite failed, forwarding unchanged: {ex.Message}");
+                    handle.Send(packet, ref address);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(scratch);
+        }
+    }
+
+    /// <summary>Returns true when the packet was replaced (and must not be forwarded as-is).</summary>
+    private bool TryRewrite(WinDivertHandle handle, Span<byte> packet, byte[] scratch, ref WinDivertAddress address)
+    {
+        // Packets we injected come back around; forward them untouched or we loop forever.
+        if (address.Impostor)
+        {
+            return false;
+        }
+
+        var parsed = TcpIpPacket.Parse(packet);
+        if (!parsed.IsValid || parsed.PayloadLength <= 0)
+        {
+            return false;
+        }
+
+        var payload = packet.Slice(parsed.PayloadOffset, parsed.PayloadLength);
+        var isTls = parsed.DestinationPort == 443 && TlsClientHello.IsClientHello(payload);
+        var isHttp = parsed.DestinationPort == 80 && HttpRequestHead.IsRequest(payload);
+
+        if (!isTls && !isHttp)
+        {
+            // Mid-stream data. Not interesting, and not counted, so the numbers on
+            // the status page mean "handshakes seen" rather than "packets seen".
+            return false;
+        }
+
+        Stats.AddInspected();
+
+        string? hostName = null;
+        if (isTls)
+        {
+            if (TlsClientHello.TryParse(payload, out var hello))
+            {
+                hostName = hello.ServerName;
+            }
+        }
+        else if (HttpRequestHead.TryParse(payload, out var head))
+        {
+            hostName = head.Host;
+        }
+
+        var imagePath = _portMap?.GetImagePath(parsed.SourcePort);
+
+        if (!_matcher.ShouldProtect(hostName, imagePath))
+        {
+            Stats.AddPassedThrough();
+            return false;
+        }
+
+        var strategy = _strategy;
+        if (strategy.IsPassthrough)
+        {
+            Stats.AddPassedThrough();
+            return false;
+        }
+
+        var plan = DesyncPlanner.Plan(strategy, payload, isTls, hostName);
+        if (plan.IsNoOp)
+        {
+            Stats.AddPassedThrough();
+            return false;
+        }
+
+        var baseSequence = parsed.SequenceNumber;
+        var headerLength = parsed.PayloadOffset;
+        var sent = 0;
+        var decoys = 0;
+
+        foreach (var segment in plan.Segments)
+        {
+            var segmentPayload = segment.FakePayload is not null
+                ? segment.FakePayload.AsSpan()
+                : plan.Payload.AsSpan(segment.Offset, segment.Length);
+
+            if (segmentPayload.Length == 0)
+            {
+                continue;
+            }
+
+            if (headerLength + segmentPayload.Length > MaxPacket)
+            {
+                // Should not happen for a ClientHello, but never build past the buffer.
+                continue;
+            }
+
+            packet[..headerLength].CopyTo(scratch);
+            segmentPayload.CopyTo(scratch.AsSpan(headerLength));
+
+            var total = headerLength + segmentPayload.Length;
+            var view = scratch.AsSpan(0, total);
+
+            TcpIpPacket.SetTotalLength(view, parsed.IsIPv6, total);
+            TcpIpPacket.SetIdentification(view, parsed.IsIPv6, (ushort)Random.Shared.Next(1, ushort.MaxValue));
+
+            var sequence = unchecked(baseSequence + segment.SequenceOffset + (uint)segment.SequenceSkew);
+            TcpIpPacket.SetSequenceNumber(view, parsed.TcpHeaderOffset, sequence);
+
+            var flags = parsed.Flags;
+            if (segment.Urgent)
+            {
+                flags |= TcpFlags.Urg;
+                TcpIpPacket.SetUrgentPointer(view, parsed.TcpHeaderOffset, (ushort)segmentPayload.Length);
+            }
+            else
+            {
+                flags &= ~TcpFlags.Urg;
+                TcpIpPacket.SetUrgentPointer(view, parsed.TcpHeaderOffset, 0);
+            }
+
+            TcpIpPacket.SetFlags(view, parsed.TcpHeaderOffset, flags);
+
+            if (segment.TimeToLive is { } ttl)
+            {
+                TcpIpPacket.SetTimeToLive(view, parsed.IsIPv6, ttl);
+            }
+            else
+            {
+                TcpIpPacket.SetTimeToLive(view, parsed.IsIPv6, parsed.TimeToLive);
+            }
+
+            // Zero the checksum fields so the helper recomputes rather than adjusts.
+            TcpIpPacket.SetChecksum(view, parsed.TcpHeaderOffset, 0);
+            var outgoing = address;
+            WinDivertHandle.CalculateChecksums(view, ref outgoing);
+
+            if (segment.CorruptChecksum)
+            {
+                // Flip the checksum after the helper has done its work: the inspector
+                // usually accepts the segment, the server's stack always discards it.
+                TcpIpPacket.SetChecksum(view, parsed.TcpHeaderOffset, 0xBAD1);
+            }
+
+            if (handle.Send(view, ref outgoing))
+            {
+                sent++;
+                if (segment.IsDecoy)
+                {
+                    decoys++;
+                }
+            }
+        }
+
+        if (sent == 0)
+        {
+            // Nothing made it out - let the original through so the user is never
+            // worse off than with the app uninstalled.
+            Stats.AddError();
+            return false;
+        }
+
+        Stats.AddRewritten();
+        Stats.AddSegments(sent);
+        Stats.AddDecoys(decoys);
+
+        if (hostName is not null && Stats.LastHost != hostName)
+        {
+            Stats.LastHost = hostName;
+            HostRewritten?.Invoke(hostName, strategy.Id);
+        }
+
+        return true;
+    }
+
+    private void QuicLoop(WinDivertHandle handle)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(MaxPacket);
+
+        try
+        {
+            while (!_stopping.IsCancellationRequested)
+            {
+                var address = default(WinDivertAddress);
+                if (!handle.Receive(buffer.AsSpan(0, MaxPacket), out var length, ref address))
+                {
+                    return;
+                }
+
+                if (length == 0)
+                {
+                    continue;
+                }
+
+                var packet = buffer.AsSpan(0, length);
+
+                if (address.Impostor || !ShouldDropQuic(packet))
+                {
+                    handle.Send(packet, ref address);
+                    continue;
+                }
+
+                Stats.AddQuicBlocked();
+                // Dropped by simply not forwarding it.
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private bool ShouldDropQuic(ReadOnlySpan<byte> packet)
+    {
+        if (!BlockQuicHandshakes)
+        {
+            return false;
+        }
+
+        var version = packet[0] >> 4;
+        var ipHeaderLength = version == 4 ? (packet[0] & 0x0F) * 4 : 40;
+        if (version == 4)
+        {
+            if (packet.Length < ipHeaderLength + 8 || packet[9] != TcpIpPacket.ProtocolUdp)
+            {
+                return false;
+            }
+        }
+        else if (version == 6)
+        {
+            if (packet.Length < 48 || packet[6] != TcpIpPacket.ProtocolUdp)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        var udpPayloadOffset = ipHeaderLength + 8;
+        if (packet.Length <= udpPayloadOffset)
+        {
+            return false;
+        }
+
+        // QUIC long header, Initial packet: 0b11xx_xxxx with type bits 00.
+        var first = packet[udpPayloadOffset];
+        var isInitial = (first & 0xF0) == 0xC0;
+        if (!isInitial)
+        {
+            return false;
+        }
+
+        var sourcePort = (ushort)((packet[ipHeaderLength] << 8) | packet[ipHeaderLength + 1]);
+        var imagePath = _portMap?.GetImagePath(sourcePort);
+
+        // The hostname is inside the encrypted handshake, so the decision can only be
+        // made on the owning process. In system-wide mode that means leaving QUIC
+        // alone - dropping every handshake on the box would be a bad trade.
+        return _matcher.Scope switch
+        {
+            ProtectionScope.DiscordOnly => TargetMatcher.IsDiscord(imagePath),
+            ProtectionScope.DiscordAndBrowsers => TargetMatcher.IsDiscord(imagePath) || TargetMatcher.IsBrowser(imagePath),
+            _ => false,
+        };
+    }
+
+    public void Stop()
+    {
+        if (!IsRunning && _quicHandle is null)
+        {
+            return;
+        }
+
+        _stopping.Cancel();
+        _tcpHandle?.Shutdown();
+        _quicHandle?.Shutdown();
+
+        foreach (var worker in _workers)
+        {
+            worker.Join(TimeSpan.FromSeconds(2));
+        }
+
+        _workers.Clear();
+
+        _tcpHandle?.Dispose();
+        _tcpHandle = null;
+        _quicHandle?.Dispose();
+        _quicHandle = null;
+        Stats.StartedAt = null;
+        _log?.Invoke("Engine stopped.");
+    }
+
+    public void Dispose()
+    {
+        Stop();
+        _stopping.Dispose();
+    }
+}

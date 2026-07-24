@@ -1,0 +1,22 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- The release pipeline appends the CI run number, so every merge to main
+         publishes a unique build of whatever version is configured here. -->
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <Product>Atom DPI Bypass</Product>
+    <Company>Atom Gamer Arda A.G.A</Company>
+    <Authors>Atom Gamer Arda A.G.A</Authors>
+    <Copyright>Copyright (c) Atom Gamer Arda A.G.A</Copyright>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <AccelerateBuildsInVisualStudio>true</AccelerateBuildsInVisualStudio>
+  </PropertyGroup>
+
+</Project>
