@@ -11,8 +11,11 @@
     <ApplicationIcon>Assets\atomdpi.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- WPF0001: the Fluent ThemeMode API is still marked experimental. -->
-    <NoWarn>$(NoWarn);CA1416;WPF0001</NoWarn>
+    <!-- WPF0001: the Fluent ThemeMode API is still marked experimental.
+         WFO0003: a Windows Forms warning about DPI settings in the manifest. This is
+         a WPF app that happens to reference Windows Forms for the tray icon, and WPF
+         needs the per-monitor v2 declaration to stay in the manifest. -->
+    <NoWarn>$(NoWarn);CA1416;WPF0001;WFO0003</NoWarn>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
