@@ -90,12 +90,12 @@ jobs:
             throw "Publish output is missing: $($missing -join ', ')"
           }
           # A driver that is not validly signed will not load, so fail here rather
-          # than shipping an installer that cannot start the engine.
-          foreach ($name in @('WinDivert.dll', 'WinDivert64.sys')) {
-            $signature = Get-AuthenticodeSignature "artifacts/publish/$name"
-            if ($signature.Status -ne 'Valid') {
-              throw "$name signature is $($signature.Status)"
-            }
+          # than shipping an installer that cannot start the engine. Only the .sys is
+          # checked: upstream does not sign the user mode DLL, and the loader does not
+          # require it to be signed.
+          $signature = Get-AuthenticodeSignature 'artifacts/publish/WinDivert64.sys'
+          if ($signature.Status -ne 'Valid') {
+            throw "WinDivert64.sys signature is $($signature.Status)"
           }
           Write-Host 'Publish output verified.'
 
