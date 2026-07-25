@@ -148,7 +148,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
-          $notes = @"
+          # Single quoted here-string: the notes contain markdown backticks, and in a
+          # double quoted one PowerShell would treat each of them as an escape.
+          $notes = @'
           ## Atom DPI Bypass ${{ steps.version.outputs.full }}
 
           Türkiye'deki DPI engellerini aşan Windows uygulaması. Discord başta olmak
@@ -158,11 +160,11 @@ jobs:
 
           Tek satırlık kurulum (PowerShell):
 
-          ``````powershell
+          ```powershell
           irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
-          ``````
+          ```
 
-          Ya da aşağıdaki ``AtomDpiBypass-Setup-${{ steps.version.outputs.full }}.exe``
+          Ya da aşağıdaki `AtomDpiBypass-Setup-${{ steps.version.outputs.full }}.exe`
           dosyasını indirip çalıştırın.
 
           ### Bu sürümde
@@ -171,9 +173,10 @@ jobs:
           - Şifreli DNS: Cloudflare birincil, Google ve Quad9 yedek.
           - Kapsam seçimi: yalnızca Discord, Discord + tarayıcılar veya tüm sistem.
           - Her Windows açılışında yükseltilmiş oturum açma göreviyle başlar.
+          - Kaldırma sırasında özgün DNS ayarları geri yüklenir.
 
-          Derleme: ``${{ github.sha }}``
-          "@
+          Derleme: `${{ github.sha }}`
+          '@
 
           gh release create $tag `
             (Get-ChildItem artifacts/release -File | ForEach-Object { $_.FullName }) `
