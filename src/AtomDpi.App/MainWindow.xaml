@@ -30,14 +30,15 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- Rendered from a 1024px master so it stays sharp at 100% through 350% -->
+            <!-- A 256px source for a 44px slot stays sharp well past 350% scaling
+                 without decoding a megapixel bitmap to draw a header icon. -->
             <Image Grid.Column="0"
                    Width="44"
                    Height="44"
                    Margin="0,0,14,0"
                    VerticalAlignment="Center"
                    RenderOptions.BitmapScalingMode="HighQuality"
-                   Source="Assets/atomdpi-1024.png" />
+                   Source="Assets/atomdpi-256.png" />
 
             <StackPanel Grid.Column="1" VerticalAlignment="Center">
                 <TextBlock Text="{Binding ProductTitle}"
