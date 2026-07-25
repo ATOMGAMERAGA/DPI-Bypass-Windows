@@ -1,0 +1,381 @@
+<Window x:Class="AtomDpi.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Atom DPI Bypass"
+        Width="1000"
+        Height="720"
+        MinWidth="880"
+        MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource AppWindowBackgroundBrush}"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        Icon="Assets/atomdpi.ico"
+        FontFamily="Segoe UI Variable Display, Segoe UI Variable, Segoe UI">
+
+    <Grid Margin="20,16,20,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Grid Grid.Row="0" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- A 256px source for a 44px slot stays sharp well past 350% scaling
+                 without decoding a megapixel bitmap to draw a header icon. -->
+            <Image Grid.Column="0"
+                   Width="44"
+                   Height="44"
+                   Margin="0,0,14,0"
+                   VerticalAlignment="Center"
+                   RenderOptions.BitmapScalingMode="HighQuality"
+                   Source="Assets/atomdpi-256.png" />
+
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                <TextBlock Text="{Binding ProductTitle}"
+                           FontSize="22"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource AppTextPrimaryBrush}" />
+                <TextBlock Text="{Binding AuthorLine}" Style="{StaticResource CaptionStyle}" />
+            </StackPanel>
+
+            <Border Grid.Column="2"
+                    VerticalAlignment="Center"
+                    CornerRadius="{StaticResource PillCornerRadius}"
+                    Padding="14,7"
+                    Background="{DynamicResource AppSubtleBackgroundBrush}">
+                <StackPanel Orientation="Horizontal">
+                    <Ellipse Width="10" Height="10" VerticalAlignment="Center" Margin="0,0,8,0">
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Fill" Value="{DynamicResource AppNeutralBrush}" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding StatusSeverity}" Value="ok">
+                                        <Setter Property="Fill" Value="{DynamicResource AppSuccessBrush}" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding StatusSeverity}" Value="warn">
+                                        <Setter Property="Fill" Value="{DynamicResource AppWarningBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+                    <TextBlock Text="{Binding StatusHeadline}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource AppTextPrimaryBrush}" />
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- Navigation + pages -->
+        <TabControl Grid.Row="1" Style="{StaticResource NavTabControlStyle}">
+
+            <!-- ============ Durum ============ -->
+            <TabItem Header="Durum" Style="{StaticResource NavTabItemStyle}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+                    <StackPanel>
+                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0" Margin="0,0,16,0">
+                                    <TextBlock Text="{Binding StatusHeadline}" Style="{StaticResource PageTitleStyle}" />
+                                    <TextBlock Text="{Binding StatusDetail}" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Style="{StaticResource CaptionStyle}" Margin="0,10,0,0">
+                                        <Run Text="Kapsam:" />
+                                        <Run Text="{Binding SelectedScope.Title, Mode=OneWay}" FontWeight="SemiBold" />
+                                    </TextBlock>
+                                </StackPanel>
+
+                                <Button Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        MinWidth="180"
+                                        Style="{StaticResource PrimaryActionButtonStyle}"
+                                        Command="{Binding ToggleCommand}"
+                                        Content="{Binding ToggleCaption}" />
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Text="Bağlantı testi" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Text="Gerçek bir TLS el sıkışması yapılır ve sertifika doğrulanır. Yalnızca bağlantı kurulması değil, araya girilmediği de kontrol edilir." />
+
+                                <StackPanel Orientation="Horizontal" Margin="0,12,0,10">
+                                    <Button Content="discord.com testi"
+                                            MinWidth="150"
+                                            Margin="0,0,8,0"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding TestCommand}" />
+                                    <Button Content="Tüm Discord adresleri"
+                                            MinWidth="180"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding TestAllCommand}" />
+                                </StackPanel>
+
+                                <Border Background="{DynamicResource AppCodeBackgroundBrush}" CornerRadius="6" Padding="12">
+                                    <TextBlock Text="{Binding ProbeSummary}" Style="{StaticResource MonospaceStyle}" />
+                                </Border>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Motor sayaçları" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="{Binding EngineCounters}" Style="{StaticResource MonospaceStyle}" />
+                                <TextBlock Text="{Binding DnsSummary}" Style="{StaticResource MonospaceStyle}" Margin="0,8,0,0" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="0,12,0,0"
+                                           Text="Yalnızca bağlantının ilk veri paketi işlenir. Ping, ses trafiği ve indirme hızı çekirdek süzgecine hiç girmediği için etkilenmez." />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ============ Kapsam ============ -->
+            <TabItem Header="Kapsam" Style="{StaticResource NavTabItemStyle}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+                    <StackPanel>
+                        <TextBlock Text="Ne korunsun?" Style="{StaticResource PageTitleStyle}" />
+                        <TextBlock Style="{StaticResource CaptionStyle}"
+                                   Margin="0,0,0,14"
+                                   Text="Kapsam ne kadar dar olursa sisteme etkisi de o kadar az olur. Discord uygulaması, çalışan süreç adına göre tanınır." />
+
+                        <ListBox Style="{StaticResource ChoiceListStyle}"
+                                 ItemContainerStyle="{StaticResource ChoiceCardStyle}"
+                                 ItemsSource="{Binding ScopeOptions}"
+                                 SelectedItem="{Binding SelectedScope, Mode=TwoWay}">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Title}"
+                                                   FontSize="14"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource AppTextPrimaryBrush}" />
+                                        <TextBlock Text="{Binding Description}"
+                                                   Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <Border Style="{StaticResource CardStyle}" Margin="0,8,0,12">
+                            <StackPanel>
+                                <TextBlock Text="Bu bilgisayarda bulunanlar" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Discord" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBlock Text="{Binding DiscordSummary}" Style="{StaticResource BodyStyle}" Margin="0,0,0,12" />
+                                <TextBlock Text="Tarayıcılar" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBlock Text="{Binding BrowserSummary}" Style="{StaticResource BodyStyle}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="QUIC el sıkışmalarını engelle" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Text="QUIC, alan adını şifreli taşıdığı için burada uygulanan yöntemler ona ulaşamaz. Yeni QUIC el sıkışmaları reddedilirse tarayıcı saniyeler içinde TCP'ye döner ve koruma devreye girer. Yalnızca korunan programlar etkilenir." />
+                                <CheckBox Content="Korunan programlar için QUIC'i engelle (önerilen)"
+                                          Margin="0,12,0,0"
+                                          IsChecked="{Binding BlockQuic, Mode=TwoWay}" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ============ Ağ ve yöntem ============ -->
+            <TabItem Header="Ağ ve yöntem" Style="{StaticResource NavTabItemStyle}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+                    <StackPanel>
+                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Text="Bulunduğunuz ağ" Style="{StaticResource SectionTitleStyle}" />
+
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="Ağ adı" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBlock Text="{Binding NetworkName}" Style="{StaticResource BodyStyle}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="Algılanan operatör" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBlock Text="{Binding IspSummary}" Style="{StaticResource BodyStyle}" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Text="Ağ değiştiğinde (örneğin başka bir Wi-Fi adına geçtiğinizde) yeni ağ için yöntem arka planda yeniden bulunur. Daha önce çalışan yöntem hatırlanır ve önce o denenir." />
+
+                                <TextBlock Text="Operatör" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,4" />
+                                <ComboBox ItemsSource="{Binding IspOptions}"
+                                          SelectedItem="{Binding SelectedIsp, Mode=TwoWay}"
+                                          MinWidth="320"
+                                          HorizontalAlignment="Left" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Text="Aşma yöntemi" Style="{StaticResource SectionTitleStyle}" />
+
+                                <TextBlock Text="Etkin yöntem" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBlock Text="{Binding StrategySummary}" Style="{StaticResource BodyStyle}" Margin="0,0,0,12" />
+
+                                <ComboBox ItemsSource="{Binding StrategyOptions}"
+                                          SelectedItem="{Binding SelectedStrategy, Mode=TwoWay}"
+                                          MinWidth="380"
+                                          HorizontalAlignment="Left" />
+                                <TextBlock Text="{Binding SelectedStrategyDescription}"
+                                           Style="{StaticResource CaptionStyle}"
+                                           Margin="0,8,0,0" />
+
+                                <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                    <Button Content="Yeniden tara"
+                                            MinWidth="150"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding RetuneCommand}" />
+                                    <TextBlock Text="{Binding TuningStatus}"
+                                               Style="{StaticResource CaptionStyle}"
+                                               VerticalAlignment="Center"
+                                               Margin="12,0,0,0" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Son korunan adresler" Style="{StaticResource SectionTitleStyle}" />
+                                <ListBox ItemsSource="{Binding ProtectedHosts}"
+                                         MaxHeight="200"
+                                         Background="Transparent"
+                                         BorderThickness="0"
+                                         FontFamily="Cascadia Mono, Consolas"
+                                         FontSize="12" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ============ DNS ve ayarlar ============ -->
+            <TabItem Header="DNS ve ayarlar" Style="{StaticResource NavTabItemStyle}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+                    <StackPanel>
+                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Text="Alan adı çözümleme" Style="{StaticResource SectionTitleStyle}" />
+                                <ComboBox ItemsSource="{Binding DnsOptions}"
+                                          SelectedItem="{Binding SelectedDns, Mode=TwoWay}"
+                                          MinWidth="380"
+                                          HorizontalAlignment="Left" />
+                                <TextBlock Text="{Binding SelectedDnsDescription}"
+                                           Style="{StaticResource CaptionStyle}"
+                                           Margin="0,8,0,12" />
+                                <TextBlock Text="{Binding DnsSummary}" Style="{StaticResource MonospaceStyle}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="0,12,0,0"
+                                           Text="Çözümleyicilere IP adresiyle bağlanılır; böylece TLS içinde alan adı hiç gönderilmez ve DNS trafiği alan adına göre süzülemez. Koruma kapatıldığında özgün DNS ayarlarınız geri yüklenir." />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Başlangıç ve pencere" Style="{StaticResource SectionTitleStyle}" />
+                                <CheckBox Content="Windows açılışında başlat"
+                                          Margin="0,0,0,8"
+                                          IsChecked="{Binding StartWithWindows, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="26,0,0,10"
+                                           Text="Yükseltilmiş bir oturum açma görevi kaydedilir; böylece her açılışta yönetici onayı sorulmaz." />
+                                <CheckBox Content="Açılışta pencereyi göstermeden tepside başla"
+                                          Margin="0,0,0,8"
+                                          IsChecked="{Binding StartMinimised, Mode=TwoWay}" />
+                                <CheckBox Content="Uygulama açılırken korumayı da başlat"
+                                          Margin="0,0,0,8"
+                                          IsChecked="{Binding StartEngineOnLaunch, Mode=TwoWay}" />
+                                <CheckBox Content="Pencere kapatıldığında tepsiye küçült"
+                                          IsChecked="{Binding MinimiseToTrayOnClose, Mode=TwoWay}" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ============ Günlük ============ -->
+            <TabItem Header="Günlük" Style="{StaticResource NavTabItemStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Günlük" Style="{StaticResource PageTitleStyle}" />
+                            <TextBlock Text="Son 500 satır. Tam kayıtlar günlük klasöründe tutulur." Style="{StaticResource CaptionStyle}" />
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Content="Klasörü aç"
+                                VerticalAlignment="Center"
+                                MinWidth="130"
+                                Style="{StaticResource SecondaryActionButtonStyle}"
+                                Command="{Binding OpenLogFolderCommand}" />
+                    </Grid>
+
+                    <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="6">
+                        <ListBox x:Name="LogList"
+                                 ItemsSource="{Binding LogLines}"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 FontFamily="Cascadia Mono, Consolas"
+                                 FontSize="12"
+                                 VirtualizingPanel.IsVirtualizing="True"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+                    </Border>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- Footer -->
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center">
+                <Run Text="{Binding VersionLine, Mode=OneWay}" />
+                <Run Text=" · " />
+                <Run Text="{Binding AuthorLine, Mode=OneWay}" />
+            </TextBlock>
+            <Button Grid.Column="1"
+                    Content="Çıkış"
+                    MinWidth="110"
+                    Style="{StaticResource SecondaryActionButtonStyle}"
+                    Click="OnExitClicked" />
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,11 @@
+bin/
+obj/
+artifacts/
+*.user
+*.suo
+.vs/
+.idea/
+TestResults/
+*.binlog
+installer/output/
+third-party/

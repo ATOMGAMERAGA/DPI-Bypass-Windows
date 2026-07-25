@@ -1,0 +1,23 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <SolidColorBrush x:Key="AppWindowBackgroundBrush" Color="#111C2E" />
+    <SolidColorBrush x:Key="AppCardBackgroundBrush" Color="#1B2438" />
+    <SolidColorBrush x:Key="AppCardBorderBrush" Color="#2B3550" />
+    <SolidColorBrush x:Key="AppSubtleBackgroundBrush" Color="#162033" />
+    <SolidColorBrush x:Key="AppTextPrimaryBrush" Color="#F2F5FA" />
+    <SolidColorBrush x:Key="AppTextSecondaryBrush" Color="#9FAAC0" />
+    <SolidColorBrush x:Key="AppAccentBrush" Color="#4E9BFF" />
+    <SolidColorBrush x:Key="AppAccentSoftBrush" Color="#1E3357" />
+    <SolidColorBrush x:Key="AppSuccessBrush" Color="#4ED88A" />
+    <SolidColorBrush x:Key="AppWarningBrush" Color="#F0B44A" />
+    <SolidColorBrush x:Key="AppDangerBrush" Color="#FF7C70" />
+    <SolidColorBrush x:Key="AppNeutralBrush" Color="#6C7891" />
+    <SolidColorBrush x:Key="AppCodeBackgroundBrush" Color="#0E1626" />
+
+    <LinearGradientBrush x:Key="AppBrandBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Offset="0" Color="#25CBEF" />
+        <GradientStop Offset="1" Color="#398AF5" />
+    </LinearGradientBrush>
+
+</ResourceDictionary>
