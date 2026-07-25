@@ -33,7 +33,18 @@ public sealed class BypassEngine : IDisposable
     private const string TcpFilterV6 =
         "outbound and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
-    private const string QuicFilter = "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
+    /// <summary>
+    /// Only QUIC long header packets with an Initial type reach user mode. Filtering
+    /// on the first payload byte in the kernel means an established QUIC session (a
+    /// short header, first byte 0x40-0x7F) is never diverted at all, so watching a
+    /// video over QUIC costs nothing even when suppression is switched on.
+    /// </summary>
+    private const string QuicFilter =
+        "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32 "
+        + "and udp.Payload[0] >= 0xC0 and udp.Payload[0] <= 0xCF";
+
+    /// <summary>Used if the driver rejects payload indexing in a filter.</summary>
+    private const string QuicFilterFallback = "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
 
     private const int MaxPacket = 65535;
 
@@ -102,19 +113,10 @@ public sealed class BypassEngine : IDisposable
         _tcpHandle.SetParam(WinDivertParam.QueueTime, 2000);
         _tcpHandle.SetParam(WinDivertParam.QueueSize, 16 * 1024 * 1024);
 
-        if (BlockQuicHandshakes)
-        {
-            try
-            {
-                _quicHandle = WinDivertHandle.Open(QuicFilter, WinDivertLayer.Network, 1001, WinDivertFlags.None);
-                _quicHandle.SetParam(WinDivertParam.QueueLength, 2048);
-            }
-            catch (WinDivertException ex)
-            {
-                _log?.Invoke($"QUIC suppression unavailable: {ex.Message}");
-                _quicHandle = null;
-            }
-        }
+        // Opened regardless of the current setting so the toggle takes effect
+        // immediately instead of waiting for a restart. With the narrow filter above
+        // this costs a handful of packets per new QUIC connection.
+        _quicHandle = TryOpenQuicHandle();
 
         var threads = workerCount > 0 ? workerCount : Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
         for (var i = 0; i < threads; i++)
@@ -129,6 +131,31 @@ public sealed class BypassEngine : IDisposable
 
         Stats.StartedAt = DateTimeOffset.UtcNow;
         _log?.Invoke($"Engine running with {threads} worker thread(s); strategy '{_strategy.Id}'.");
+    }
+
+    private WinDivertHandle? TryOpenQuicHandle()
+    {
+        foreach (var filter in new[] { QuicFilter, QuicFilterFallback })
+        {
+            try
+            {
+                var handle = WinDivertHandle.Open(filter, WinDivertLayer.Network, 1001, WinDivertFlags.None);
+                handle.SetParam(WinDivertParam.QueueLength, 2048);
+                return handle;
+            }
+            catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+            {
+                _log?.Invoke("QUIC filter rejected by the driver; trying a simpler one.");
+            }
+            catch (WinDivertException ex)
+            {
+                _log?.Invoke($"QUIC suppression unavailable: {ex.Message}");
+                return null;
+            }
+        }
+
+        _log?.Invoke("QUIC suppression unavailable: no usable filter.");
+        return null;
     }
 
     private WinDivertHandle OpenWithFallback()
