@@ -1,7 +1,9 @@
 using System.Drawing;
-using System.Windows;
 using System.Windows.Forms;
 using AtomDpi.Core;
+
+// System.Windows and System.Windows.Forms both define Application, so WPF's copy is
+// referred to by its full name below rather than pulled in with a using.
 
 namespace AtomDpi.App.Infrastructure;
 
@@ -37,14 +39,18 @@ public sealed class TrayIcon : IDisposable
         exit.Click += (_, _) => ExitRequested?.Invoke();
 
         var menu = new ContextMenuStrip();
-        menu.Items.AddRange([_statusItem, new ToolStripSeparator(), open, _toggleItem, test, new ToolStripSeparator(), exit]);
+        menu.Items.AddRange(new ToolStripItem[]
+        {
+            _statusItem, new ToolStripSeparator(), open, _toggleItem, test, new ToolStripSeparator(), exit,
+        });
 
+        _current = LoadIcon();
         _icon = new NotifyIcon
         {
             Text = AppPaths.ProductName,
             Visible = true,
             ContextMenuStrip = menu,
-            Icon = LoadIcon(),
+            Icon = _current,
         };
 
         _icon.DoubleClick += (_, _) => OpenRequested?.Invoke();
@@ -87,24 +93,31 @@ public sealed class TrayIcon : IDisposable
     public void RefreshForDpi()
     {
         var replacement = LoadIcon();
+        var previous = _current;
+
         _icon.Icon = replacement;
-        _current?.Dispose();
         _current = replacement;
+
+        // Only dispose the icon we just replaced, and only once it is off the shell.
+        if (!ReferenceEquals(previous, replacement))
+        {
+            previous?.Dispose();
+        }
     }
 
-    private Icon LoadIcon()
+    private static Icon LoadIcon()
     {
         var size = SystemInformation.SmallIconSize;
 
         try
         {
             var uri = new Uri("pack://application:,,,/Assets/atomdpi.ico");
-            using var stream = Application.GetResourceStream(uri)?.Stream;
+            using var stream = System.Windows.Application.GetResourceStream(uri)?.Stream;
             if (stream is not null)
             {
-                // This overload picks the closest frame in the file rather than scaling.
-                _current = new Icon(stream, size);
-                return _current;
+                // This overload picks the closest frame in the multi-image file rather
+                // than scaling one, which is what keeps the tray icon sharp.
+                return new Icon(stream, size);
             }
         }
         catch (Exception)
@@ -113,8 +126,7 @@ public sealed class TrayIcon : IDisposable
         }
 
         var fallback = Environment.ProcessPath is null ? null : Icon.ExtractAssociatedIcon(Environment.ProcessPath);
-        _current = fallback ?? SystemIcons.Shield;
-        return _current;
+        return fallback ?? SystemIcons.Shield;
     }
 
     public void Dispose()
