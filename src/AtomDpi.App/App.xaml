@@ -5,8 +5,10 @@
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <!-- Index 0 is swapped at runtime when the system theme changes. -->
-                <ResourceDictionary Source="Theme/Light.xaml" />
+                <!-- The palette (Theme/Light.xaml or Theme/Dark.xaml) is added by
+                     ThemeManager at startup and swapped when the system theme
+                     changes. Styles here reach it through DynamicResource, so the
+                     order these dictionaries end up in does not matter. -->
                 <ResourceDictionary Source="Theme/Shared.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>

@@ -18,6 +18,7 @@ public sealed class ThemeManager : IDisposable
     private const string PersonalizeKey = @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 
     private readonly Application _application;
+    private ResourceDictionary? _palette;
     private bool _isDark;
 
     public ThemeManager(Application application)
@@ -34,17 +35,23 @@ public sealed class ThemeManager : IDisposable
     public void Apply()
     {
         var source = new Uri(_isDark ? "Theme/Dark.xaml" : "Theme/Light.xaml", UriKind.Relative);
-        var dictionary = new ResourceDictionary { Source = source };
-
+        var replacement = new ResourceDictionary { Source = source };
         var merged = _application.Resources.MergedDictionaries;
-        if (merged.Count == 0)
+
+        // Swap by reference, never by position. Setting ThemeMode makes WPF insert its
+        // own Fluent dictionaries into this same collection, and a positional swap
+        // would overwrite one of those instead of the palette.
+        var index = _palette is null ? -1 : merged.IndexOf(_palette);
+        if (index >= 0)
         {
-            merged.Add(dictionary);
+            merged[index] = replacement;
         }
         else
         {
-            merged[0] = dictionary;
+            merged.Add(replacement);
         }
+
+        _palette = replacement;
     }
 
     public static bool IsSystemDark()
