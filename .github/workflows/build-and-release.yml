@@ -1,0 +1,182 @@
+name: build-and-release
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Work out the version
+        id: version
+        shell: pwsh
+        run: |
+          # major.minor.patch is configured in Directory.Build.props; the CI run number
+          # makes every merge to main a distinct, ordered release.
+          [xml]$props = Get-Content Directory.Build.props
+          $prefix = $props.Project.PropertyGroup.VersionPrefix | Where-Object { $_ } | Select-Object -First 1
+          if (-not $prefix) { throw 'VersionPrefix not found in Directory.Build.props' }
+          $full = "$prefix.${{ github.run_number }}"
+          "prefix=$prefix"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "full=$full"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$full"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building version $full"
+
+      - name: Fetch the WinDivert driver payload
+        shell: pwsh
+        run: ./tools/fetch-windivert.ps1
+
+      - name: Restore
+        shell: pwsh
+        run: |
+          dotnet restore src/AtomDpi.Core/AtomDpi.Core.csproj
+          dotnet restore src/AtomDpi.App/AtomDpi.App.csproj
+          dotnet restore tests/AtomDpi.Tests/AtomDpi.Tests.csproj
+
+      - name: Run the unit tests
+        shell: pwsh
+        run: >
+          dotnet test tests/AtomDpi.Tests/AtomDpi.Tests.csproj
+          --configuration Release
+          --logger "trx;LogFileName=tests.trx"
+          --results-directory artifacts/test-results
+
+      - name: Publish the application
+        shell: pwsh
+        run: >
+          dotnet publish src/AtomDpi.App/AtomDpi.App.csproj
+          --configuration Release
+          --output artifacts/publish
+          -p:Version=${{ steps.version.outputs.full }}
+          -p:FileVersion=${{ steps.version.outputs.full }}
+          -p:AssemblyVersion=${{ steps.version.outputs.full }}
+          -p:InformationalVersion=${{ steps.version.outputs.full }}
+
+      - name: Check the payload is complete
+        shell: pwsh
+        run: |
+          $required = @('AtomDpiBypass.exe', 'AtomDpi.Core.dll', 'WinDivert.dll', 'WinDivert64.sys')
+          $missing = @()
+          foreach ($name in $required) {
+            if (-not (Test-Path "artifacts/publish/$name")) { $missing += $name }
+          }
+          if ($missing.Count -gt 0) {
+            throw "Publish output is missing: $($missing -join ', ')"
+          }
+          # A driver that is not validly signed will not load, so fail here rather
+          # than shipping an installer that cannot start the engine.
+          foreach ($name in @('WinDivert.dll', 'WinDivert64.sys')) {
+            $signature = Get-AuthenticodeSignature "artifacts/publish/$name"
+            if ($signature.Status -ne 'Valid') {
+              throw "$name signature is $($signature.Status)"
+            }
+          }
+          Write-Host 'Publish output verified.'
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress --yes
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.full }}" `
+                  "/DPublishDir=..\artifacts\publish" `
+                  installer\AtomDpiBypass.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with $LASTEXITCODE" }
+
+      - name: Package the portable build and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/release -Force | Out-Null
+
+          $setup = Get-ChildItem installer/output -Filter 'AtomDpiBypass-Setup-*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'Installer was not produced.' }
+          Copy-Item $setup.FullName artifacts/release/
+
+          $zip = "artifacts/release/AtomDpiBypass-Portable-${{ steps.version.outputs.full }}.zip"
+          Compress-Archive -Path 'artifacts/publish/*' -DestinationPath $zip -CompressionLevel Optimal
+
+          $lines = foreach ($file in Get-ChildItem artifacts/release -File) {
+            "$((Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower())  $($file.Name)"
+          }
+          $lines | Set-Content -Path 'artifacts/release/SHA256SUMS.txt' -Encoding ascii
+          Get-Content 'artifacts/release/SHA256SUMS.txt' | Write-Host
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: atomdpi-${{ steps.version.outputs.full }}
+          path: |
+            artifacts/release/*
+            artifacts/test-results/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $notes = @"
+          ## Atom DPI Bypass ${{ steps.version.outputs.full }}
+
+          Türkiye'deki DPI engellerini aşan Windows uygulaması. Discord başta olmak
+          üzere HTTPS/HTTP bağlantılarını, ping ve ses trafiğine dokunmadan korur.
+
+          ### Kurulum
+
+          Tek satırlık kurulum (PowerShell):
+
+          ``````powershell
+          irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
+          ``````
+
+          Ya da aşağıdaki ``AtomDpiBypass-Setup-${{ steps.version.outputs.full }}.exe``
+          dosyasını indirip çalıştırın.
+
+          ### Bu sürümde
+
+          - Ağ değiştiğinde çalışan yöntem arka planda yeniden bulunur.
+          - Şifreli DNS: Cloudflare birincil, Google ve Quad9 yedek.
+          - Kapsam seçimi: yalnızca Discord, Discord + tarayıcılar veya tüm sistem.
+          - Her Windows açılışında yükseltilmiş oturum açma göreviyle başlar.
+
+          Derleme: ``${{ github.sha }}``
+          "@
+
+          gh release create $tag `
+            (Get-ChildItem artifacts/release -File | ForEach-Object { $_.FullName }) `
+            --title "Atom DPI Bypass ${{ steps.version.outputs.full }}" `
+            --notes $notes `
+            --latest

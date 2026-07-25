@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AtomDpi.App/AtomDpi.App.csproj" />
+    <Project Path="src/AtomDpi.Core/AtomDpi.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AtomDpi.Tests/AtomDpi.Tests.csproj" />
+  </Folder>
+</Solution>

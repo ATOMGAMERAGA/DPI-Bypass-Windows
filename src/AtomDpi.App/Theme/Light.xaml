@@ -1,0 +1,25 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Own palette rather than the theme's internal keys, so the app looks the same
+         on every Windows build and nothing depends on private resource names. -->
+    <SolidColorBrush x:Key="AppWindowBackgroundBrush" Color="#F3F4F7" />
+    <SolidColorBrush x:Key="AppCardBackgroundBrush" Color="#FBFBFD" />
+    <SolidColorBrush x:Key="AppCardBorderBrush" Color="#E1E3E9" />
+    <SolidColorBrush x:Key="AppSubtleBackgroundBrush" Color="#EDEEF3" />
+    <SolidColorBrush x:Key="AppTextPrimaryBrush" Color="#111C2E" />
+    <SolidColorBrush x:Key="AppTextSecondaryBrush" Color="#5A6273" />
+    <SolidColorBrush x:Key="AppAccentBrush" Color="#2F7EF0" />
+    <SolidColorBrush x:Key="AppAccentSoftBrush" Color="#E4EEFE" />
+    <SolidColorBrush x:Key="AppSuccessBrush" Color="#12894A" />
+    <SolidColorBrush x:Key="AppWarningBrush" Color="#B4690E" />
+    <SolidColorBrush x:Key="AppDangerBrush" Color="#C0392E" />
+    <SolidColorBrush x:Key="AppNeutralBrush" Color="#9AA1AF" />
+    <SolidColorBrush x:Key="AppCodeBackgroundBrush" Color="#F0F1F5" />
+
+    <LinearGradientBrush x:Key="AppBrandBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Offset="0" Color="#25CBEF" />
+        <GradientStop Offset="1" Color="#398AF5" />
+    </LinearGradientBrush>
+
+</ResourceDictionary>
