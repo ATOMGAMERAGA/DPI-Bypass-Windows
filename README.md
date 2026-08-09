@@ -1,13 +1,14 @@
 <div align="center">
 
-<img src="assets/logo/atomdpi-256.png" width="128" alt="Atom DPI Bypass" />
+<img src="assets/logo/dpibypass-256.png" width="128" alt="DPI Bypass" />
 
-# Atom DPI Bypass
+# DPI Bypass
 
-**Türkiye'deki DPI (derin paket denetimi) engellerini aşan Windows uygulaması.**
+**Türkiye'deki DPI (derin paket denetimi) engellerini aşan, ağ değiştiğinde
+yöntemi kendiliğinden yeniden bulan Windows uygulaması.**
 
 Discord başta olmak üzere HTTPS/HTTP bağlantılarını, ping ve ses trafiğine
-dokunmadan çalışır hâle getirir.
+dokunmadan çalışır hâle getirir. VPN değildir: trafik başka bir ülkeye çıkmaz.
 
 Geliştirici: **Atom Gamer Arda A.G.A**
 
@@ -28,22 +29,28 @@ kurar. Yönetici hakkı gerekiyorsa kendisi yükseltilmiş bir pencere açar.
 
 Kurulum dosyasını elle indirmeyi tercih ederseniz
 [Releases](../../releases/latest) sayfasındaki
-`AtomDpiBypass-Setup-<sürüm>.exe` dosyasını çalıştırın. Kurulum istemeyenler için
-aynı sayfada `AtomDpiBypass-Portable-<sürüm>.zip` de bulunur.
+`DpiBypass-Setup-<sürüm>.exe` dosyasını çalıştırın. Kurulum istemeyenler için
+aynı sayfada `DpiBypass-Portable-<sürüm>.zip` de bulunur.
 
 ## Ne yapıyor?
 
 Türkiye'de Discord gibi servisler DNS seviyesinde **ve** DPI seviyesinde
 engellenir: TLS el sıkışmasının ilk paketindeki alan adı (SNI) okunur ve
-bağlantı ya sıfırlanır ya da sessizce düşürülür. Atom DPI Bypass bu iki katmanı
+bağlantı ya sıfırlanır ya da sessizce düşürülür. DPI Bypass bu iki katmanı
 birlikte ele alır.
 
-**1. Paket katmanı.** Bağlantının yalnızca ilk veri paketi (TLS ClientHello ya
-da düz metin HTTP istek başlığı) çekirdek süzgeciyle yakalanır ve denetleyicinin
-akışı birleştirememesi için yeniden şekillendirilir:
+| Katman | Yapılan iş |
+| --- | --- |
+| **DNS** | Sorgular **DNS-over-HTTPS** ile taşınır: Cloudflare birincil, Google ve Quad9 yedek. Çözümleyicilere IP adresiyle bağlanıldığı için TLS içinde alan adı hiç gönderilmez; DNS trafiği alan adına göre süzülemez. Yanıtlar yerel olarak önbelleğe alınır. |
+| **DPI** | Bağlantının yalnızca **ilk veri paketi** (TLS ClientHello ya da düz metin HTTP istek başlığı) çekirdek süzgeciyle yakalanır ve denetleyicinin akışı birleştirememesi için yeniden şekillendirilir. |
+| **QUIC** | İsteğe bağlı olarak korunan programların yeni QUIC el sıkışmaları reddedilir; tarayıcı saniyeler içinde atlatma uygulanabilen TCP'ye döner. Kurulmuş QUIC oturumlarına dokunulmaz. |
+| **Diğer trafik** | Hiç işlenmez. ICMP (ping), UDP, Discord ses trafiği ve indirme akışı çekirdek süzgecine girmez bile. |
+
+### Atlatma yöntemleri
 
 | Yöntem | Ne yapar |
 | --- | --- |
+| **TLS kayıt parçalama** | ClientHello, alan adının ortasından birden çok **TLS kaydına** bölünür. TLS açısından tamamen geçerlidir; hiçbir paket düşmez, **ek gecikme yoktur**. Kayıt katmanını birleştirmeyen denetleyici SNI'yi bulamaz. |
 | Bölme | Alan adının tam ortasından iki TCP parçasına ayırır |
 | Ters sıralı bölme | Parçaları ters sırada gönderir |
 | Sahte paket (düşük TTL) | Denetleyiciye zararsız bir el sıkışma gösterir; paket sunucuya varmadan TTL ile ölür |
@@ -53,12 +60,8 @@ akışı birleştirememesi için yeniden şekillendirilir:
 | Bant dışı bayt | URG bayrağıyla tek bir bayt önden gönderir |
 | HTTP başlık oyunları | `Host:` başlığının yazımını değiştirir |
 
-Bu yöntemler kombinasyonlarıyla birlikte 14 hazır tarif oluşturur.
-
-**2. Alan adı katmanı.** Sorgular DNS-over-HTTPS ile taşınır: **Cloudflare
-birincil, Google ve Quad9 yedek**. Çözümleyicilere IP adresiyle bağlanıldığı
-için TLS içinde alan adı hiç gönderilmez — dolayısıyla DNS trafiğinin kendisi
-alan adına göre süzülemez. Yanıtlar yerel olarak önbelleğe alınır.
+Bu yöntemler kombinasyonlarıyla birlikte **17 hazır tarif** oluşturur
+(`DpiBypass.exe strategies`).
 
 ## Kendi kendine ayar bulması
 
@@ -66,8 +69,8 @@ Uygulama hangi yöntemin çalıştığını varsaymaz, **ölçer**:
 
 1. Bulunduğunuz ağın kimliği çıkarılır (Wi-Fi adı, ağ geçidinin MAC adresi,
    bağlantı türü).
-2. Operatör otomatik algılanır (ters DNS, ASN ve ağ adı ipuçlarıyla) ve o
-   operatöre uygun yöntem sıralaması seçilir.
+2. Operatör otomatik algılanır (ters DNS, Team Cymru üzerinden ASN ve ağ adı
+   ipuçlarıyla) ve o operatöre uygun yöntem sıralaması seçilir.
 3. Önce hiç dokunmadan denenir — ağ zaten engellemiyorsa hiçbir şey yapılmaz.
 4. Aksi hâlde adaylar tek tek uygulanır ve her biri için **gerçek bir
    discord.com TLS el sıkışması** yapılır. Sertifika da doğrulanır, böylece
@@ -79,20 +82,78 @@ geçtiğinizde) bu arka planda kendiliğinden yeniden çalışır. O ağ daha ö
 görüldüyse kayıtlı yöntem önce denenir; hâlâ çalışıyorsa saniyeler içinde hazır
 olur, çalışmıyorsa yeni bir arama başlar.
 
-Desteklenen operatör profilleri: Türk Telekom (Mobil / Evde İnternet / Hotspot),
-Redbox, Turkcell (Mobil / Superonline / Superbox / Hotspot), Vodafone (Mobil /
-Evde İnternet / Hotspot), TurkNet ve "Diğer / Bilinmiyor".
+Ayrıca **düzenli denetim** (varsayılan 30 dakika) seçili yöntemi yeniden sınar;
+operatör kural değiştirdiğinde yeni bir arama kendiliğinden başlar.
+
+Desteklenen operatör profilleri: Türk Telekom (Mobil / Evde İnternet /
+Hotspot), Redbox, Turkcell (Mobil / Superonline / Superbox / Hotspot),
+Vodafone (Mobil / Evde İnternet / Hotspot), TurkNet ve "Diğer / Bilinmiyor".
+
+## Her sitede çalışması
+
+- Yerleşik listede Discord'un tüm alan adları ve Türkiye'de DPI ile
+  engellendiği bilinen diğer adresler vardır.
+- **Otomatik keşif:** açtığınız yeni bir alan adı, atlatmasız açılmayıp
+  atlatmayla açılıyorsa sessizce sınanır ve kalıcı olarak listeye eklenir.
+  Ölçüm sırasında yalnızca o alan adı etkilenir; diğer bağlantıların koruması
+  bir an bile düşmez.
+- **Siteler** sekmesinden dilediğiniz alan adını elle ekleyebilir, yerleşik
+  listeden çıkarabilirsiniz. Alt alan adları kendiliğinden kapsanır.
 
 ## Neyin korunacağını siz seçiyorsunuz
 
-Arayüzdeki **Kapsam** sekmesinde üç seçenek var:
+Arayüzdeki **Kapsam** sekmesinde dört seçenek var:
 
 - **Yalnızca Discord** — sadece Discord uygulamasının trafiği ve Discord alan
   adları. Sisteme etkisi en düşük seçenek. Kurulu Discord sürümleri (kararlı,
   PTB, Canary, Microsoft Store) otomatik algılanır ve trafik, paketi açan
   sürecin kimliğine göre eşleştirilir.
-- **Discord + tarayıcılar** — buna ek olarak kurulu tarayıcılardaki tüm siteler.
+- **Engelli site listesi (önerilen)** — yerleşik, öğrenilen ve elle eklenen tüm
+  alan adları, hangi program açarsa açsın korunur.
+- **Engelli siteler + tarayıcılar** — buna ek olarak kurulu tarayıcılardaki tüm
+  siteler.
 - **Tüm sistem** — bilgisayardaki bütün programlar.
+
+## Vodafone sınırsız modu (hotspot TTL düzeltmesi)
+
+Vodafone'un "Red Sınırsız" tarifelerinde mobil veri sınırsızdır, ancak
+**hotspot/tethering ayrı bir kotadan düşer**. Operatör paylaşımı paketin **TTL**
+değerinden anlar: telefonun kendi trafiği operatöre `64` ile ulaşır, laptoptan
+gelen paket ise telefonda bir kez yönlendirildiği için `63` olarak varır.
+
+Bu mod, bu bilgisayardan çıkan paketleri **TTL 65** ile yollar. Telefon bir
+düşürünce operatöre tam `64` gider.
+
+**Nasıl açılır:** DNS ve ayarlar → *Vodafone sınırsız modu*. Komut satırından:
+
+```powershell
+DpiBypass.exe vodafone status
+DpiBypass.exe vodafone on
+DpiBypass.exe vodafone off
+```
+
+**Yalnızca kaydedildiği ağda çalışır.** Modu açtığınız andaki ağın parmak izi
+kaydedilir; ev Wi-Fi'ına ya da Ethernet'e geçtiğinizde kural kendiliğinden
+kalkar, telefona döndüğünüzde geri gelir. Kural tek bir ağ bağdaştırıcısına
+bağlıdır.
+
+**Atlatma bozulmaz.** Sahte paket stratejileri kasıtlı olarak düşük TTL'li
+(3-8) paketler gönderir; bu paketlerin sunucuya *ulaşmaması* atlatmanın çalışma
+ilkesidir. Bu yüzden TTL yeniden yazımı yalnızca TTL'i **32'nin üstünde** olan
+paketlere uygulanır — hem çekirdek süzgecinde hem de kodda. Eşik bir testle
+(`TheGuardSitsAboveEveryDecoyTtlInTheLibrary`) korunur: ileride daha yüksek
+TTL'li bir strateji eklenirse derleme kırılır.
+
+**IPv6.** Telefon tethering yaparken bilgisayara kendi global IPv6 adresini
+verir; o zaman operatör aynı aboneden iki farklı kaynak görür ve TTL ne olursa
+olsun paylaşım anlaşılır. Bu yüzden mod, varsayılan olarak paylaşılan
+bağdaştırıcıda giden IPv6 trafiğini engeller. Kural kalktığında bu da anında
+kalkar — sistemde kalıcı bir değişiklik yapılmaz.
+
+> **Kullanım koşulları uyarısı:** Bu mod, operatör sözleşmenizin kullanım
+> koşullarına aykırıdır. Otomatik sayacı atlatır, ancak çok yüksek kullanım
+> adil kullanım incelemesine takılabilir — orada TTL'in bir etkisi olmaz.
+> Sorumluluk kullanıcıya aittir.
 
 ## Ping ve hıza etkisi
 
@@ -107,18 +168,44 @@ Tasarım gereği yok denecek kadar az:
   maliyeti yoktur.
 - Trafik bir vekil sunucudan (proxy) veya VPN'den geçmez; paketler doğrudan
   hedefe gider.
-- Otomatik ayarlama, çalışan yöntemler arasından en düşük gecikmeliyi seçer.
+- Otomatik ayarlama, çalışan yöntemler arasından en düşük gecikmeliyi seçer;
+  TLS kayıt parçalama hiçbir paket düşürmediği için sıfır ek gecikme getirir.
 
 ## Ekran arayüzü
 
 Windows 11'in Fluent görünümünü ve Mica malzemesini kullanır, sistem
-açık/koyu temasını canlı olarak izler. Logo 16 pikselden 256 piksele kadar her
-boyutta ayrı ayrı gömülüdür ve arayüzde 1024 piksellik kaynaktan çizilir;
+açık/koyu temasını canlı olarak izler. Logo 16 pikselden 1024 piksele kadar her
+boyutta ayrı ayrı gömülüdür ve arayüzde yüksek çözünürlüklü kaynaktan çizilir;
 böylece tepside, görev çubuğunda, kurulum sihirbazında ve %350 ölçeklemede
 bulanıklaşmaz.
 
 Sekmeler: **Durum** (durum, aç/kapat, discord.com testi, sayaçlar), **Kapsam**,
-**Ağ ve yöntem**, **DNS ve ayarlar**, **Günlük**.
+**Siteler**, **Ağ ve yöntem**, **DNS ve ayarlar**, **Günlük**.
+
+Pencereyi kapatmak korumayı durdurmaz; uygulama tepside çalışmaya devam eder.
+Kısayolu yeniden çalıştırmak ya da tepsi simgesine çift tıklamak pencereyi geri
+getirir.
+
+## Komut satırı
+
+```powershell
+DpiBypass.exe status              # genel durum
+DpiBypass.exe test [alanadı]      # erişimi sına (varsayılan: discord.com)
+DpiBypass.exe search              # yöntemi yeniden ara
+DpiBypass.exe domains             # korunan alan adları
+DpiBypass.exe strategies          # yöntem kataloğu
+DpiBypass.exe isps                # operatör profilleri
+DpiBypass.exe enable / disable    # korumayı aç / kapat
+DpiBypass.exe vodafone [on|off]   # hotspot TTL düzeltmesi
+DpiBypass.exe restore-dns         # DNS ayarlarını geri yükle
+```
+
+Durum ve denetim komutları, adlandırılmış bir kanal üzerinden **çalışan
+uygulamaya** bağlanır — ayarları dosyadan okuyup tahmin etmez. Uygulama
+kapalıysa komut bunu söyler. Çıktının konsola yazılabilmesi için komutu
+**yönetici olarak açılmış** bir PowerShell/cmd penceresinden çalıştırın;
+yükseltilmemiş bir konsoldan çalıştırıldığında sonuç bir iletişim kutusunda
+gösterilir.
 
 ## Gereksinimler
 
@@ -129,9 +216,21 @@ Sekmeler: **Durum** (durum, aç/kapat, discord.com testi, sayaçlar), **Kapsam**
 ## Otomatik başlatma
 
 Kurulumda, oturum açıldığında **yükseltilmiş** çalışan bir Görev Zamanlayıcı
-görevi kaydedilir (`AtomDpiBypass-Autostart`). Bu sayede her açılışta yönetici
+görevi kaydedilir (`DpiBypass-Autostart`). Bu sayede her açılışta yönetici
 onayı sorulmaz. Görev kaydedilemezse `Run` anahtarına düşülür — o durumda onay
 istenir. İstemiyorsanız **DNS ve ayarlar** sekmesinden kapatabilirsiniz.
+
+## Ayarlar
+
+`C:\ProgramData\DPI Bypass\`
+
+| Dosya | İçerik |
+| --- | --- |
+| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Vodafone modu, başlangıç seçenekleri |
+| `networks.json` | Ağ başına öğrenilen yöntem belleği |
+| `learned-domains.json` | Otomatik keşfin bulduğu engelli alan adları |
+| `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |
+| `logs\` | Günlük kayıtları (14 gün saklanır) |
 
 ## Kaldırma
 
@@ -145,15 +244,15 @@ sürücü servisi kaldırılır.
 git clone https://github.com/ATOMGAMERAGA/DPI-Bypass-Windows.git
 cd DPI-Bypass-Windows
 
-./tools/fetch-windivert.ps1                        # sürücü dosyalarını indirir
-dotnet test tests/AtomDpi.Tests/AtomDpi.Tests.csproj
-dotnet publish src/AtomDpi.App/AtomDpi.App.csproj -c Release -o artifacts/publish
+./tools/fetch-windivert.ps1                          # sürücü dosyalarını indirir
+dotnet test tests/DpiBypass.Tests/DpiBypass.Tests.csproj
+dotnet publish src/DpiBypass.App/DpiBypass.App.csproj -c Release -o artifacts/publish
 ```
 
 Kurulum paketi için Inno Setup 6 gerekir:
 
 ```powershell
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0.0 /DPublishDir=..\artifacts\publish installer\AtomDpiBypass.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0.0 /DPublishDir=..\artifacts\publish installer\DpiBypass.iss
 ```
 
 Logo dosyalarını yeniden üretmek için (Python + Pillow):
@@ -166,12 +265,32 @@ python3 tools/generate_assets.py assets/logo/source.png
 
 | Yol | İçerik |
 | --- | --- |
-| `src/AtomDpi.Core` | Paket motoru, DNS, operatör profilleri, otomatik ayarlama |
-| `src/AtomDpi.App` | WPF arayüzü, tepsi simgesi, otomatik başlatma |
-| `tests/AtomDpi.Tests` | Birim testleri (129 test) |
+| `src/DpiBypass.Core` | Paket motoru, DNS, operatör profilleri, otomatik ayarlama, TTL düzeltmesi, denetim kanalı |
+| `src/DpiBypass.App` | WPF arayüzü, tepsi simgesi, otomatik başlatma, komut satırı |
+| `tests/DpiBypass.Tests` | Birim testleri (184 test) |
 | `installer/` | Inno Setup betiği ve sihirbaz görselleri |
 | `tools/` | Sürücü indirme ve logo üretme betikleri |
 | `.github/workflows/` | Derleme, test ve sürüm yayınlama hattı |
+
+Motorun ana parçaları:
+
+```
+src/DpiBypass.Core/
+  ProtectionService.cs        düzenleyici: saptama, arama, olay akışı
+  Engine/BypassEngine.cs      paket yolu (WinDivert)
+  Engine/DesyncPlan.cs        stratejinin pakete uygulanması
+  Engine/StrategyLibrary.cs   yöntem kataloğu
+  Net/TlsRecordFragmenter.cs  ClientHello'yu birden çok TLS kaydına bölme
+  Net/TlsClientHello.cs       ClientHello ayrıştırma
+  Dns/DohResolver.cs          DNS-over-HTTPS çözümleyici
+  Dns/DnsProxyServer.cs       yerel DNS köprüsü
+  Dns/DnsConfigurator.cs      sistem DNS ayarları (ve geri alma)
+  Network/IspProfile.cs       operatör profilleri
+  Diagnostics/StrategyTuner.cs        gerçek bağlantı testleriyle yöntem arama
+  Diagnostics/BlockedSiteDiscovery.cs yeni engelli siteleri ölçerek bulma
+  Vodafone/HotspotTtlFix.cs   hotspot TTL düzeltmesi (eşik korumalı)
+  Ipc/ControlServer.cs        uygulama ↔ komut satırı protokolü
+```
 
 ### Sürümleme
 
@@ -183,11 +302,13 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 
 | Belirti | Bakılacak yer |
 | --- | --- |
+| Kısayola tıklıyorum, pencere açılmıyor | Uygulama zaten tepside çalışıyordur; kısayolu yeniden çalıştırmak artık çalışan kopyanın penceresini öne getirir. Yine açılmıyorsa `%ProgramData%\DPI Bypass\logs\crash.log` dosyasına bakın |
 | "Yönetici hakları gerekiyor" | Uygulamayı yönetici olarak çalıştırın; sürücü aksi hâlde açılamaz |
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
-| Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Discord + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
-| DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `AtomDpiBypass.exe --restore-dns` de ayarları geri yükler |
-| Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\Atom DPI Bypass\logs`) |
+| Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
+| DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
+| Vodafone modu "kayıtlı değil" diyor | Mod yalnızca açtığınız ağlarda çalışır. Telefonun paylaşımına bağlıyken onay kutusunu yeniden işaretleyin |
+| Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 
 ## Yasal not
 

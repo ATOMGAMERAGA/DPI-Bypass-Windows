@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate every raster asset that ships with Atom DPI Bypass.
+"""Regenerate every raster asset that ships with DPI Bypass.
 
 Windows scales icons in a lot of places (tray, taskbar, alt-tab, the installer
 wizard, Add/Remove Programs, jump lists). If an .ico only carries one bitmap,
@@ -108,7 +108,7 @@ def _bmp_payload(frame: Image.Image) -> bytes:
 def write_pngs(master: Image.Image, target_dir: Path, sizes: list[int]) -> None:
     for size in sizes:
         frame = master.resize((size, size), Image.LANCZOS)
-        frame.save(target_dir / f"atomdpi-{size}.png", format="PNG", optimize=True)
+        frame.save(target_dir / f"dpibypass-{size}.png", format="PNG", optimize=True)
 
 
 def write_wizard_bitmaps(master: Image.Image) -> None:
@@ -133,9 +133,9 @@ def main() -> int:
     LOGO_DIR.mkdir(parents=True, exist_ok=True)
 
     master = square_master(source)
-    master.save(LOGO_DIR / "atomdpi-1024.png", format="PNG", optimize=True)
+    master.save(LOGO_DIR / "dpibypass-1024.png", format="PNG", optimize=True)
     write_pngs(master, LOGO_DIR, [s for s in PNG_SIZES if s != 1024])
-    write_ico(master, LOGO_DIR / "atomdpi.ico", ICON_SIZES)
+    write_ico(master, LOGO_DIR / "dpibypass.ico", ICON_SIZES)
     write_wizard_bitmaps(master)
 
     print(f"icon sizes : {', '.join(str(s) for s in ICON_SIZES)}")

@@ -4,7 +4,7 @@
     <!-- The release pipeline appends the CI run number, so every merge to main
          publishes a unique build of whatever version is configured here. -->
     <VersionPrefix>1.0.0</VersionPrefix>
-    <Product>Atom DPI Bypass</Product>
+    <Product>DPI Bypass</Product>
     <Company>Atom Gamer Arda A.G.A</Company>
     <Authors>Atom Gamer Arda A.G.A</Authors>
     <Copyright>Copyright (c) Atom Gamer Arda A.G.A</Copyright>

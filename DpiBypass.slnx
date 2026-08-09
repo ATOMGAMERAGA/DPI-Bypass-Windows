@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DpiBypass.App/DpiBypass.App.csproj" />
+    <Project Path="src/DpiBypass.Core/DpiBypass.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DpiBypass.Tests/DpiBypass.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    One line installer for Atom DPI Bypass.
+    One line installer for DPI Bypass.
 
 .DESCRIPTION
     Fetches the newest published release, checks the installer against the
@@ -27,7 +27,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
 }
 
 if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
-    throw 'Atom DPI Bypass yalnızca Windows üzerinde çalışır.'
+    throw 'DPI Bypass yalnızca Windows üzerinde çalışır.'
 }
 
 # The installer writes to Program Files and registers a scheduled task, so it needs
@@ -49,7 +49,7 @@ if (-not $isAdmin) {
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $headers = @{
-    'User-Agent' = 'AtomDpiBypass-Installer'
+    'User-Agent' = 'DpiBypass-Installer'
     'Accept'     = 'application/vnd.github+json'
 }
 
@@ -63,14 +63,14 @@ $apiUrl = if ($Tag) {
 $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers -UseBasicParsing
 Write-Ok "Sürüm: $($release.tag_name)"
 
-$setupAsset = $release.assets | Where-Object { $_.name -like 'AtomDpiBypass-Setup-*.exe' } | Select-Object -First 1
+$setupAsset = $release.assets | Where-Object { $_.name -like 'DpiBypass-Setup-*.exe' } | Select-Object -First 1
 if (-not $setupAsset) {
     throw "Bu sürümde kurulum dosyası bulunamadı ($($release.tag_name))."
 }
 
 $checksumAsset = $release.assets | Where-Object { $_.name -like '*SHA256SUMS*' } | Select-Object -First 1
 
-$work = Join-Path $env:TEMP ("atomdpi-" + [Guid]::NewGuid().ToString('N'))
+$work = Join-Path $env:TEMP ("dpibypass-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $setupPath = Join-Path $work $setupAsset.name
 
@@ -116,9 +116,9 @@ try {
         throw "Kurulum $($process.ExitCode) kodu ile sonlandı."
     }
 
-    Write-Ok 'Atom DPI Bypass kuruldu.'
+    Write-Ok 'DPI Bypass kuruldu.'
     Write-Host ''
-    Write-Host 'Uygulama Başlat menüsünde "Atom DPI Bypass" adıyla yer alıyor ve her' -ForegroundColor Gray
+    Write-Host 'Uygulama Başlat menüsünde "DPI Bypass" adıyla yer alıyor ve her' -ForegroundColor Gray
     Write-Host 'Windows açılışında kendiliğinden başlar. Durum sekmesindeki' -ForegroundColor Gray
     Write-Host '"discord.com testi" düğmesiyle çalıştığını doğrulayabilirsiniz.' -ForegroundColor Gray
 }

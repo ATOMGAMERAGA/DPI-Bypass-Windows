@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- Only for the tray icon; WPF has no first party shell notification area API. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>DpiBypass</AssemblyName>
+    <RootNamespace>DpiBypass.App</RootNamespace>
+    <ApplicationIcon>Assets\dpibypass.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- WPF0001: the Fluent ThemeMode API is still marked experimental.
+         WFO0003: a Windows Forms warning about DPI settings in the manifest. This is
+         a WPF app that happens to reference Windows Forms for the tray icon, and WPF
+         needs the per-monitor v2 declaration to stay in the manifest. -->
+    <NoWarn>$(NoWarn);CA1416;WPF0001;WFO0003</NoWarn>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../DpiBypass.Core/DpiBypass.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- High resolution sources so the shell never has to upscale a small bitmap. -->
+    <Resource Include="Assets\dpibypass-1024.png" />
+    <Resource Include="Assets\dpibypass-256.png" />
+    <Resource Include="Assets\dpibypass.ico" />
+  </ItemGroup>
+
+  <!-- The driver payload is fetched by the build pipeline; a local developer build
+       without it still compiles, it just cannot open the driver at runtime. -->
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)../../third-party/windivert')">
+    <Content Include="../../third-party/windivert/*.dll;../../third-party/windivert/*.sys">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>%(Filename)%(Extension)</Link>
+    </Content>
+  </ItemGroup>
+
+</Project>
