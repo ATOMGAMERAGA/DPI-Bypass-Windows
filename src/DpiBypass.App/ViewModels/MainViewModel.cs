@@ -582,6 +582,8 @@ public sealed class MainViewModel : ObservableObject
                 return;
             }
 
+            string? failure = null;
+
             try
             {
                 if (value)
@@ -595,11 +597,18 @@ public sealed class MainViewModel : ObservableObject
             }
             catch (TtlFixException ex)
             {
-                TtlStatusLine = ex.Message;
+                failure = ex.Message;
             }
 
+            // The checkbox reads the service back, so a refused switch un-ticks itself.
             Raise();
             RefreshTtlNetworks();
+
+            // After the refresh, or the computed status line would bury the reason.
+            if (failure is not null)
+            {
+                TtlStatusLine = failure;
+            }
         }
     }
 
