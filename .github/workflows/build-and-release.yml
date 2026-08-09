@@ -55,14 +55,14 @@ jobs:
       - name: Restore
         shell: pwsh
         run: |
-          dotnet restore src/AtomDpi.Core/AtomDpi.Core.csproj
-          dotnet restore src/AtomDpi.App/AtomDpi.App.csproj
-          dotnet restore tests/AtomDpi.Tests/AtomDpi.Tests.csproj
+          dotnet restore src/DpiBypass.Core/DpiBypass.Core.csproj
+          dotnet restore src/DpiBypass.App/DpiBypass.App.csproj
+          dotnet restore tests/DpiBypass.Tests/DpiBypass.Tests.csproj
 
       - name: Run the unit tests
         shell: pwsh
         run: >
-          dotnet test tests/AtomDpi.Tests/AtomDpi.Tests.csproj
+          dotnet test tests/DpiBypass.Tests/DpiBypass.Tests.csproj
           --configuration Release
           --logger "trx;LogFileName=tests.trx"
           --results-directory artifacts/test-results
@@ -70,7 +70,7 @@ jobs:
       - name: Publish the application
         shell: pwsh
         run: >
-          dotnet publish src/AtomDpi.App/AtomDpi.App.csproj
+          dotnet publish src/DpiBypass.App/DpiBypass.App.csproj
           --configuration Release
           --output artifacts/publish
           -p:Version=${{ steps.version.outputs.full }}
@@ -81,7 +81,7 @@ jobs:
       - name: Check the payload is complete
         shell: pwsh
         run: |
-          $required = @('AtomDpiBypass.exe', 'AtomDpi.Core.dll', 'WinDivert.dll', 'WinDivert64.sys')
+          $required = @('DpiBypass.exe', 'DpiBypass.Core.dll', 'WinDivert.dll', 'WinDivert64.sys')
           $missing = @()
           foreach ($name in $required) {
             if (-not (Test-Path "artifacts/publish/$name")) { $missing += $name }
@@ -110,7 +110,7 @@ jobs:
           if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
           & $iscc "/DAppVersion=${{ steps.version.outputs.full }}" `
                   "/DPublishDir=..\artifacts\publish" `
-                  installer\AtomDpiBypass.iss
+                  installer\DpiBypass.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with $LASTEXITCODE" }
 
       - name: Package the portable build and checksums
@@ -118,11 +118,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path artifacts/release -Force | Out-Null
 
-          $setup = Get-ChildItem installer/output -Filter 'AtomDpiBypass-Setup-*.exe' | Select-Object -First 1
+          $setup = Get-ChildItem installer/output -Filter 'DpiBypass-Setup-*.exe' | Select-Object -First 1
           if (-not $setup) { throw 'Installer was not produced.' }
           Copy-Item $setup.FullName artifacts/release/
 
-          $zip = "artifacts/release/AtomDpiBypass-Portable-${{ steps.version.outputs.full }}.zip"
+          $zip = "artifacts/release/DpiBypass-Portable-${{ steps.version.outputs.full }}.zip"
           Compress-Archive -Path 'artifacts/publish/*' -DestinationPath $zip -CompressionLevel Optimal
 
           $lines = foreach ($file in Get-ChildItem artifacts/release -File) {
@@ -134,7 +134,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: atomdpi-${{ steps.version.outputs.full }}
+          name: dpibypass-${{ steps.version.outputs.full }}
           path: |
             artifacts/release/*
             artifacts/test-results/*
@@ -151,7 +151,7 @@ jobs:
           # Single quoted here-string: the notes contain markdown backticks, and in a
           # double quoted one PowerShell would treat each of them as an escape.
           $notes = @'
-          ## Atom DPI Bypass ${{ steps.version.outputs.full }}
+          ## DPI Bypass ${{ steps.version.outputs.full }}
 
           Türkiye'deki DPI engellerini aşan Windows uygulaması. Discord başta olmak
           üzere HTTPS/HTTP bağlantılarını, ping ve ses trafiğine dokunmadan korur.
@@ -164,14 +164,17 @@ jobs:
           irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
           ```
 
-          Ya da aşağıdaki `AtomDpiBypass-Setup-${{ steps.version.outputs.full }}.exe`
+          Ya da aşağıdaki `DpiBypass-Setup-${{ steps.version.outputs.full }}.exe`
           dosyasını indirip çalıştırın.
 
           ### Bu sürümde
 
-          - Ağ değiştiğinde çalışan yöntem arka planda yeniden bulunur.
+          - TLS kayıt parçalama dahil 17 atlatma yöntemi; ağa göre en hızlısı ölçülerek seçilir.
+          - Ağ değiştiğinde çalışan yöntem arka planda yeniden bulunur, düzenli denetimle doğrulanır.
+          - Yeni engelli siteler kendiliğinden ölçülüp listeye eklenir; liste arayüzden düzenlenebilir.
+          - Vodafone sınırsız modu: hotspot TTL düzeltmesi (yalnızca kaydettiğiniz ağlarda).
           - Şifreli DNS: Cloudflare birincil, Google ve Quad9 yedek.
-          - Kapsam seçimi: yalnızca Discord, Discord + tarayıcılar veya tüm sistem.
+          - Kapsam seçimi: yalnızca Discord, engelli site listesi, + tarayıcılar veya tüm sistem.
           - Her Windows açılışında yükseltilmiş oturum açma göreviyle başlar.
           - Kaldırma sırasında özgün DNS ayarları geri yüklenir.
 
@@ -180,6 +183,6 @@ jobs:
 
           gh release create $tag `
             (Get-ChildItem artifacts/release -File | ForEach-Object { $_.FullName }) `
-            --title "Atom DPI Bypass ${{ steps.version.outputs.full }}" `
+            --title "DPI Bypass ${{ steps.version.outputs.full }}" `
             --notes $notes `
             --latest

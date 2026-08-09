@@ -1,6 +1,6 @@
 # Üçüncü taraf bileşenler
 
-Atom DPI Bypass aşağıdaki bileşenleri değiştirmeden birlikte dağıtır.
+DPI Bypass aşağıdaki bileşenleri değiştirmeden birlikte dağıtır.
 
 ## WinDivert
 
@@ -11,7 +11,7 @@ Atom DPI Bypass aşağıdaki bileşenleri değiştirmeden birlikte dağıtır.
 
 WinDivert, Windows'ta ağ paketlerini kullanıcı kipinde yakalayıp yeniden
 göndermeyi sağlayan bir kullanıcı kipi kütüphanesi ve çekirdek sürücüsüdür.
-Atom DPI Bypass, DPI aşma yöntemlerini uygulamak için bu kütüphaneyi kullanır.
+DPI Bypass, DPI aşma yöntemlerini uygulamak için bu kütüphaneyi kullanır.
 
 İkili dosyalar üzerinde hiçbir değişiklik yapılmamıştır ve yayıncı imzaları
 korunmuştur; kurulum paketine alınmadan önce Authenticode imzaları derleme

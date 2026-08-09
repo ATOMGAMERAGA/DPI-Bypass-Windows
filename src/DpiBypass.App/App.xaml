@@ -1,0 +1,16 @@
+<Application x:Class="DpiBypass.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- The palette (Theme/Light.xaml or Theme/Dark.xaml) is added by
+                     ThemeManager at startup and swapped when the system theme
+                     changes. Styles here reach it through DynamicResource, so the
+                     order these dictionaries end up in does not matter. -->
+                <ResourceDictionary Source="Theme/Shared.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

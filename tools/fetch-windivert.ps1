@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Downloads the WinDivert driver payload that ships with Atom DPI Bypass.
+    Downloads the WinDivert driver payload that ships with DPI Bypass.
 
 .DESCRIPTION
     The 64-bit WinDivert.dll and WinDivert64.sys are placed in third-party/windivert
