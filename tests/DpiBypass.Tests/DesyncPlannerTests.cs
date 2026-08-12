@@ -35,52 +35,41 @@ public class DesyncPlannerTests
         Assert.Equal(plan.Payload, rebuilt.ToArray());
     }
 
-    /// <summary>
-    /// Concatenates the bodies of every TLS record in a payload. Re-framing a
-    /// handshake across more records is allowed to change the bytes on the wire, but
-    /// never the handshake message the server ends up reading.
-    /// </summary>
-    private static byte[] HandshakeBody(byte[] payload)
-    {
-        var body = new List<byte>(payload.Length);
-        var pos = 0;
-
-        while (pos + 5 <= payload.Length)
-        {
-            Assert.Equal(0x16, payload[pos]);
-            var length = (payload[pos + 3] << 8) | payload[pos + 4];
-            Assert.True(pos + 5 + length <= payload.Length, "record runs past the end of the payload");
-
-            body.AddRange(payload.Skip(pos + 5).Take(length));
-            pos += 5 + length;
-        }
-
-        Assert.Equal(payload.Length, pos);
-        return [.. body];
-    }
-
     [Fact]
     public void EveryStrategyInTheLibraryPreservesTheTlsStream()
     {
         var payload = Hello();
-        var originalHandshake = HandshakeBody(payload);
 
         foreach (var strategy in StrategyLibrary.All)
         {
             var plan = DesyncPlanner.Plan(strategy, payload, isTls: true, hostName: "discord.com");
             AssertStreamIsIntact(plan);
+            Assert.Equal(payload, plan.Payload);
+        }
+    }
 
-            if (strategy.TlsRecords == TlsRecordSplit.None)
-            {
-                Assert.Equal(payload, plan.Payload);
-            }
-            else
-            {
-                // Record fragmentation re-frames the same handshake: the server must
-                // reassemble byte-for-byte what the client meant to send.
-                Assert.Equal(originalHandshake, HandshakeBody(plan.Payload));
-                Assert.True(plan.Payload.Length > payload.Length, $"{strategy.Id} produced no extra record");
-            }
+    [Fact]
+    public void NoStrategyChangesHowManyBytesAreSent()
+    {
+        // The engine is handed outbound packets only, so the local TCP stack keeps the
+        // byte count it already committed to. A plan that lengthens or shortens the
+        // payload makes the peer acknowledge data that stack never sent, and Windows
+        // answers an out-of-window acknowledgement by discarding the segment - the
+        // handshake then hangs until it times out. This is the invariant that a TLS
+        // record re-framing strategy quietly broke, so it is asserted for the whole
+        // catalogue rather than per strategy.
+        var hello = Hello();
+        var request = PacketFactory.HttpRequest("discord.com");
+
+        foreach (var strategy in StrategyLibrary.All)
+        {
+            var tls = DesyncPlanner.Plan(strategy, hello, isTls: true, hostName: "discord.com");
+            Assert.Equal(hello.Length, tls.Payload.Length);
+            Assert.Equal(hello.Length, tls.Segments.Where(s => !s.IsDecoy).Sum(s => s.Length));
+
+            var http = DesyncPlanner.Plan(strategy, request, isTls: false, hostName: "discord.com");
+            Assert.Equal(request.Length, http.Payload.Length);
+            Assert.Equal(request.Length, http.Segments.Where(s => !s.IsDecoy).Sum(s => s.Length));
         }
     }
 
@@ -221,28 +210,15 @@ public class DesyncPlannerTests
     }
 
     [Fact]
-    public void ExtraSpaceTrickGrowsThePayloadByExactlyOneByte()
+    public void HostTabTrickSwapsTheSeparatorWithoutMovingAnything()
     {
         var payload = PacketFactory.HttpRequest("discord.com");
-        var strategy = StrategyLibrary.Split2 with { Http = HttpTricks.ExtraSpace };
+        var strategy = StrategyLibrary.Split2 with { Http = HttpTricks.HostTab };
 
         var plan = DesyncPlanner.Plan(strategy, payload, isTls: false, hostName: "discord.com");
 
-        Assert.Equal(payload.Length + 1, plan.Payload.Length);
-        Assert.Contains("Host:  discord.com", Encoding.ASCII.GetString(plan.Payload));
-        AssertStreamIsIntact(plan);
-    }
-
-    [Fact]
-    public void DottedHostTrickAppendsTheRootLabelDot()
-    {
-        var payload = PacketFactory.HttpRequest("discord.com");
-        var strategy = StrategyLibrary.Split2 with { Http = HttpTricks.DottedHost };
-
-        var plan = DesyncPlanner.Plan(strategy, payload, isTls: false, hostName: "discord.com");
-
-        Assert.Equal(payload.Length + 1, plan.Payload.Length);
-        Assert.Contains("Host: discord.com.\r\n", Encoding.ASCII.GetString(plan.Payload));
+        Assert.Equal(payload.Length, plan.Payload.Length);
+        Assert.Contains("Host:\tdiscord.com", Encoding.ASCII.GetString(plan.Payload));
         AssertStreamIsIntact(plan);
     }
 
@@ -252,22 +228,38 @@ public class DesyncPlannerTests
         var payload = PacketFactory.HttpRequest("discord.com");
         var strategy = StrategyLibrary.Split2 with
         {
-            Http = HttpTricks.HostCase | HttpTricks.ExtraSpace | HttpTricks.DottedHost,
+            Http = HttpTricks.HostCase | HttpTricks.HostTab,
         };
 
         var plan = DesyncPlanner.Plan(strategy, payload, isTls: false, hostName: "discord.com");
         var text = Encoding.ASCII.GetString(plan.Payload);
 
-        Assert.Equal(payload.Length + 2, plan.Payload.Length);
-        Assert.Contains("hOSt:  discord.com.\r\n", text);
+        Assert.Equal(payload.Length, plan.Payload.Length);
+        Assert.Contains("hOSt:\tdiscord.com\r\n", text);
         AssertStreamIsIntact(plan);
+    }
+
+    [Fact]
+    public void AnHttpOnlyTrickIsNotMistakenForNothingToDo()
+    {
+        // One full length segment over a payload that was rewritten in place looks
+        // exactly like an untouched packet unless the plan says otherwise, and the
+        // engine forwards the original whenever it reads a plan as a no-op.
+        var payload = PacketFactory.HttpRequest("discord.com");
+        var strategy = StrategyLibrary.Passthrough with { Id = "http-only", Http = HttpTricks.HostCase };
+
+        var plan = DesyncPlanner.Plan(strategy, payload, isTls: false, hostName: "discord.com");
+
+        Assert.True(plan.PayloadRewritten);
+        Assert.False(plan.IsNoOp);
+        Assert.Contains("hOSt:", Encoding.ASCII.GetString(plan.Payload));
     }
 
     [Fact]
     public void HttpTricksAreNotAppliedToTlsPayloads()
     {
         var payload = Hello();
-        var strategy = StrategyLibrary.Split2 with { Http = HttpTricks.ExtraSpace | HttpTricks.DottedHost };
+        var strategy = StrategyLibrary.Split2 with { Http = HttpTricks.HostCase | HttpTricks.HostTab };
 
         var plan = DesyncPlanner.Plan(strategy, payload, isTls: true, hostName: "discord.com");
 

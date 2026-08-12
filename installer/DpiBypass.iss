@@ -87,6 +87,10 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename:
 [Run]
 ; Registering the logon task through the app keeps one implementation of it.
 Filename: "{app}\{#AppExeName}"; Parameters: "--install-autostart"; Flags: runhidden waituntilterminated; Tasks: autostart
+; And the other way round, or the checkbox only works when it is ticked: autostart is
+; on by default in the settings file, so leaving it unticked has to be recorded too -
+; otherwise the app reconciles the missing task on first launch and puts it back.
+Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; Flags: runhidden waituntilterminated; Tasks: not autostart
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchAfterInstall}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

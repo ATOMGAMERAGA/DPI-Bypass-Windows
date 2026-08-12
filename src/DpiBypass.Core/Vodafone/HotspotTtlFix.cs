@@ -98,7 +98,13 @@ public sealed class HotspotTtlFix : IDisposable
             Interlocked.Exchange(ref _rewritten, 0);
             Interlocked.Exchange(ref _ipv6Dropped, 0);
 
-            _worker = new Thread(() => Loop(_handle))
+            // Handed over rather than read from the fields later, so the worker stays
+            // pinned to the rule and the stop signal it was started for even once
+            // Clear() has replaced both.
+            var handle = _handle;
+            var stopping = _stopping.Token;
+
+            _worker = new Thread(() => Loop(handle, stopping))
             {
                 IsBackground = true,
                 Name = "DpiBypass.TtlFix",
@@ -164,17 +170,22 @@ public sealed class HotspotTtlFix : IDisposable
         return $"outbound and ifIdx == {interfaceIndex} and ({ipv4} or {ipv6})";
     }
 
-    private void Loop(WinDivertHandle handle)
+    private void Loop(WinDivertHandle handle, CancellationToken stopping)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(MaxPacket);
 
         try
         {
-            while (!_stopping.IsCancellationRequested)
+            while (!stopping.IsCancellationRequested)
             {
                 var address = default(WinDivertAddress);
                 if (!handle.Receive(buffer.AsSpan(0, MaxPacket), out var length, ref address))
                 {
+                    if (!stopping.IsCancellationRequested)
+                    {
+                        _log?.Invoke("TTL fix worker stopped: the driver closed the handle.");
+                    }
+
                     return;
                 }
 
@@ -207,6 +218,32 @@ public sealed class HotspotTtlFix : IDisposable
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+
+            if (!stopping.IsCancellationRequested)
+            {
+                // The kernel rule outlives the worker: WinDivert keeps diverting matched
+                // packets into a queue nobody drains and the driver drops them once it
+                // fills, which black-holes the adapter while IsActive still claims all is
+                // well. Clear() joins this very thread, so it has to run somewhere else.
+                _log?.Invoke("Removing the TTL rule so the adapter is not left black-holed.");
+                ThreadPool.QueueUserWorkItem(_ => TearDownAfterFailure(handle));
+            }
+        }
+    }
+
+    /// <summary>Takes down a rule whose worker died on its own.</summary>
+    private void TearDownAfterFailure(WinDivertHandle handle)
+    {
+        lock (_gate)
+        {
+            // A stop or a re-apply may have replaced the rule while this was queued;
+            // tearing down the one that is running now would be a fresh outage.
+            if (!ReferenceEquals(_handle, handle))
+            {
+                return;
+            }
+
+            Clear();
         }
     }
 

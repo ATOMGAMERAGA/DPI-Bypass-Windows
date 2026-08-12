@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading;
@@ -17,6 +19,14 @@ namespace DpiBypass.App.Infrastructure;
 /// user nothing at all - indistinguishable from the app failing to launch.
 /// </para>
 /// <para>
+/// The hand-off is acknowledged, not fire-and-forget. A named object outlives the
+/// usefulness of the process holding it: a copy that is wedged, or one Windows has
+/// not finished tearing down, still owns the mutex and still drains the activation
+/// event while showing the user nothing. Waiting for the running copy to confirm it
+/// really put a window on screen is what separates "it is already open" from "it is
+/// stuck", and the two need opposite responses.
+/// </para>
+/// <para>
 /// A named event is used rather than a window message or a pipe because both ends
 /// may be running elevated while the shell that launched them is not, and an event
 /// with an explicit DACL is the simplest object that crosses that boundary
@@ -27,24 +37,42 @@ public sealed class SingleInstance : IDisposable
 {
     private const string MutexName = @"Global\DpiBypass.SingleInstance";
     private const string ActivateEventName = @"Global\DpiBypass.Activate";
+    private const string AcknowledgeEventName = @"Global\DpiBypass.Activated";
 
-    private readonly Mutex? _mutex;
-    private readonly EventWaitHandle? _activate;
+    /// <summary>
+    /// How long a launch waits for the running copy to confirm the window is up.
+    /// Long enough for a busy machine to schedule the UI thread, short enough that a
+    /// user who double-clicked an icon is not left staring at nothing.
+    /// </summary>
+    private static readonly TimeSpan HandoverTimeout = TimeSpan.FromSeconds(5);
+
     private readonly CancellationTokenSource _stopping = new();
+    private Mutex? _mutex;
+    private EventWaitHandle? _activate;
+    private EventWaitHandle? _acknowledge;
     private Thread? _listener;
 
-    private SingleInstance(bool isPrimary, Mutex? mutex, EventWaitHandle? activate)
+    private SingleInstance(bool isPrimary, Mutex? mutex, EventWaitHandle? activate, EventWaitHandle? acknowledge)
     {
         IsPrimary = isPrimary;
         _mutex = mutex;
         _activate = activate;
+        _acknowledge = acknowledge;
     }
 
     /// <summary>True when this process owns the instance and should build the UI.</summary>
-    public bool IsPrimary { get; }
+    public bool IsPrimary { get; private set; }
 
-    /// <summary>Raised on a background thread when another launch asks for the window.</summary>
-    public event Action? ActivationRequested;
+    /// <summary>
+    /// Raised on a background thread when another launch asks for the window.
+    /// </summary>
+    /// <remarks>
+    /// The handler returns true only once the window is genuinely on screen. That
+    /// answer is forwarded to the waiting launch, so a dispatcher that is stuck
+    /// reports failure and lets the other process take over rather than swallowing
+    /// the request and leaving the user with nothing.
+    /// </remarks>
+    public event Func<bool>? ActivationRequested;
 
     public static SingleInstance Acquire()
     {
@@ -56,38 +84,123 @@ public sealed class SingleInstance : IDisposable
 
             if (createdNew)
             {
-                return new SingleInstance(isPrimary: true, mutex, OpenActivationEvent(create: true));
+                return new SingleInstance(
+                    isPrimary: true,
+                    mutex,
+                    OpenEvent(ActivateEventName, create: true),
+                    OpenEvent(AcknowledgeEventName, create: true));
             }
 
             mutex.Dispose();
-            return new SingleInstance(isPrimary: false, mutex: null, OpenActivationEvent(create: false));
+            return new SingleInstance(
+                isPrimary: false,
+                mutex: null,
+                OpenEvent(ActivateEventName, create: false),
+                OpenEvent(AcknowledgeEventName, create: false));
         }
         catch (UnauthorizedAccessException)
         {
             // The mutex exists but belongs to a context we may not open: another
             // instance is definitely running.
             mutex?.Dispose();
-            return new SingleInstance(isPrimary: false, mutex: null, OpenActivationEvent(create: false));
+            return new SingleInstance(
+                isPrimary: false,
+                mutex: null,
+                OpenEvent(ActivateEventName, create: false),
+                OpenEvent(AcknowledgeEventName, create: false));
         }
         catch (Exception)
         {
             // If the synchronisation objects cannot be created at all, running is a
             // better outcome than refusing to start.
-            return new SingleInstance(isPrimary: true, mutex, activate: null);
+            mutex?.Dispose();
+            return new SingleInstance(isPrimary: true, mutex: null, activate: null, acknowledge: null);
         }
     }
 
-    /// <summary>Asks the running instance to show its window. Returns false if nobody answered.</summary>
+    /// <summary>
+    /// Asks the running instance to show its window and waits for it to confirm.
+    /// Returns false when nobody answered, which means the lock is held by a copy
+    /// that is not serving anyone.
+    /// </summary>
     public bool SignalExistingInstance()
     {
+        if (_activate is null)
+        {
+            return false;
+        }
+
         try
         {
-            return _activate?.Set() == true;
+            // Clear a reply left behind by an earlier launch, or this one would accept
+            // it as its own and conclude a wedged instance is healthy.
+            _acknowledge?.Reset();
+
+            if (!_activate.Set())
+            {
+                return false;
+            }
+
+            return _acknowledge is not null && _acknowledge.WaitOne(HandoverTimeout);
         }
         catch (Exception)
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Promotes this process to the primary instance after the copy holding the lock
+    /// failed to answer.
+    /// </summary>
+    /// <remarks>
+    /// Exiting at this point is what left the user with no window, no tray icon and
+    /// nothing to click - on every launch, until the machine was rebooted. Ending the
+    /// unresponsive copy is safe precisely because it has just proved it is serving
+    /// nobody: it was asked for a window and never produced one. This is the same
+    /// thing the installer already does before it replaces the files, and it is
+    /// restricted to processes running this exact executable.
+    /// </remarks>
+    public bool TryTakeOver(Action<string>? log = null)
+    {
+        EndUnresponsiveInstances(log);
+
+        // The kernel keeps the mutex alive until the last handle is closed, which
+        // trails process exit slightly, so give it a few tries rather than one.
+        for (var attempt = 0; attempt < 10 && !IsPrimary; attempt++)
+        {
+            try
+            {
+                var mutex = new Mutex(initiallyOwned: true, MutexName, out var createdNew);
+                if (createdNew)
+                {
+                    _mutex = mutex;
+                    IsPrimary = true;
+                    break;
+                }
+
+                mutex.Dispose();
+            }
+            catch (Exception)
+            {
+                // Try again; if it never works we still carry on below.
+            }
+
+            Thread.Sleep(200);
+        }
+
+        if (!IsPrimary)
+        {
+            // Something still holds the lock and still will not talk to us. Putting a
+            // usable window in front of the user beats honouring a lock whose owner
+            // has already failed to answer twice.
+            log?.Invoke("Tek örnek kilidi bırakılmadı; pencere yine de açılıyor.");
+            IsPrimary = true;
+        }
+
+        _activate ??= OpenEvent(ActivateEventName, create: true);
+        _acknowledge ??= OpenEvent(AcknowledgeEventName, create: true);
+        return true;
     }
 
     /// <summary>Starts watching for activation requests. Primary instance only.</summary>
@@ -128,7 +241,93 @@ public sealed class SingleInstance : IDisposable
                 return;
             }
 
-            ActivationRequested?.Invoke();
+            var shown = false;
+            try
+            {
+                shown = ActivationRequested?.Invoke() ?? false;
+            }
+            catch (Exception)
+            {
+                shown = false;
+            }
+
+            if (!shown)
+            {
+                // Staying quiet is deliberate: the launch that asked is waiting on the
+                // acknowledgement and will take over when it does not arrive.
+                continue;
+            }
+
+            try
+            {
+                _acknowledge?.Set();
+            }
+            catch (Exception)
+            {
+                // The other side falls back to taking over, which is still correct.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ends copies of this exact executable that are holding the lock without
+    /// answering. Never touches a different program that happens to share the name,
+    /// and never this process.
+    /// </summary>
+    private static void EndUnresponsiveInstances(Action<string>? log)
+    {
+        var self = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(self))
+        {
+            return;
+        }
+
+        Process[] candidates;
+        try
+        {
+            candidates = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(self));
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        var current = Environment.ProcessId;
+
+        foreach (var process in candidates)
+        {
+            try
+            {
+                if (process.Id == current)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(process.MainModule?.FileName, self, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                // A copy that started moments ago is a sibling still finding its feet -
+                // a command line verb, or the elevated relaunch of another shortcut -
+                // not the wedged instance this is recovering from.
+                if (DateTime.Now - process.StartTime < TimeSpan.FromSeconds(10))
+                {
+                    continue;
+                }
+
+                log?.Invoke($"Yanıt vermeyen kopya kapatılıyor (PID {process.Id}).");
+                process.Kill();
+                process.WaitForExit(3000);
+            }
+            catch (Exception)
+            {
+                // Already gone, or protected. The caller copes either way.
+            }
+            finally
+            {
+                process.Dispose();
+            }
         }
     }
 
@@ -136,13 +335,13 @@ public sealed class SingleInstance : IDisposable
     /// An auto-reset event every logged-on user may open, so a shortcut launched
     /// without elevation can still reach the elevated instance.
     /// </summary>
-    private static EventWaitHandle? OpenActivationEvent(bool create)
+    private static EventWaitHandle? OpenEvent(string name, bool create)
     {
         try
         {
             if (!create)
             {
-                return EventWaitHandle.TryOpenExisting(ActivateEventName, out var existing) ? existing : null;
+                return EventWaitHandle.TryOpenExisting(name, out var existing) ? existing : null;
             }
 
             var security = new EventWaitHandleSecurity();
@@ -152,11 +351,11 @@ public sealed class SingleInstance : IDisposable
                 AccessControlType.Allow));
 
             return EventWaitHandleAcl.TryOpenExisting(
-                ActivateEventName,
+                name,
                 EventWaitHandleRights.Synchronize | EventWaitHandleRights.Modify,
                 out var opened)
                 ? opened
-                : EventWaitHandleAcl.Create(false, EventResetMode.AutoReset, ActivateEventName, out _, security);
+                : EventWaitHandleAcl.Create(false, EventResetMode.AutoReset, name, out _, security);
         }
         catch (Exception)
         {
@@ -178,6 +377,7 @@ public sealed class SingleInstance : IDisposable
         }
 
         _activate?.Dispose();
+        _acknowledge?.Dispose();
 
         if (_mutex is not null)
         {

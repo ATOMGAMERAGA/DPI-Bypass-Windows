@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
+using DpiBypass.Core.Logging;
 using DpiBypass.Core.Vodafone;
 
 namespace DpiBypass.Core.Config;
@@ -144,6 +145,7 @@ public sealed class ConfigStore
     {
         var settings = ReadJson<AppSettings>(_settingsPath) ?? new AppSettings();
         settings.Networks = ReadJson<Dictionary<string, NetworkProfile>>(_profilesPath) ?? [];
+        Normalise(settings);
         return settings;
     }
 
@@ -164,22 +166,83 @@ public sealed class ConfigStore
         }
     }
 
+    /// <summary>
+    /// A file that parses can still be wrong: <c>"ExtraDomains": null</c> is valid JSON,
+    /// and the deserialiser writes that null straight over the property initialiser. The
+    /// rest of the app treats these as always present - the matcher walks them on the
+    /// packet path - so every load is put right here, the one place they all go through.
+    /// </summary>
+    private static void Normalise(AppSettings settings)
+    {
+        settings.ExtraDomains = CleanDomains(settings.ExtraDomains);
+        settings.ExcludedDomains = CleanDomains(settings.ExcludedDomains);
+
+        // A null entry throws in every lookup that walks this list, and a keyless one can
+        // never name a network anyway.
+        var hotspotNetworks = settings.HotspotTtlNetworks;
+        settings.HotspotTtlNetworks = hotspotNetworks is null
+            ? []
+            : [.. hotspotNetworks
+                .Where(network => network is not null && !string.IsNullOrWhiteSpace(network.Key))
+                .Select(network => network with
+                {
+                    DisplayName = network.DisplayName ?? string.Empty,
+                    AdapterName = network.AdapterName ?? string.Empty,
+                })];
+
+        settings.Networks = settings.Networks
+            .Where(pair => pair.Value is not null && !string.IsNullOrWhiteSpace(pair.Key))
+            .ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value with
+                {
+                    // The profile is looked up by the dictionary key, so that is the key
+                    // it has, whatever the file says.
+                    Key = pair.Key,
+                    DisplayName = pair.Value.DisplayName ?? string.Empty,
+                });
+    }
+
+    private static List<string> CleanDomains(List<string>? domains) => domains is null
+        ? []
+        : [.. domains.Where(domain => !string.IsNullOrWhiteSpace(domain))];
+
     private static T? ReadJson<T>(string path)
         where T : class
     {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
         try
         {
-            if (!File.Exists(path))
-            {
-                return null;
-            }
-
             return JsonSerializer.Deserialize<T>(File.ReadAllText(path), Options);
+        }
+        catch (JsonException ex)
+        {
+            // Silently falling back to defaults would let the next save overwrite a file
+            // the user can still fix by hand, so it is kept and the loss is reported.
+            AppLog.Warning($"'{Path.GetFileName(path)}' is not valid JSON ({ex.Message}); defaults are in use.");
+            PreserveUnreadable(path);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"'{Path.GetFileName(path)}' could not be read ({ex.Message}); defaults are in use.");
+            return null;
+        }
+    }
+
+    private static void PreserveUnreadable(string path)
+    {
+        try
+        {
+            File.Move(path, path + ".bad", overwrite: true);
         }
         catch (Exception)
         {
-            // A corrupt file must not stop the app; defaults are always usable.
-            return null;
+            // Keeping the old file is a courtesy; defaults load either way.
         }
     }
 

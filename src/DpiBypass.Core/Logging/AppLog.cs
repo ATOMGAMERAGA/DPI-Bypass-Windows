@@ -26,7 +26,9 @@ public static class AppLog
 
     private static readonly ConcurrentQueue<LogEntry> Buffer = new();
     private static readonly Lock FileGate = new();
+    private static string? _logDirectory;
     private static string? _filePath;
+    private static DateOnly _fileDate;
 
     public static event Action<LogEntry>? Written;
 
@@ -39,12 +41,16 @@ public static class AppLog
         try
         {
             AppPaths.EnsureCreated();
-            _filePath = Path.Combine(AppPaths.LogDirectory, $"dpibypass-{DateTime.Now:yyyy-MM-dd}.log");
-            PruneOldFiles();
+
+            lock (FileGate)
+            {
+                _logDirectory = AppPaths.LogDirectory;
+                ResolveFile(_logDirectory, DateTime.Now);
+            }
         }
         catch (Exception)
         {
-            _filePath = null; // memory-only logging is still better than crashing
+            _logDirectory = null; // memory-only logging is still better than crashing
         }
     }
 
@@ -73,13 +79,25 @@ public static class AppLog
             // Bounded on purpose - the UI shows a live tail, not the whole history.
         }
 
-        Written?.Invoke(entry);
+        try
+        {
+            Written?.Invoke(entry);
+        }
+        catch (Exception)
+        {
+            // This runs on whichever thread logged - a WinDivert worker, the TTL fix,
+            // the IPC accept loop - and the UI subscriber marshals through a Dispatcher
+            // that throws once shutdown has begun. An unhandled exception there would
+            // take the process down, so a log call must never be able to hurt its caller.
+        }
+
         AppendToFile(entry);
     }
 
     private static void AppendToFile(LogEntry entry)
     {
-        if (_filePath is null)
+        var directory = _logDirectory;
+        if (directory is null)
         {
             return;
         }
@@ -89,7 +107,7 @@ public static class AppLog
             lock (FileGate)
             {
                 File.AppendAllText(
-                    _filePath,
+                    ResolveFile(directory, entry.Timestamp.LocalDateTime),
                     $"{entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{entry.Level}] {entry.Message}{Environment.NewLine}",
                     Encoding.UTF8);
             }
@@ -101,6 +119,30 @@ public static class AppLog
         catch (UnauthorizedAccessException)
         {
         }
+    }
+
+    /// <summary>
+    /// The file for the day an entry belongs to. Caller must hold <see cref="FileGate"/>.
+    /// </summary>
+    /// <remarks>
+    /// Resolved per write rather than once at startup: an instance the logon task
+    /// started can stay up for weeks, and everything it logged would otherwise pile
+    /// into the file named after the day it happened to boot on.
+    /// </remarks>
+    private static string ResolveFile(string directory, DateTime stamp)
+    {
+        var day = DateOnly.FromDateTime(stamp);
+        var path = _filePath;
+
+        if (path is null || day != _fileDate)
+        {
+            path = Path.Combine(directory, $"dpibypass-{day:yyyy-MM-dd}.log");
+            _filePath = path;
+            _fileDate = day;
+            PruneOldFiles();
+        }
+
+        return path;
     }
 
     private static void PruneOldFiles()

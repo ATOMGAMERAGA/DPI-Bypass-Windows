@@ -29,22 +29,6 @@ public enum SplitAnchor
     HostStart = 3,
 }
 
-/// <summary>Where a ClientHello is cut into several TLS records.</summary>
-public enum TlsRecordSplit
-{
-    /// <summary>Leave the record layer alone.</summary>
-    None = 0,
-
-    /// <summary>Cut in the middle of the SNI hostname.</summary>
-    HostMiddle = 1,
-
-    /// <summary>Cut immediately before the SNI hostname.</summary>
-    HostStart = 2,
-
-    /// <summary>Cut at a fixed offset into the handshake body.</summary>
-    Absolute = 3,
-}
-
 /// <summary>How a decoy packet is made unacceptable to the real server.</summary>
 public enum FakeMode
 {
@@ -60,7 +44,15 @@ public enum FakeMode
     BadChecksum = 3,
 }
 
-/// <summary>Plaintext HTTP header mangling. Ignored for TLS.</summary>
+/// <summary>
+/// Plaintext HTTP header mangling. Ignored for TLS.
+/// </summary>
+/// <remarks>
+/// Every trick here rewrites bytes in place. None of them may change the length of
+/// the request: the engine sees outbound packets only, so the local TCP stack keeps
+/// the byte count it already committed to, and a longer or shorter payload would make
+/// the peer acknowledge data that stack never sent.
+/// </remarks>
 [Flags]
 public enum HttpTricks
 {
@@ -69,11 +61,12 @@ public enum HttpTricks
     /// <summary>"Host:" becomes "hOSt:".</summary>
     HostCase = 1,
 
-    /// <summary>An extra space between the colon and the value.</summary>
-    ExtraSpace = 2,
-
-    /// <summary>A trailing dot on the hostname, which DNS accepts and naive filters do not.</summary>
-    DottedHost = 4,
+    /// <summary>
+    /// The space after "Host:" becomes a tab. HTTP allows either as optional
+    /// whitespace, so the server reads the same request, while a filter matching the
+    /// literal "Host: " misses the header.
+    /// </summary>
+    HostTab = 2,
 }
 
 /// <summary>
@@ -98,15 +91,6 @@ public sealed record BypassStrategy
     /// <summary>Optional second cut, producing three segments. Zero disables it.</summary>
     public int SecondSplitPosition { get; init; }
 
-    /// <summary>
-    /// Split the ClientHello across several TLS records. Valid TLS, costs no
-    /// latency, and ignored for plaintext HTTP.
-    /// </summary>
-    public TlsRecordSplit TlsRecords { get; init; } = TlsRecordSplit.None;
-
-    /// <summary>Handshake-body offset used by <see cref="TlsRecordSplit.Absolute"/>.</summary>
-    public int TlsRecordPosition { get; init; } = 1;
-
     public FakeMode Fake { get; init; } = FakeMode.None;
 
     /// <summary>TTL used by <see cref="FakeMode.ExpiredTtl"/>.</summary>
@@ -125,8 +109,7 @@ public sealed record BypassStrategy
         Split == SplitMode.None
         && Fake == FakeMode.None
         && !OutOfBand
-        && Http == HttpTricks.None
-        && TlsRecords == TlsRecordSplit.None;
+        && Http == HttpTricks.None;
 
     public override string ToString() => Id;
 }

@@ -45,27 +45,27 @@ public static class IspCatalog
     // SNI split, which is the cheapest thing we can do.
     private static readonly string[] MobileOrder =
     [
-        "fake-ttl-split-sni", "tlsrec-sni", "fake-badseq-split-sni", "fake-ttl6-split-sni",
-        "disorder-sni", "tlsrec-split-sni", "fake-badsum-disorder-sni", "multisplit-sni",
+        "fake-ttl-split-sni", "fake-badseq-split-sni", "fake-ttl6-split-sni",
+        "disorder-sni", "fake-badsum-disorder-sni", "multisplit-sni",
         "aggressive-combo", "split-sni", "fake-ttl8-split2", "oob-split-sni",
-        "tlsrec-disorder", "disorder2", "split2",
+        "disorder2", "split2",
     ];
 
-    // Fixed lines usually fall to record fragmentation alone, which is free; try it
+    // Fixed lines usually fall to a plain SNI split, which costs nothing; try that
     // before anything that waits on a retransmission.
     private static readonly string[] FixedOrder =
     [
-        "tlsrec-sni", "split-sni", "tlsrec-split-sni", "fake-ttl-split-sni",
+        "split-sni", "fake-ttl-split-sni",
         "disorder-sni", "fake-badseq-split-sni", "multisplit-sni", "split2",
-        "fake-ttl6-split-sni", "fake-badsum-disorder-sni", "tlsrec-disorder",
+        "fake-ttl6-split-sni", "fake-badsum-disorder-sni",
         "disorder2", "oob-split-sni", "fake-ttl8-split2", "aggressive-combo",
     ];
 
     private static readonly string[] HotspotOrder =
     [
-        "fake-badseq-split-sni", "fake-ttl-split-sni", "tlsrec-sni", "aggressive-combo",
-        "multisplit-sni", "disorder-sni", "tlsrec-split-sni", "fake-badsum-disorder-sni",
-        "fake-ttl6-split-sni", "split-sni", "oob-split-sni", "tlsrec-disorder",
+        "fake-badseq-split-sni", "fake-ttl-split-sni", "aggressive-combo",
+        "multisplit-sni", "disorder-sni", "fake-badsum-disorder-sni",
+        "fake-ttl6-split-sni", "split-sni", "oob-split-sni",
         "disorder2", "split2", "fake-ttl8-split2",
     ];
 

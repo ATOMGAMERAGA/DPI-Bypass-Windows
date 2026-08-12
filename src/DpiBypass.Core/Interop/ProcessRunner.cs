@@ -84,6 +84,16 @@ public static class ProcessRunner
         return new ProcessResult(process.ExitCode, stdout.ToString(), stderr.ToString());
     }
 
+    /// <summary>
+    /// Windows PowerShell encodes redirected stdout with <c>[Console]::OutputEncoding</c>,
+    /// which for a windowless child is the system OEM code page - CP857 on Turkish
+    /// Windows - so adapter names such as "Kablosuz Ağ Bağlantısı" would arrive as
+    /// replacement characters. This pins the child to BOM-less UTF-8 to match how the
+    /// output is decoded on this side.
+    /// </summary>
+    private const string Utf8OutputPrelude =
+        "$OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; ";
+
     /// <summary>Runs a PowerShell snippet with no profile and no interactive prompts.</summary>
     public static Task<ProcessResult> PowerShellAsync(
         string script,
@@ -91,7 +101,7 @@ public static class ProcessRunner
         CancellationToken cancellationToken = default)
         => RunAsync(
             "powershell.exe",
-            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", Utf8OutputPrelude + script],
             timeout,
             cancellationToken);
 

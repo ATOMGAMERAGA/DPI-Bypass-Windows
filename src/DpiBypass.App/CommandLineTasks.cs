@@ -29,6 +29,31 @@ namespace DpiBypass.App;
 /// </remarks>
 internal static class CommandLineTasks
 {
+    /// <summary>
+    /// The verbs that do their work without a window. Anything else - including
+    /// <c>--minimized</c> - is a normal launch.
+    /// </summary>
+    private static readonly HashSet<string> HeadlessVerbs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "install-autostart", "uninstall-autostart", "restore-dns",
+        "strategies", "isps", "version", "v", "help", "h", "?",
+        "status", "test", "search", "domains", "enable", "disable", "vodafone",
+    };
+
+    /// <summary>
+    /// Answers, without doing any work, whether this launch is a headless job.
+    /// </summary>
+    /// <remarks>
+    /// Startup has to know which path it is on before it decides whether to build a
+    /// window, and it has to know synchronously: asking the question by starting the
+    /// job and waiting for the answer is what used to put installer housekeeping and
+    /// pipe round-trips in front of the UI.
+    /// </remarks>
+    public static bool IsHeadlessVerb(string[] args)
+        => args.Length > 0 && HeadlessVerbs.Contains(NormaliseVerb(args[0]));
+
+    private static string NormaliseVerb(string argument) => argument.TrimStart('-', '/').ToLowerInvariant();
+
     /// <summary>Returns true when the argument was a headless job and the process should exit.</summary>
     public static async Task<bool> TryRunAsync(string[] args)
     {
@@ -37,7 +62,7 @@ internal static class CommandLineTasks
             return false;
         }
 
-        var verb = args[0].TrimStart('-', '/').ToLowerInvariant();
+        var verb = NormaliseVerb(args[0]);
         var argument = args.Length > 1 ? args[1] : null;
 
         switch (verb)
@@ -48,7 +73,7 @@ internal static class CommandLineTasks
                 return true;
 
             case "uninstall-autostart":
-                await new AutoStartManager(log: AppLog.InfoSink).DisableAsync().ConfigureAwait(false);
+                await DisableAutoStartAsync().ConfigureAwait(false);
                 return true;
 
             case "restore-dns":
@@ -211,15 +236,38 @@ internal static class CommandLineTasks
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool FreeConsole();
 
+    /// <summary>
+    /// Turns autostart on because the installer's checkbox was ticked.
+    /// </summary>
+    /// <remarks>
+    /// The choice is written to the settings file, not just acted on. The app
+    /// reconciles the two at every launch - a setting that says "on" with no task
+    /// registered puts the task back - so acting without recording the decision would
+    /// let the next launch undo whatever the installer just did.
+    /// </remarks>
     private static async Task InstallAutoStartAsync()
     {
-        var settings = new ConfigStore().Load();
-        var manager = new AutoStartManager(log: AppLog.InfoSink);
+        var store = new ConfigStore();
+        var settings = store.Load();
 
-        if (settings.StartWithWindows)
-        {
-            await manager.EnableAsync(settings.StartMinimised).ConfigureAwait(false);
-        }
+        settings.StartWithWindows = true;
+        store.Save(settings);
+
+        await new AutoStartManager(log: AppLog.InfoSink)
+            .EnableAsync(settings.StartMinimised)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>Turns autostart off, recording the choice for the same reason.</summary>
+    private static async Task DisableAutoStartAsync()
+    {
+        var store = new ConfigStore();
+        var settings = store.Load();
+
+        settings.StartWithWindows = false;
+        store.Save(settings);
+
+        await new AutoStartManager(log: AppLog.InfoSink).DisableAsync().ConfigureAwait(false);
     }
 
     private static async Task RestoreDnsAsync()

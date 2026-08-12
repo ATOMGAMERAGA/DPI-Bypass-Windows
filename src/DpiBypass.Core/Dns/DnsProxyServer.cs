@@ -27,6 +27,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
     private Socket? _udp4;
     private Socket? _udp6;
     private Socket? _tcp4;
+    private Socket? _tcp6;
     private long _served;
     private long _cacheHits;
 
@@ -44,6 +45,9 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
     public int Port { get; private set; } = 53;
 
+    /// <summary>True when the IPv6 loopback listeners came up too.</summary>
+    public bool HasIPv6 { get; private set; }
+
     /// <summary>
     /// Raised with each distinct hostname the machine looks up. The discovery pass
     /// uses it to notice sites it has not measured yet.
@@ -54,6 +58,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
     public bool TryStart(int port = 53)
     {
         Port = port;
+        HasIPv6 = false;
 
         try
         {
@@ -76,11 +81,19 @@ public sealed class DnsProxyServer : IAsyncDisposable
         {
             _udp6 = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp);
             _udp6.Bind(new IPEndPoint(IPAddress.IPv6Loopback, port));
+
+            // Windows retries over TCP whenever an answer comes back truncated, so a
+            // UDP-only [::1] listener would look alive and then time out on big replies.
+            _tcp6 = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
+            _tcp6.Bind(new IPEndPoint(IPAddress.IPv6Loopback, port));
+            _tcp6.Listen(64);
         }
         catch (SocketException)
         {
             _udp6?.Dispose();
             _udp6 = null;
+            _tcp6?.Dispose();
+            _tcp6 = null;
         }
 
         _workers.Add(Task.Run(() => ServeUdpAsync(_udp4!, _stopping.Token)));
@@ -90,7 +103,12 @@ public sealed class DnsProxyServer : IAsyncDisposable
         }
 
         _workers.Add(Task.Run(() => ServeTcpAsync(_tcp4!, _stopping.Token)));
+        if (_tcp6 is not null)
+        {
+            _workers.Add(Task.Run(() => ServeTcpAsync(_tcp6, _stopping.Token)));
+        }
 
+        HasIPv6 = _udp6 is not null && _tcp6 is not null;
         IsRunning = true;
         _log?.Invoke($"DNS proxy listening on 127.0.0.1:{port} (UDP + TCP).");
         return true;
@@ -158,9 +176,15 @@ public sealed class DnsProxyServer : IAsyncDisposable
             {
                 return;
             }
-            catch (Exception)
+            catch (ObjectDisposedException)
             {
                 return;
+            }
+            catch (SocketException)
+            {
+                // One client resetting mid-accept must not take the listener down for
+                // good: the port would stay bound while every later query times out.
+                continue;
             }
 
             _ = Task.Run(async () =>
@@ -321,7 +345,8 @@ public sealed class DnsProxyServer : IAsyncDisposable
         _udp4?.Dispose();
         _udp6?.Dispose();
         _tcp4?.Dispose();
-        _udp4 = _udp6 = _tcp4 = null;
+        _tcp6?.Dispose();
+        _udp4 = _udp6 = _tcp4 = _tcp6 = null;
     }
 
     public async ValueTask DisposeAsync()

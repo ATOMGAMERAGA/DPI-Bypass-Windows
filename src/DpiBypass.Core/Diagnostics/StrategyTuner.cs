@@ -53,6 +53,7 @@ public sealed class StrategyTuner
     {
         var previous = _engine.Strategy;
         var trials = new List<StrategyTrial>();
+        BypassStrategy? winner = null;
 
         try
         {
@@ -65,6 +66,7 @@ public sealed class StrategyTuner
                 if (control.Success)
                 {
                     _log?.Invoke("discord.com is reachable without any desync; this network is not filtering it.");
+                    winner = StrategyLibrary.Passthrough;
                     return new TuningResult(StrategyLibrary.Passthrough, trials, NetworkWasAlreadyOpen: true);
                 }
 
@@ -103,14 +105,18 @@ public sealed class StrategyTuner
                 return new TuningResult(null, trials, NetworkWasAlreadyOpen: false);
             }
 
-            var winner = successes.OrderBy(t => t.Result.Elapsed).First();
-            _log?.Invoke($"Selected '{winner.Strategy.Id}' ({winner.Result.Elapsed.TotalMilliseconds:F0} ms).");
-            return new TuningResult(winner.Strategy, trials, NetworkWasAlreadyOpen: false);
+            var fastest = successes.OrderBy(t => t.Result.Elapsed).First();
+            winner = fastest.Strategy;
+            _log?.Invoke($"Selected '{fastest.Strategy.Id}' ({fastest.Result.Elapsed.TotalMilliseconds:F0} ms).");
+            return new TuningResult(fastest.Strategy, trials, NetworkWasAlreadyOpen: false);
         }
-        catch (OperationCanceledException)
+        finally
         {
-            _engine.Strategy = previous;
-            throw;
+            // Every candidate is installed on the engine in order to measure it, so a
+            // sweep that ends without a winner - cancelled, failed, or nothing got
+            // through - would otherwise leave the machine desyncing every connection
+            // with whichever recipe happened to be tried last.
+            _engine.Strategy = winner ?? previous;
         }
     }
 
@@ -130,24 +136,19 @@ public sealed class StrategyTuner
             var result = await _tester.ProbeAsync(ConnectivityTester.PrimaryHost, fetchHttp: false, cancellationToken)
                 .ConfigureAwait(false);
 
-            if (result.Success && (best is null || result.Elapsed < best.Elapsed))
+            // A reset lands far quicker than a real handshake, so elapsed time only
+            // separates two passes; a pass always outranks a failure however slow it was.
+            if (best is null
+                || (result.Success && !best.Success)
+                || (result.Success && best.Success && result.Elapsed < best.Elapsed))
             {
                 best = result;
-            }
-            else
-            {
-                best ??= result;
             }
 
             if (result.Success)
             {
-                // A pass on the first try is enough to keep the whole sweep quick;
-                // the second attempt only exists to catch a flaky first packet.
-                if (attempt == 0)
-                {
-                    continue;
-                }
-
+                // A pass is enough to keep the whole sweep quick; the further attempts
+                // only exist to catch a flaky first packet.
                 break;
             }
         }

@@ -360,10 +360,16 @@ public class ConfigStoreTests
         {
             var settings = new ConfigStore(path, path).Load();
             Assert.Equal(ProtectionScope.DiscordAndBrowsers, settings.Scope);
+
+            // The unreadable file is kept rather than left to be overwritten by the
+            // next save, so a user who hand-edited it can still get their settings back.
+            Assert.True(File.Exists(path + ".bad"));
+            Assert.False(File.Exists(path));
         }
         finally
         {
             File.Delete(path);
+            File.Delete(path + ".bad");
         }
     }
 }

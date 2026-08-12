@@ -50,18 +50,25 @@ birlikte ele alır.
 
 | Yöntem | Ne yapar |
 | --- | --- |
-| **TLS kayıt parçalama** | ClientHello, alan adının ortasından birden çok **TLS kaydına** bölünür. TLS açısından tamamen geçerlidir; hiçbir paket düşmez, **ek gecikme yoktur**. Kayıt katmanını birleştirmeyen denetleyici SNI'yi bulamaz. |
-| Bölme | Alan adının tam ortasından iki TCP parçasına ayırır |
+| **Bölme** | Alan adının tam ortasından iki TCP parçasına ayırır; hiçbir paket düşmediği için ek gecikme getirmez |
 | Ters sıralı bölme | Parçaları ters sırada gönderir |
 | Sahte paket (düşük TTL) | Denetleyiciye zararsız bir el sıkışma gösterir; paket sunucuya varmadan TTL ile ölür |
 | Sahte paket (geçersiz sıra no) | Sunucunun pencere dışı sayıp attığı bir kopya gönderir |
 | Sahte paket (bozuk sağlama) | Sunucunun sağlama hatası nedeniyle attığı bir kopya gönderir |
 | Üç parçalı bölme | İki noktadan keser |
 | Bant dışı bayt | URG bayrağıyla tek bir bayt önden gönderir |
-| HTTP başlık oyunları | `Host:` başlığının yazımını değiştirir |
+| HTTP başlık oyunları | `Host:` başlığının yazımını ve ayırıcı boşluğunu değiştirir |
 
-Bu yöntemler kombinasyonlarıyla birlikte **17 hazır tarif** oluşturur
+Bu yöntemler kombinasyonlarıyla birlikte **14 hazır tarif** oluşturur
 (`DpiBypass.exe strategies`).
+
+Her tarifin ortak bir kuralı vardır: paketin **bayt sayısı değişmez**. Motor
+yalnızca giden paketleri görür, dolayısıyla Windows'un TCP yığını kendi
+gönderdiği bayt sayısını bilir. Bayt eklemek (örneğin ClientHello'yu birden çok
+TLS kaydına bölmek, kayıt başına 5 bayt başlık ekler) sunucunun hiç
+gönderilmemiş veriyi onaylamasına yol açar; Windows böyle bir onayı atar ve
+bağlantı zaman aşımına kadar asılı kalır. Bu yüzden yeniden çerçeveleme yerine
+yalnızca **yeniden bölme, sıralama ve yerinde bayt değişimi** kullanılır.
 
 ## Kendi kendine ayar bulması
 
@@ -169,7 +176,7 @@ Tasarım gereği yok denecek kadar az:
 - Trafik bir vekil sunucudan (proxy) veya VPN'den geçmez; paketler doğrudan
   hedefe gider.
 - Otomatik ayarlama, çalışan yöntemler arasından en düşük gecikmeliyi seçer;
-  TLS kayıt parçalama hiçbir paket düşürmediği için sıfır ek gecikme getirir.
+  bölme yöntemleri hiçbir paket düşürmediği için sıfır ek gecikme getirir.
 
 ## Ekran arayüzü
 
