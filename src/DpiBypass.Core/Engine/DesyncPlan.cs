@@ -34,10 +34,20 @@ public sealed record DesyncSegment
 }
 
 /// <summary>The full rewrite of one intercepted packet.</summary>
-public sealed record DesyncPlan(byte[] Payload, IReadOnlyList<DesyncSegment> Segments)
+/// <param name="PayloadRewritten">
+/// True when <paramref name="Payload"/> differs from the bytes that arrived. Without
+/// this the engine cannot tell a single full-length segment carrying a rewritten
+/// payload apart from one carrying the original, and would forward the untouched
+/// packet - silently dropping every header trick that does not also cut the segment.
+/// </param>
+public sealed record DesyncPlan(
+    byte[] Payload,
+    IReadOnlyList<DesyncSegment> Segments,
+    bool PayloadRewritten = false)
 {
     /// <summary>True when the engine can simply forward the original packet untouched.</summary>
-    public bool IsNoOp => Segments.Count == 1
+    public bool IsNoOp => !PayloadRewritten
+        && Segments.Count == 1
         && Segments[0].Offset == 0
         && Segments[0].Length == Payload.Length
         && Segments[0].FakePayload is null
@@ -51,6 +61,17 @@ public sealed record DesyncPlan(byte[] Payload, IReadOnlyList<DesyncSegment> Seg
 }
 
 /// <summary>Turns a <see cref="BypassStrategy"/> plus one observed packet into a concrete send plan.</summary>
+/// <remarks>
+/// One rule governs everything here: the plan may reorder, cut and duplicate the
+/// payload, but it may never change how many bytes of it there are. The engine is
+/// handed outbound packets only, so the local TCP stack has already committed to the
+/// byte count it gave us and keeps its own SND.NXT. Send more bytes than that and the
+/// peer acknowledges data the stack never sent, which Windows answers by discarding
+/// the segment - the handshake then stalls until it times out. That is why the
+/// record-layer re-framing this planner used to do had to go: it is valid TLS, but it
+/// adds five bytes per record, and a stateless rewriter cannot fix up the sequence
+/// space in both directions to pay for them.
+/// </remarks>
 public static class DesyncPlanner
 {
     /// <summary>Nothing below this many bytes is worth cutting up.</summary>
@@ -61,6 +82,7 @@ public static class DesyncPlanner
         var working = payload.ToArray();
         var hostOffset = -1;
         var hostLength = 0;
+        var rewritten = false;
 
         if (isTls)
         {
@@ -72,28 +94,12 @@ public static class DesyncPlanner
         }
         else if (HttpRequestHead.TryParse(working, out var head) && head.HasHost)
         {
-            working = ApplyHttpTricks(strategy.Http, working, ref head);
+            rewritten = ApplyHttpTricks(strategy.Http, working, head);
             hostOffset = head.HostValueOffset;
             hostLength = head.HostValueLength;
         }
 
-        if (isTls && strategy.TlsRecords != TlsRecordSplit.None)
-        {
-            var fragmented = ApplyTlsRecordSplit(strategy, working, hostOffset, hostLength);
-            if (fragmented is not null)
-            {
-                working = fragmented;
-
-                // Every offset past the first record header just moved, so host
-                // anchored TCP cuts no longer mean anything. Falling back to the
-                // absolute position is deliberate: the point of combining the two is
-                // to cut the *first record*, not the hostname a second time.
-                hostOffset = -1;
-                hostLength = 0;
-            }
-        }
-
-        if (strategy.IsPassthrough && working.Length == payload.Length)
+        if (strategy.IsPassthrough)
         {
             return DesyncPlan.Passthrough(working);
         }
@@ -113,7 +119,10 @@ public static class DesyncPlanner
 
         if (strategy.Fake != FakeMode.None)
         {
-            var decoyHost = FakePayloadFactory.DecoyHosts[Math.Abs(hostName?.GetHashCode() ?? 0) % FakePayloadFactory.DecoyHosts.Length];
+            // Unsigned: string hashing is randomised per process and may hand back
+            // int.MinValue, which Math.Abs cannot represent.
+            var hash = (uint)(hostName?.GetHashCode() ?? 0);
+            var decoyHost = FakePayloadFactory.DecoyHosts[hash % (uint)FakePayloadFactory.DecoyHosts.Length];
             var decoy = isTls
                 ? FakePayloadFactory.CreateTlsClientHello(decoyHost, working.Length)
                 : FakePayloadFactory.CreateHttpRequest(decoyHost, working.Length);
@@ -148,28 +157,7 @@ public static class DesyncPlanner
         }
 
         segments.AddRange(realSegments);
-        return new DesyncPlan(working, segments);
-    }
-
-    /// <summary>
-    /// Re-frames the ClientHello into several TLS records. Returns null when the
-    /// packet is not a complete, splittable record, in which case the caller carries
-    /// on with the payload untouched.
-    /// </summary>
-    private static byte[]? ApplyTlsRecordSplit(BypassStrategy strategy, byte[] payload, int hostOffset, int hostLength)
-    {
-        var cut = strategy.TlsRecords switch
-        {
-            TlsRecordSplit.HostMiddle when hostOffset >= 0 =>
-                TlsRecordFragmenter.ToBodyOffset(hostOffset + (hostLength / 2)),
-            TlsRecordSplit.HostStart when hostOffset >= 0 =>
-                TlsRecordFragmenter.ToBodyOffset(hostOffset),
-            // No hostname to aim at: cutting anywhere still denies the inspector a
-            // single record containing the whole extension block.
-            _ => strategy.TlsRecordPosition,
-        };
-
-        return TlsRecordFragmenter.Split(payload, cut);
+        return new DesyncPlan(working, segments, rewritten);
     }
 
     /// <summary>Works out the absolute cut offsets, deduplicated and in ascending order.</summary>
@@ -215,65 +203,44 @@ public static class DesyncPlanner
         }
     }
 
-    /// <summary>Rewrites the Host header in place (or grows the buffer when a trick needs more room).</summary>
-    private static byte[] ApplyHttpTricks(HttpTricks tricks, byte[] payload, ref HttpRequestHeadInfo head)
+    /// <summary>
+    /// Rewrites the Host header in place. Returns true when anything changed.
+    /// </summary>
+    /// <remarks>
+    /// Every trick is a byte-for-byte substitution, so the header offsets the caller
+    /// already holds stay valid and the segment keeps the length the local TCP stack
+    /// is expecting. Tricks that inserted bytes - a second space, a trailing root dot -
+    /// are not available here for that reason: on a plaintext connection they moved
+    /// the peer's acknowledgement past what the stack believed it had sent, which cost
+    /// the whole request rather than just the trick.
+    /// </remarks>
+    private static bool ApplyHttpTricks(HttpTricks tricks, byte[] payload, HttpRequestHeadInfo head)
     {
-        if (tricks == HttpTricks.None)
-        {
-            return payload;
-        }
+        var changed = false;
 
         if (tricks.HasFlag(HttpTricks.HostCase))
         {
-            // "Host:" -> "hOSt:" - same length, so offsets stay valid.
+            // "Host:" -> "hOSt:"
             payload[head.HostHeaderNameOffset] = (byte)'h';
             payload[head.HostHeaderNameOffset + 1] = (byte)'O';
             payload[head.HostHeaderNameOffset + 2] = (byte)'S';
             payload[head.HostHeaderNameOffset + 3] = (byte)'t';
+            changed = true;
         }
 
-        var insertions = new List<(int Offset, byte Value)>(2);
-        if (tricks.HasFlag(HttpTricks.ExtraSpace))
+        if (tricks.HasFlag(HttpTricks.HostTab))
         {
-            insertions.Add((head.HostValueOffset, (byte)' '));
-        }
-
-        if (tricks.HasFlag(HttpTricks.DottedHost))
-        {
-            insertions.Add((head.HostValueOffset + head.HostValueLength, (byte)'.'));
-        }
-
-        if (insertions.Count == 0)
-        {
-            return payload;
-        }
-
-        var result = new byte[payload.Length + insertions.Count];
-        var source = 0;
-        var target = 0;
-        var hostValueOffset = head.HostValueOffset;
-        var hostValueLength = head.HostValueLength;
-
-        foreach (var (offset, value) in insertions.OrderBy(i => i.Offset))
-        {
-            var take = offset - source;
-            Array.Copy(payload, source, result, target, take);
-            source += take;
-            target += take;
-            result[target++] = value;
-
-            if (offset <= head.HostValueOffset)
+            // Only a real space may become a tab: with the value hard against the
+            // colon there is nothing to substitute, and the byte before it is the
+            // colon itself.
+            var separator = head.HostValueOffset - 1;
+            if (separator > 0 && payload[separator] == (byte)' ')
             {
-                hostValueOffset++;
-            }
-            else
-            {
-                hostValueLength++;
+                payload[separator] = (byte)'\t';
+                changed = true;
             }
         }
 
-        Array.Copy(payload, source, result, target, payload.Length - source);
-        head = head with { HostValueOffset = hostValueOffset, HostValueLength = hostValueLength };
-        return result;
+        return changed;
     }
 }

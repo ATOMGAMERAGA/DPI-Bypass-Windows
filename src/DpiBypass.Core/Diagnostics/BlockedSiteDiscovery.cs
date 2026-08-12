@@ -128,6 +128,11 @@ public sealed class BlockedSiteDiscovery : IDisposable
             // Nothing to compare against until the tuner has settled on something.
             if (_engine.Strategy.IsPassthrough)
             {
+                // The hostname was written off as seen before the probe ran. Leaving it
+                // that way spends its hourly slot on a measurement that never happened -
+                // and this is the state the app is in for the whole of the first sweep,
+                // which is when most of a session's hostnames go past.
+                _seen.TryRemove(hostName, out _);
                 return;
             }
 

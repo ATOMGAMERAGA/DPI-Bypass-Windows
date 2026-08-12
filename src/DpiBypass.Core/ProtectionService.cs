@@ -161,53 +161,69 @@ public sealed class ProtectionService : IAsyncDisposable
 
             // A stop/start cycle would otherwise leave the previous source behind.
             _lifetime?.Dispose();
-            _lifetime = new CancellationTokenSource();
+            var lifetime = new CancellationTokenSource();
+            _lifetime = lifetime;
 
-            _resolver = new DohResolver();
-            _dnsConfigurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
-            _tester = new ConnectivityTester(_resolver);
-
-            await ConfigureDnsAsync(_lifetime.Token).ConfigureAwait(false);
-
-            _portMap = new ProcessPortMap(AppLog.InfoSink);
-            if (!_portMap.TryStart())
+            // Opening the driver, enumerating the adapters and shelling out to netsh take
+            // seconds. The caller is the dispatcher, and an uncontended gate hands control
+            // straight back to it, so without a hop the window never gets to paint.
+            await Task.Run(async () =>
             {
-                // Without process attribution "Discord only" cannot be honoured, so widen
-                // to hostname matching rather than silently protecting nothing.
-                AppLog.Warning("Süreç eşlemesi başlatılamadı; koruma yalnızca alan adına göre uygulanacak.");
-            }
+                _resolver = new DohResolver();
+                _dnsConfigurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
+                _tester = new ConnectivityTester(_resolver);
 
-            _engine = new BypassEngine(_matcher, _portMap, AppLog.InfoSink)
-            {
-                BlockQuicHandshakes = Settings.BlockQuicHandshakes,
-                Strategy = ResolveInitialStrategy(),
-            };
-            _engine.HostRewritten += OnHostRewritten;
-            _engine.Start();
+                await ConfigureDnsAsync(lifetime.Token).ConfigureAwait(false);
 
-            _tuner = new StrategyTuner(_engine, _tester, AppLog.InfoSink);
-            _tuner.Progress += (name, index, total) => TuningProgress?.Invoke(name, index, total);
+                _portMap = new ProcessPortMap(AppLog.InfoSink);
+                if (!_portMap.TryStart())
+                {
+                    // Without process attribution "Discord only" cannot be honoured, so widen
+                    // to hostname matching rather than silently protecting nothing.
+                    AppLog.Warning("Süreç eşlemesi başlatılamadı; koruma yalnızca alan adına göre uygulanacak.");
+                }
 
-            _discovery = new BlockedSiteDiscovery(_tester, _engine, _learned, _matcher, AppLog.InfoSink)
-            {
-                Enabled = Settings.AutoDiscoverBlockedSites,
-            };
-            _discovery.DomainLearned += OnDomainLearned;
+                _engine = new BypassEngine(_matcher, _portMap, AppLog.InfoSink)
+                {
+                    BlockQuicHandshakes = Settings.BlockQuicHandshakes,
+                    Strategy = ResolveInitialStrategy(),
+                };
+                _engine.HostRewritten += OnHostRewritten;
+                _engine.Start();
 
-            if (_dnsProxy is not null)
-            {
-                var token = _lifetime.Token;
-                _dnsProxy.NameResolved += name => _discovery?.Observe(name, token);
-            }
+                _tuner = new StrategyTuner(_engine, _tester, AppLog.InfoSink);
+                _tuner.Progress += (name, index, total) => TuningProgress?.Invoke(name, index, total);
 
-            _monitor = new NetworkMonitor(log: AppLog.InfoSink);
-            _monitor.Changed += OnNetworkChanged;
-            _monitor.Start();
-            Network = _monitor.Current;
+                _discovery = new BlockedSiteDiscovery(_tester, _engine, _learned, _matcher, AppLog.InfoSink)
+                {
+                    Enabled = Settings.AutoDiscoverBlockedSites,
+                };
+                _discovery.DomainLearned += OnDomainLearned;
 
-            ApplyTtlFix();
+                if (_dnsProxy is not null)
+                {
+                    var token = lifetime.Token;
+                    _dnsProxy.NameResolved += name => _discovery?.Observe(name, token);
+                }
+
+                _monitor = new NetworkMonitor(log: AppLog.InfoSink);
+                _monitor.Changed += OnNetworkChanged;
+                _monitor.Start();
+                Network = _monitor.Current;
+
+                ApplyTtlFix();
+            }).ConfigureAwait(false);
 
             SetState(ProtectionState.Running, "Koruma etkin");
+        }
+        catch (Exception ex)
+        {
+            // A driver that refuses to open would otherwise leave the machine's DNS
+            // pointed at us and the state stuck on Starting, which the guard above turns
+            // into a start button that does nothing for the rest of the session.
+            await TeardownAsync().ConfigureAwait(false);
+            SetState(ProtectionState.Stopped, $"Başlatılamadı: {ex.Message}");
+            throw;
         }
         finally
         {
@@ -289,7 +305,10 @@ public sealed class ProtectionService : IAsyncDisposable
             _dnsProxy = new DnsProxyServer(_resolver!, AppLog.InfoSink);
             if (_dnsProxy.TryStart())
             {
-                loopbackHasIPv6 = true;
+                // The ::1 listeners are best effort, and pointing the machine's IPv6
+                // resolver at a socket that never bound stalls name resolution for
+                // everything that prefers IPv6 - which on Windows is everything.
+                loopbackHasIPv6 = _dnsProxy.HasIPv6;
             }
             else
             {
@@ -661,56 +680,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
             SetState(ProtectionState.Stopping, "Durduruluyor…");
 
-            if (_lifetime is not null)
-            {
-                await _lifetime.CancelAsync().ConfigureAwait(false);
-            }
-
-            // The TTL rule is a system-wide packet rewrite; it goes down with the rest
-            // rather than outliving the app that put it there.
-            _ttlFix.Clear();
-
-            if (_discovery is not null)
-            {
-                _discovery.DomainLearned -= OnDomainLearned;
-                _discovery.Dispose();
-                _discovery = null;
-            }
-
-            if (_engine is not null)
-            {
-                _engine.HostRewritten -= OnHostRewritten;
-                _engine.Dispose();
-                _engine = null;
-            }
-
-            if (_monitor is not null)
-            {
-                _monitor.Changed -= OnNetworkChanged;
-                _monitor.Dispose();
-                _monitor = null;
-            }
-
-            _portMap?.Dispose();
-            _portMap = null;
-
-            // DNS must go back before the proxy dies, or the machine is left pointing
-            // at a socket nobody is listening on.
-            if (_dnsConfigurator is not null)
-            {
-                await _dnsConfigurator.RestoreAsync(CancellationToken.None).ConfigureAwait(false);
-            }
-
-            if (_dnsProxy is not null)
-            {
-                await _dnsProxy.DisposeAsync().ConfigureAwait(false);
-                _dnsProxy = null;
-            }
-
-            _resolver?.Dispose();
-            _resolver = null;
-            _tester = null;
-            _tuner = null;
+            await TeardownAsync().ConfigureAwait(false);
 
             _store.Save(Settings);
             SetState(ProtectionState.Stopped, "Koruma kapalı");
@@ -719,6 +689,67 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Puts everything the start built back the way it was. Each step stands on its own
+    /// so a start that fell over half way through can call it with the same result.
+    /// </summary>
+    /// <remarks>Expects the gate to be held, and never touches it.</remarks>
+    private async Task TeardownAsync()
+    {
+        // Everything running in the background hangs off this token, so it goes first:
+        // nothing should still be reaching for the objects about to be disposed.
+        if (_lifetime is not null)
+        {
+            await _lifetime.CancelAsync().ConfigureAwait(false);
+        }
+
+        // The TTL rule is a system-wide packet rewrite; it goes down with the rest
+        // rather than outliving the app that put it there.
+        _ttlFix.Clear();
+
+        if (_discovery is not null)
+        {
+            _discovery.DomainLearned -= OnDomainLearned;
+            _discovery.Dispose();
+            _discovery = null;
+        }
+
+        if (_engine is not null)
+        {
+            _engine.HostRewritten -= OnHostRewritten;
+            _engine.Dispose();
+            _engine = null;
+        }
+
+        if (_monitor is not null)
+        {
+            _monitor.Changed -= OnNetworkChanged;
+            _monitor.Dispose();
+            _monitor = null;
+        }
+
+        _portMap?.Dispose();
+        _portMap = null;
+
+        // DNS must go back before the proxy dies, or the machine is left pointing
+        // at a socket nobody is listening on.
+        if (_dnsConfigurator is not null)
+        {
+            await _dnsConfigurator.RestoreAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (_dnsProxy is not null)
+        {
+            await _dnsProxy.DisposeAsync().ConfigureAwait(false);
+            _dnsProxy = null;
+        }
+
+        _resolver?.Dispose();
+        _resolver = null;
+        _tester = null;
+        _tuner = null;
     }
 
     private BypassStrategy ResolveInitialStrategy()
@@ -760,23 +791,10 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         _matcher.Scope = Settings.Scope;
 
-        _matcher.ExtraDomains.Clear();
-        foreach (var domain in Settings.ExtraDomains)
-        {
-            _matcher.ExtraDomains.Add(domain);
-        }
-
-        _matcher.ExcludedDomains.Clear();
-        foreach (var domain in Settings.ExcludedDomains)
-        {
-            _matcher.ExcludedDomains.Add(domain);
-        }
-
-        _matcher.LearnedDomains.Clear();
-        foreach (var domain in _learned.Domains)
-        {
-            _matcher.LearnedDomains.Add(domain);
-        }
+        // Whole lists at a time: the packet path must never see one half emptied.
+        _matcher.ExtraDomains.Replace(Settings.ExtraDomains);
+        _matcher.ExcludedDomains.Replace(Settings.ExcludedDomains);
+        _matcher.LearnedDomains.Replace(_learned.Domains);
 
         if (_discovery is not null)
         {

@@ -133,7 +133,7 @@ public readonly struct TcpIpPacket
         => IsIPv6 ? new IPAddress(packet.Slice(24, 16)) : new IPAddress(packet.Slice(16, 4));
 
     public IPAddress SourceAddress(ReadOnlySpan<byte> packet)
-        => IsIPv6 ? new IPAddress(packet.Slice(8, 16)) : new IPAddress(packet.Slice(0, 4));
+        => IsIPv6 ? new IPAddress(packet.Slice(8, 16)) : new IPAddress(packet.Slice(12, 4));
 
     /// <summary>Rewrites the IP length field after the payload has been resized.</summary>
     public static void SetTotalLength(Span<byte> packet, bool isIPv6, int totalLength)

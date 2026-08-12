@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using DpiBypass.Core.Net;
 
 namespace DpiBypass.Core.Engine;
@@ -51,13 +52,13 @@ public sealed class TargetMatcher
     public ProtectionScope Scope { get; set; } = ProtectionScope.DiscordOnly;
 
     /// <summary>Extra hostnames the user added by hand.</summary>
-    public HashSet<string> ExtraDomains { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public DomainSet ExtraDomains { get; } = new();
 
     /// <summary>Hostnames that must never be touched, even in system-wide mode.</summary>
-    public HashSet<string> ExcludedDomains { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public DomainSet ExcludedDomains { get; } = new();
 
     /// <summary>Hostnames the discovery pass found to be filtered on this machine.</summary>
-    public HashSet<string> LearnedDomains { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public DomainSet LearnedDomains { get; } = new();
 
     /// <summary>
     /// One hostname to leave completely untouched, and one to always rewrite,
@@ -180,14 +181,17 @@ public sealed class TargetMatcher
         return false;
     }
 
-    private static bool Matches(HashSet<string> set, string hostName)
+    private static bool Matches(DomainSet set, string hostName)
     {
-        if (set.Count == 0)
+        // One read, so the whole comparison sees a single version of the list even if
+        // the user edits it half way through.
+        var snapshot = set.Snapshot;
+        if (snapshot.Count == 0)
         {
             return false;
         }
 
-        foreach (var candidate in set)
+        foreach (var candidate in snapshot)
         {
             if (IsDomainMatch(hostName, candidate))
             {
@@ -209,5 +213,55 @@ public sealed class TargetMatcher
         return hostName.Length > domain.Length
             && hostName[hostName.Length - domain.Length - 1] == '.'
             && hostName.EndsWith(domain, StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+/// <summary>A hostname list that can be edited while the packet path is reading it.</summary>
+/// <remarks>
+/// Every WinDivert worker walks these lists on every handshake, while the UI thread
+/// rewrites them from the settings file and the discovery pass adds to them. Editing
+/// one in place would throw "collection was modified" inside a worker - which the
+/// engine swallows by forwarding the packet unprotected - or hide an entry while the
+/// set resizes. So an edit never touches the live list: it builds a replacement and
+/// swaps it in with a single write, leaving readers on a list nobody can change.
+/// </remarks>
+public sealed class DomainSet
+{
+    private readonly Lock _gate = new();
+
+    private volatile FrozenSet<string> _snapshot =
+        Array.Empty<string>().ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The list as it stands. Safe to hold on to: it is never edited in place.</summary>
+    public FrozenSet<string> Snapshot => _snapshot;
+
+    public bool Contains(string hostName) => _snapshot.Contains(hostName);
+
+    /// <summary>Adds one hostname. Returns false when it was already there.</summary>
+    public bool Add(string hostName)
+    {
+        lock (_gate)
+        {
+            if (_snapshot.Contains(hostName))
+            {
+                return false;
+            }
+
+            _snapshot = _snapshot.Append(hostName).ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+            return true;
+        }
+    }
+
+    /// <summary>Replaces the whole list in one step.</summary>
+    public void Replace(IEnumerable<string> hostNames)
+    {
+        // Built outside the lock: readers never wait on a writer anyway, and the
+        // shorter the lock is held the less two writers can queue behind each other.
+        var replacement = hostNames.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+        lock (_gate)
+        {
+            _snapshot = replacement;
+        }
     }
 }

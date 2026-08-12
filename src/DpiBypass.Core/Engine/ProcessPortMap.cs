@@ -12,6 +12,18 @@ public sealed class ProcessPortMap : IDisposable
 {
     private const string Filter = "event == CONNECT and tcp and (remotePort == 443 or remotePort == 80 or remotePort == 8080)";
 
+    /// <summary>
+    /// How long a port keeps pointing at the process that opened it.
+    /// </summary>
+    /// <remarks>
+    /// Nothing tells us when the socket closes, so this is a guess against Windows
+    /// recycling the ephemeral port. Too long and a later connection inherits the
+    /// previous owner - a browser's traffic attributed to Discord, or the reverse -
+    /// which silently applies the wrong scope. A minute is comfortably longer than the
+    /// gap between a connect and its first data packet, which is all we need it for.
+    /// </remarks>
+    private static readonly TimeSpan OwnerLifetime = TimeSpan.FromMinutes(1);
+
     private readonly ConcurrentDictionary<ushort, Owner> _owners = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly Action<string>? _log;
@@ -73,45 +85,64 @@ public sealed class ProcessPortMap : IDisposable
         var buffer = new byte[1];
         var lastPrune = DateTime.UtcNow;
 
-        while (!_stopping.IsCancellationRequested && _handle is not null)
+        try
         {
-            var address = default(WinDivertAddress);
-
-            try
+            while (!_stopping.IsCancellationRequested)
             {
-                if (!_handle.Receive(buffer, out _, ref address))
+                // Read the field once. Dispose clears it from another thread, so
+                // testing it and then dereferencing it are two different answers, and
+                // the NullReferenceException in between would be unhandled on this
+                // thread - which ends the process, not just the watcher.
+                var handle = _handle;
+                if (handle is null)
                 {
                     return;
                 }
-            }
-            catch (WinDivertException ex)
-            {
-                _log?.Invoke($"Socket watcher stopped: {ex.Message}");
-                return;
-            }
 
-            if (address.Layer != WinDivertLayer.Socket)
-            {
-                continue;
-            }
+                var address = default(WinDivertAddress);
 
-            var port = address.LocalPort;
-            if (port == 0)
-            {
-                continue;
-            }
+                try
+                {
+                    if (!handle.Receive(buffer, out _, ref address))
+                    {
+                        return;
+                    }
+                }
+                catch (WinDivertException ex)
+                {
+                    _log?.Invoke($"Socket watcher stopped: {ex.Message}");
+                    return;
+                }
 
-            var path = ProcessLookup.GetImagePath(address.ProcessId);
-            if (path is not null)
-            {
-                _owners[port] = new Owner(path, DateTime.UtcNow.AddMinutes(10));
-            }
+                if (address.Layer != WinDivertLayer.Socket)
+                {
+                    continue;
+                }
 
-            if (DateTime.UtcNow - lastPrune > TimeSpan.FromMinutes(1))
-            {
-                lastPrune = DateTime.UtcNow;
-                Prune();
+                var port = address.LocalPort;
+                if (port == 0)
+                {
+                    continue;
+                }
+
+                var path = ProcessLookup.GetImagePath(address.ProcessId);
+                if (path is not null)
+                {
+                    _owners[port] = new Owner(path, DateTime.UtcNow.Add(OwnerLifetime));
+                }
+
+                if (DateTime.UtcNow - lastPrune > TimeSpan.FromMinutes(1))
+                {
+                    lastPrune = DateTime.UtcNow;
+                    Prune();
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            // Losing process attribution costs the narrow scopes their accuracy;
+            // letting it escape this thread would cost the user the whole app.
+            _log?.Invoke($"Socket watcher faulted: {ex.Message}");
         }
     }
 
@@ -130,9 +161,15 @@ public sealed class ProcessPortMap : IDisposable
     public void Dispose()
     {
         _stopping.Cancel();
-        _handle?.Dispose();
-        _handle = null;
+
+        // Shut down before closing: the worker is parked inside Receive, and pulling
+        // the handle out from under it is what the loop is guarding against.
+        var handle = Interlocked.Exchange(ref _handle, null);
+        handle?.Shutdown();
+
         _worker?.Join(TimeSpan.FromSeconds(2));
+
+        handle?.Dispose();
         _stopping.Dispose();
         _owners.Clear();
     }

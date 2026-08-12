@@ -129,10 +129,13 @@ public sealed class NetworkMonitor : IDisposable
             changed = captured.Key != _current.Key;
             if (changed)
             {
-                // Never announce the same transition twice in quick succession.
+                // Never announce the same transition twice in quick succession. The
+                // remembered key is deliberately left alone: an adapter settles in
+                // steps - association first, then the DHCP lease and gateway - and
+                // adopting the half configured state here would mean no later poll
+                // ever sees the network the user actually ends up on.
                 if (DateTimeOffset.UtcNow - _lastRaise < TimeSpan.FromSeconds(2))
                 {
-                    _current = captured;
                     return;
                 }
 

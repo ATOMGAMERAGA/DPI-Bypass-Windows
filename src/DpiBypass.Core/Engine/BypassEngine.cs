@@ -118,15 +118,16 @@ public sealed class BypassEngine : IDisposable
         // this costs a handful of packets per new QUIC connection.
         _quicHandle = TryOpenQuicHandle();
 
+        var tcpGroup = new WorkerGroup(_tcpHandle);
         var threads = workerCount > 0 ? workerCount : Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
         for (var i = 0; i < threads; i++)
         {
-            StartWorker($"DpiBypass.Tcp{i}", () => TcpLoop(_tcpHandle));
+            StartWorker($"DpiBypass.Tcp{i}", () => TcpLoop(_tcpHandle), tcpGroup);
         }
 
         if (_quicHandle is not null)
         {
-            StartWorker("DpiBypass.Quic", () => QuicLoop(_quicHandle));
+            StartWorker("DpiBypass.Quic", () => QuicLoop(_quicHandle), new WorkerGroup(_quicHandle));
         }
 
         Stats.StartedAt = DateTimeOffset.UtcNow;
@@ -137,18 +138,24 @@ public sealed class BypassEngine : IDisposable
     {
         foreach (var filter in new[] { QuicFilter, QuicFilterFallback })
         {
+            WinDivertHandle? handle = null;
+
             try
             {
-                var handle = WinDivertHandle.Open(filter, WinDivertLayer.Network, 1001, WinDivertFlags.None);
+                handle = WinDivertHandle.Open(filter, WinDivertLayer.Network, 1001, WinDivertFlags.None);
                 handle.SetParam(WinDivertParam.QueueLength, 2048);
                 return handle;
             }
             catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
             {
+                // Opened but rejected on the parameter: abandoning it here would leave
+                // the driver diverting QUIC into a queue nobody reads.
+                handle?.Dispose();
                 _log?.Invoke("QUIC filter rejected by the driver; trying a simpler one.");
             }
             catch (WinDivertException ex)
             {
+                handle?.Dispose();
                 _log?.Invoke($"QUIC suppression unavailable: {ex.Message}");
                 return null;
             }
@@ -171,8 +178,29 @@ public sealed class BypassEngine : IDisposable
         }
     }
 
-    private void StartWorker(string name, Action body)
+    /// <summary>
+    /// One divert handle and the count of threads still reading from it.
+    /// </summary>
+    /// <remarks>
+    /// A diversion handle with nobody receiving from it is worse than no handle at
+    /// all: the driver still takes the matched packets out of the network stack,
+    /// queues them, and drops them once the queue fills. An unexpectedly dead worker
+    /// would therefore black-hole every new connection the filter matches - all HTTP
+    /// and HTTPS, or all QUIC - while the UI still reported protection as running.
+    /// Counting readers per handle lets the last one out close it, which downgrades
+    /// that into traffic flowing unprotected: worse protection, working internet.
+    /// </remarks>
+    private sealed class WorkerGroup(WinDivertHandle handle)
     {
+        public WinDivertHandle Handle { get; } = handle;
+
+        public int Live;
+    }
+
+    private void StartWorker(string name, Action body, WorkerGroup group)
+    {
+        Interlocked.Increment(ref group.Live);
+
         var thread = new Thread(() =>
         {
             try
@@ -183,6 +211,22 @@ public sealed class BypassEngine : IDisposable
             {
                 Stats.AddError();
                 _log?.Invoke($"{name} stopped: {ex.Message}");
+            }
+            finally
+            {
+                if (Interlocked.Decrement(ref group.Live) == 0 && !_stopping.IsCancellationRequested)
+                {
+                    _log?.Invoke($"{name} was the last reader on its filter; releasing it so traffic flows again.");
+
+                    try
+                    {
+                        group.Handle.Dispose();
+                    }
+                    catch (Exception)
+                    {
+                        // Already gone; the point was only to stop diverting.
+                    }
+                }
             }
         })
         {

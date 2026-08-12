@@ -169,7 +169,7 @@ jobs:
 
           ### Bu sürümde
 
-          - TLS kayıt parçalama dahil 17 atlatma yöntemi; ağa göre en hızlısı ölçülerek seçilir.
+          - 14 atlatma yöntemi; ağa göre en hızlısı gerçek bağlantı testleriyle ölçülerek seçilir.
           - Ağ değiştiğinde çalışan yöntem arka planda yeniden bulunur, düzenli denetimle doğrulanır.
           - Yeni engelli siteler kendiliğinden ölçülüp listeye eklenir; liste arayüzden düzenlenebilir.
           - Vodafone sınırsız modu: hotspot TTL düzeltmesi (yalnızca kaydettiğiniz ağlarda).

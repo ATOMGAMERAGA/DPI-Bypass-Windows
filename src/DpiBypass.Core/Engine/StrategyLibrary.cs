@@ -14,39 +14,6 @@ public static class StrategyLibrary
         Description = "Paketlere dokunulmaz. Ağın gerçekten engelleyip engellemediğini ölçmek için kullanılır.",
     };
 
-    public static readonly BypassStrategy TlsRecordSni = new()
-    {
-        Id = "tlsrec-sni",
-        Name = "TLS kayıt parçalama (SNI ortası)",
-        Description = "ClientHello, alan adının ortasından iki TLS kaydına bölünür. "
-            + "TLS açısından tamamen geçerlidir, hiçbir paket düşmez, ek gecikme yoktur.",
-        TlsRecords = TlsRecordSplit.HostMiddle,
-    };
-
-    public static readonly BypassStrategy TlsRecordSplitSni = new()
-    {
-        Id = "tlsrec-split-sni",
-        Name = "TLS kayıt parçalama + TCP bölme",
-        Description = "Kayıt parçalamaya ek olarak ilk kayıt da ayrı bir TCP parçasına ayrılır.",
-        TlsRecords = TlsRecordSplit.HostMiddle,
-        Split = SplitMode.Split,
-        Anchor = SplitAnchor.Absolute,
-        SplitPosition = 3,
-        Http = HttpTricks.HostCase,
-    };
-
-    public static readonly BypassStrategy TlsRecordDisorder = new()
-    {
-        Id = "tlsrec-disorder",
-        Name = "TLS kayıt parçalama + ters sıralı bölme",
-        Description = "Kayıt parçalama, parçaları ters sırada gönderen TCP bölmesiyle birleştirilir.",
-        TlsRecords = TlsRecordSplit.HostMiddle,
-        Split = SplitMode.Disorder,
-        Anchor = SplitAnchor.Absolute,
-        SplitPosition = 3,
-        Http = HttpTricks.HostCase,
-    };
-
     public static readonly BypassStrategy SplitSni = new()
     {
         Id = "split-sni",
@@ -159,7 +126,7 @@ public static class StrategyLibrary
         Split = SplitMode.Split,
         Anchor = SplitAnchor.HostMiddle,
         SecondSplitPosition = 1,
-        Http = HttpTricks.HostCase | HttpTricks.ExtraSpace,
+        Http = HttpTricks.HostCase | HttpTricks.HostTab,
     };
 
     public static readonly BypassStrategy OobSplitSni = new()
@@ -182,7 +149,7 @@ public static class StrategyLibrary
         Fake = FakeMode.ExpiredTtl,
         FakeTtl = 5,
         FakeCount = 2,
-        Http = HttpTricks.HostCase | HttpTricks.DottedHost,
+        Http = HttpTricks.HostCase | HttpTricks.HostTab,
     };
 
     public static readonly BypassStrategy AggressiveCombo = new()
@@ -197,7 +164,7 @@ public static class StrategyLibrary
         FakeTtl = 3,
         FakeCount = 2,
         OutOfBand = true,
-        Http = HttpTricks.HostCase | HttpTricks.ExtraSpace | HttpTricks.DottedHost,
+        Http = HttpTricks.HostCase | HttpTricks.HostTab,
     };
 
     /// <summary>
@@ -206,11 +173,8 @@ public static class StrategyLibrary
     /// </summary>
     public static readonly IReadOnlyList<BypassStrategy> All =
     [
-        TlsRecordSni,
-        TlsRecordSplitSni,
         FakeTtlSplitSni,
         SplitSni,
-        TlsRecordDisorder,
         FakeBadSeqSplitSni,
         DisorderSni,
         FakeTtl6SplitSni,

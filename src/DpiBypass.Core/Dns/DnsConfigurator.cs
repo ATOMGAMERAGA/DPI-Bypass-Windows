@@ -70,9 +70,11 @@ public sealed class DnsConfigurator
             return false;
         }
 
+        var snapshotWritten = false;
         if (!HasPendingRestore)
         {
             SaveSnapshot(adapters);
+            snapshotWritten = true;
         }
 
         var v4 = mode == DnsMode.EncryptedLoopback ? ["127.0.0.1"] : PublicV4;
@@ -95,9 +97,24 @@ public sealed class DnsConfigurator
         }
 
         await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+
+        if (applied == 0)
+        {
+            _log?.Invoke("No adapter accepted the new DNS servers; the previous configuration is still in place.");
+
+            // A snapshot left behind here would offer to "restore" a change that never
+            // happened, and the caller would report encrypted DNS as active.
+            if (snapshotWritten)
+            {
+                DeleteSnapshot();
+            }
+
+            return false;
+        }
+
         CurrentMode = mode;
         _log?.Invoke($"DNS set to {(mode == DnsMode.EncryptedLoopback ? "encrypted loopback proxy" : "public resolvers")} on {applied} adapter(s).");
-        return applied > 0;
+        return true;
     }
 
     public async Task RestoreAsync(CancellationToken cancellationToken = default)
@@ -111,25 +128,28 @@ public sealed class DnsConfigurator
 
         foreach (var adapter in snapshot)
         {
+            // The interface index is per adapter rather than per family and
+            // -ResetServerAddresses takes no family, so a reset clears both families at
+            // once. Every reset therefore has to happen before the explicit servers go
+            // back on, otherwise the v6 reset undoes the v4 servers just restored.
             if (adapter.OriginalV4.Length == 0)
             {
                 await ResetServersAsync(adapter.InterfaceIndexV4, cancellationToken).ConfigureAwait(false);
             }
-            else
+
+            if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length == 0)
+            {
+                await ResetServersAsync(adapter.InterfaceIndexV6, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (adapter.OriginalV4.Length > 0)
             {
                 await SetServersAsync(adapter.InterfaceIndexV4, adapter.OriginalV4, cancellationToken).ConfigureAwait(false);
             }
 
-            if (adapter.InterfaceIndexV6 > 0)
+            if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length > 0)
             {
-                if (adapter.OriginalV6.Length == 0)
-                {
-                    await ResetServersAsync(adapter.InterfaceIndexV6, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    await SetServersAsync(adapter.InterfaceIndexV6, adapter.OriginalV6, cancellationToken).ConfigureAwait(false);
-                }
+                await SetServersAsync(adapter.InterfaceIndexV6, adapter.OriginalV6, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -152,13 +172,18 @@ public sealed class DnsConfigurator
                 && nic.NetworkInterfaceType != NetworkInterfaceType.Tunnel)
             .ToList();
 
+        // AddressFamily comes back as "IPv4"/"IPv6" on some builds, "InterNetwork"/
+        // "InterNetworkV6" or the bare enum numbers 2/23 on others, so it is normalised
+        // here instead of being spelled out again on the parsing side.
         var script = """
             $out = @()
             foreach ($a in Get-DnsClientServerAddress -ErrorAction SilentlyContinue) {
+              $raw = [string]$a.AddressFamily
+              if ($raw -match 'v6|23') { $family = 'v6' } else { $family = 'v4' }
               $out += [pscustomobject]@{
                 Index  = $a.InterfaceIndex
                 Alias  = $a.InterfaceAlias
-                Family = $a.AddressFamily.ToString()
+                Family = $family
                 Servers = @($a.ServerAddresses)
               }
             }
@@ -171,8 +196,8 @@ public sealed class DnsConfigurator
         foreach (var nic in live)
         {
             var alias = nic.Name;
-            var v4 = rows.FirstOrDefault(r => r.Alias == alias && r.Family.Contains("InterNetwork", StringComparison.OrdinalIgnoreCase) && !r.Family.Contains("V6", StringComparison.OrdinalIgnoreCase));
-            var v6 = rows.FirstOrDefault(r => r.Alias == alias && r.Family.Contains("V6", StringComparison.OrdinalIgnoreCase));
+            var v4 = rows.FirstOrDefault(r => r.Alias == alias && IsV4Family(r.Family));
+            var v6 = rows.FirstOrDefault(r => r.Alias == alias && IsV6Family(r.Family));
 
             var indexV4 = v4.Index;
             if (indexV4 == 0)
@@ -211,6 +236,33 @@ public sealed class DnsConfigurator
     private static string[] FilterOurOwn(string[]? servers) => servers is null
         ? []
         : [.. servers.Where(s => s is not ("127.0.0.1" or "::1") && !string.IsNullOrWhiteSpace(s))];
+
+    /// <summary>
+    /// Every spelling Windows has used for AddressFamily is accepted, in case the
+    /// snapshot script ever runs against a build whose value it did not normalise.
+    /// </summary>
+    private static bool IsV6Family(string family)
+    {
+        var value = family.Trim();
+        return value.Equals("v6", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("IPv6", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("InterNetworkV6", StringComparison.OrdinalIgnoreCase)
+            || value == "23";
+    }
+
+    /// <summary>
+    /// A positive match on top of "not v6", so an unrecognised spelling is dropped
+    /// rather than silently filed as the IPv4 row.
+    /// </summary>
+    private static bool IsV4Family(string family)
+    {
+        var value = family.Trim();
+        return !IsV6Family(value)
+            && (value.Equals("v4", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("IPv4", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("InterNetwork", StringComparison.OrdinalIgnoreCase)
+                || value == "2");
+    }
 
     private static List<Row> ParseRows(string json)
     {
