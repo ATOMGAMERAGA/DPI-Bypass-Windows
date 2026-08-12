@@ -680,7 +680,10 @@ public sealed class ProtectionService : IAsyncDisposable
 
             SetState(ProtectionState.Stopping, "Durduruluyor…");
 
-            await TeardownAsync().ConfigureAwait(false);
+            // Putting the DNS back shells out to netsh and closing the driver blocks
+            // until the packet threads come out of the kernel. The stop button is on
+            // the dispatcher, so this gets the same hop off it that starting does.
+            await Task.Run(TeardownAsync).ConfigureAwait(false);
 
             _store.Save(Settings);
             SetState(ProtectionState.Stopped, "Koruma kapalı");
