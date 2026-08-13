@@ -88,24 +88,44 @@ public sealed class NetworkMonitor : IDisposable
     private void ScheduleCheck()
     {
         CancellationTokenSource pending;
+        CancellationToken token;
+
         lock (_gate)
         {
+            // Cancelled, not disposed. Disposing the superseded source here raced its own
+            // waiter: the queued task had not necessarily read Token yet, and reading it
+            // from a disposed source throws ObjectDisposedException onto the thread pool -
+            // during exactly the burst of events the debounce exists to absorb. Each
+            // source is now disposed by the task it belongs to, once that task is done
+            // with it, and the token is read here while the source is certainly alive.
             _pendingDebounce?.Cancel();
-            _pendingDebounce?.Dispose();
             _pendingDebounce = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
             pending = _pendingDebounce;
+            token = pending.Token;
         }
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(_debounce, pending.Token).ConfigureAwait(false);
+                await Task.Delay(_debounce, token).ConfigureAwait(false);
                 CheckNow();
             }
             catch (OperationCanceledException)
             {
-                // Superseded by a newer event.
+                // Superseded by a newer event, or the monitor is shutting down.
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_pendingDebounce, pending))
+                    {
+                        _pendingDebounce = null;
+                    }
+                }
+
+                pending.Dispose();
             }
         });
     }
@@ -167,9 +187,10 @@ public sealed class NetworkMonitor : IDisposable
             // Cancellation is the expected way out.
         }
 
+        // Cancelling _stopping above already cancelled the linked source; the task that
+        // owns it disposes it on its way out, so it is only dropped here.
         lock (_gate)
         {
-            _pendingDebounce?.Dispose();
             _pendingDebounce = null;
         }
 
