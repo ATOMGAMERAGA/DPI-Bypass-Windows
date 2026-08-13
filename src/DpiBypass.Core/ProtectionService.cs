@@ -146,7 +146,12 @@ public sealed class ProtectionService : IAsyncDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (State is ProtectionState.Running or ProtectionState.Starting)
+            // Degraded is a running engine that cannot reach discord.com, not a stopped
+            // one. Leaving it out let a second start build a whole new engine, DNS proxy,
+            // socket watcher and network monitor on top of the live ones - two sets of
+            // driver handles at the same priority, a second listener fighting for port 53,
+            // and the first set leaked because the fields were simply overwritten.
+            if (State is ProtectionState.Running or ProtectionState.Starting or ProtectionState.Degraded)
             {
                 return;
             }
@@ -292,11 +297,12 @@ public sealed class ProtectionService : IAsyncDisposable
 
     private async Task ConfigureDnsAsync(CancellationToken cancellationToken)
     {
-        if (Settings.DnsMode == DnsMode.SystemDefault)
-        {
-            return;
-        }
-
+        // "Leave the system alone" is applied rather than skipped. A run that was killed
+        // - by a crash, by the takeover path, or by the machine losing power - leaves the
+        // resolvers pointed at our loopback proxy and a snapshot on disk. Returning early
+        // here meant that starting with this mode selected left the machine resolving
+        // against a socket nobody is listening on: no name resolution at all, and no way
+        // out of it from inside the app. Applying it puts the original servers back.
         var mode = Settings.DnsMode;
         var loopbackHasIPv6 = false;
 
@@ -352,20 +358,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         SetState(State, $"Ağ inceleniyor ({reason})…");
 
-        if (Settings.ManualIspProfileId is { Length: > 0 } manualIsp)
-        {
-            Isp = IspCatalog.ById(manualIsp);
-            Detection = new IspDetection(Isp, null, null, null, null, WasAutomatic: false);
-        }
-        else
-        {
-            Detection = await new IspDetector(_resolver, AppLog.InfoSink)
-                .DetectAsync(Network, cancellationToken)
-                .ConfigureAwait(false);
-            Isp = Detection.Profile;
-        }
-
-        Changed?.Invoke();
+        await ResolveIspAsync(cancellationToken).ConfigureAwait(false);
 
         if (Settings.ManualStrategyId is { Length: > 0 } manualStrategy)
         {
@@ -419,6 +412,28 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         await VerifyAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Settles which operator profile the sweep should be ordered by: the one the user
+    /// forced, or the one detection finds.
+    /// </summary>
+    private async Task ResolveIspAsync(CancellationToken cancellationToken)
+    {
+        if (Settings.ManualIspProfileId is { Length: > 0 } manualIsp)
+        {
+            Isp = IspCatalog.ById(manualIsp);
+            Detection = new IspDetection(Isp, null, null, null, null, WasAutomatic: false);
+        }
+        else if (_resolver is not null)
+        {
+            Detection = await new IspDetector(_resolver, AppLog.InfoSink)
+                .DetectAsync(Network, cancellationToken)
+                .ConfigureAwait(false);
+            Isp = Detection.Profile;
+        }
+
+        Changed?.Invoke();
     }
 
     /// <summary>
@@ -604,7 +619,18 @@ public sealed class ProtectionService : IAsyncDisposable
             return null;
         }
 
-        Settings.Networks.Remove(Network.Key);
+        // Persisted straight away: a sweep that ends without a winner used to leave the
+        // discarded profile on disk, so the next launch started on the very recipe the
+        // user had just asked us to stop using.
+        if (Settings.Networks.Remove(Network.Key))
+        {
+            _store.SaveNetworks(Settings);
+        }
+
+        // The operator is settled again first. Without this, switching back to automatic
+        // detection left the sweep ordered by the profile the user had just deselected.
+        await ResolveIspAsync(cancellationToken).ConfigureAwait(false);
+
         var result = await _tuner.FindBestAsync(Isp, checkUnfilteredFirst: true, cancellationToken).ConfigureAwait(false);
 
         if (result.Winner is not null)
@@ -647,7 +673,22 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         Settings.ManualIspProfileId = ispProfileId;
         _store.Save(Settings);
-        Isp = ispProfileId is null ? Isp : IspCatalog.ById(ispProfileId);
+
+        if (ispProfileId is null)
+        {
+            // Back to automatic. Keeping the forced profile as the answer is what made
+            // "Otomatik algıla" look like it did nothing: the status line went on naming
+            // the operator the user had just deselected, and the next sweep was still
+            // ordered by it. Cleared here; detection fills it in again.
+            Isp = IspCatalog.Unknown;
+            Detection = null;
+        }
+        else
+        {
+            Isp = IspCatalog.ById(ispProfileId);
+            Detection = new IspDetection(Isp, null, null, null, null, WasAutomatic: false);
+        }
+
         Changed?.Invoke();
     }
 

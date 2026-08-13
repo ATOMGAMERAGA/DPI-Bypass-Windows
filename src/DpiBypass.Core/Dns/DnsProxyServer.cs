@@ -142,22 +142,24 @@ public sealed class DnsProxyServer : IAsyncDisposable
             var query = buffer[..received.ReceivedBytes];
             var sender = received.RemoteEndPoint;
 
-            // Do not let one slow upstream lookup stall the whole listener.
+            // Do not let one slow upstream lookup stall the whole listener. The whole
+            // body is guarded: a lookup cancelled mid-flight by shutdown would otherwise
+            // fault a task nobody awaits, once per query still in flight.
             _ = Task.Run(async () =>
             {
-                var answer = await ResolveAsync(query, cancellationToken).ConfigureAwait(false);
-                if (answer is null)
-                {
-                    return;
-                }
-
                 try
                 {
+                    var answer = await ResolveAsync(query, cancellationToken).ConfigureAwait(false);
+                    if (answer is null)
+                    {
+                        return;
+                    }
+
                     await socket.SendToAsync(answer, SocketFlags.None, sender, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
-                    // Client vanished before we answered; nothing to do.
+                    // Shutting down, or the client vanished before we answered.
                 }
             }, cancellationToken);
         }
