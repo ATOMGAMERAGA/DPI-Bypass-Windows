@@ -24,8 +24,24 @@ PowerShell'i açın ve şunu yapıştırın:
 irm https://raw.githubusercontent.com/ATOMGAMERAGA/DPI-Bypass-Windows/main/scripts/install.ps1 | iex
 ```
 
-Betik son sürümü indirir, yayınlanan SHA256 listesiyle doğrular ve sessizce
-kurar. Yönetici hakkı gerekiyorsa kendisi yükseltilmiş bir pencere açar.
+Betik son sürümü indirir, yayınlanan SHA256 listesiyle doğrular, sessizce kurar
+ve uygulamayı açar. Yönetici hakkı gerekiyorsa kendisi yükseltilmiş bir pencere
+açar.
+
+**Aynı komut güncelleme komutudur.** Betik kurulu sürümü GitHub'daki son sürümle
+karşılaştırır:
+
+| Durum | Yapılan |
+| --- | --- |
+| GitHub'daki sürüm daha yeni | İndirilip doğrulanır, **eski kurulum kaldırılır**, yenisi kurulur. Ayarlarınız korunur |
+| En güncel sürüm zaten kurulu | "Zaten en güncel sürüm kurulu" denir ve hiçbir şey indirilmez |
+| Kurulu sürüm yayınlanandan yeni | Dokunulmaz (kendi derlemeniz olabilir) |
+
+Aynı sürümü yeniden kurmak için komutu `-Force` ile çalıştırın:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ATOMGAMERAGA/DPI-Bypass-Windows/main/scripts/install.ps1))) -Force
+```
 
 Kurulum dosyasını elle indirmeyi tercih ederseniz
 [Releases](../../releases/latest) sayfasındaki
@@ -190,12 +206,23 @@ Sekmeler: **Durum** (durum, aç/kapat, discord.com testi, sayaçlar), **Kapsam**
 **Siteler**, **Ağ ve yöntem**, **DNS ve ayarlar**, **Günlük**.
 
 Pencereyi kapatmak korumayı durdurmaz; uygulama tepside çalışmaya devam eder.
-Kısayolu yeniden çalıştırmak ya da tepsi simgesine çift tıklamak pencereyi geri
+Kısayolu yeniden çalıştırmak ya da tepsi simgesine tıklamak pencereyi geri
 getirir.
+
+> **Simgeyi göremiyor musunuz?** Windows 11, ilk kez gördüğü bildirim alanı
+> simgelerini saatin yanındaki **^** okunun altına gizler. Oku açıp simgeyi
+> görev çubuğuna sürüklerseniz kalıcı olarak orada durur. Simge olmasa da
+> kısayolu yeniden çalıştırmak pencereyi her zaman öne getirir.
+
+Uygulama, pencereyi ilk kez göstermeden tepside başlamaz: kurulumdan sonraki ilk
+çalıştırma ve ilk oturum açma her zaman pencereyi açar. Sonraki açılışlarda
+"Açılışta pencereyi göstermeden tepside başla" ayarı geçerlidir. Pencereyi her
+koşulda açmak için `DpiBypass.exe --show` kullanılabilir.
 
 ## Komut satırı
 
 ```powershell
+DpiBypass.exe --show              # pencereyi her koşulda aç
 DpiBypass.exe status              # genel durum
 DpiBypass.exe test [alanadı]      # erişimi sına (varsayılan: discord.com)
 DpiBypass.exe search              # yöntemi yeniden ara
@@ -253,8 +280,12 @@ cd DPI-Bypass-Windows
 
 ./tools/fetch-windivert.ps1                          # sürücü dosyalarını indirir
 dotnet test tests/DpiBypass.Tests/DpiBypass.Tests.csproj
+./scripts/tests/install.tests.ps1                    # kurulum/güncelleme kararları
+./scripts/tests/xaml-resources.tests.ps1             # arayüz kaynakları eksiksiz mi
 dotnet publish src/DpiBypass.App/DpiBypass.App.csproj -c Release -o artifacts/publish
 ```
+
+Üçü de CI hattında her derlemede çalışır.
 
 Kurulum paketi için Inno Setup 6 gerekir:
 
@@ -309,7 +340,10 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 
 | Belirti | Bakılacak yer |
 | --- | --- |
-| Kısayola tıklıyorum, pencere açılmıyor | Uygulama zaten tepside çalışıyordur; kısayolu yeniden çalıştırmak artık çalışan kopyanın penceresini öne getirir. Yine açılmıyorsa `%ProgramData%\DPI Bypass\logs\crash.log` dosyasına bakın |
+| Kısayola tıklıyorum, pencere açılmıyor | Uygulama zaten tepside çalışıyordur; kısayolu yeniden çalıştırmak çalışan kopyanın penceresini öne getirir. Yine açılmıyorsa `%ProgramData%\DPI Bypass\logs\crash.log` ve o günün `.log` dosyasındaki "Açılış kararı" / "Görünürlük denetimi" satırlarına bakın |
+| Uygulama çalışıyor ama hiçbir yerde görünmüyor | Bildirim alanı simgesi **^** okunun altında olabilir. `DpiBypass.exe --show` pencereyi her koşulda açar |
+| Pencere açılıyor ama içi boş / saydam görünüyor | Windows'ta *Ayarlar → Kişiselleştirme → Renkler → Saydamlık efektleri* kapalıysa uygulama düz renkli arka plana kendiliğinden geçer. Geçmediyse günlükteki "Pencere arka planı" satırını bildirin |
+| "Başka bir kullanıcı oturumunda çalışıyor" | Koruma bilgisayar başına tek kopyadır. Diğer Windows oturumunda açık olan kopyayı kapatın |
 | "Yönetici hakları gerekiyor" | Uygulamayı yönetici olarak çalıştırın; sürücü aksi hâlde açılamaz |
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
 | Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |

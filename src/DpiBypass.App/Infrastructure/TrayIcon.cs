@@ -53,6 +53,16 @@ public sealed class TrayIcon : IDisposable
             Icon = _current,
         };
 
+        // Left click as well as double click: a user who cannot find the window is
+        // not in the mood to discover that this particular icon wants two clicks.
+        _icon.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                OpenRequested?.Invoke();
+            }
+        };
+
         _icon.DoubleClick += (_, _) => OpenRequested?.Invoke();
     }
 
@@ -63,6 +73,30 @@ public sealed class TrayIcon : IDisposable
     public event Action? TestRequested;
 
     public event Action? ExitRequested;
+
+    /// <summary>
+    /// Re-adds the icon to the notification area.
+    /// </summary>
+    /// <remarks>
+    /// The logon task starts the app ten seconds after sign-in, which on a cold boot
+    /// can still be while the shell is putting the taskbar together. An icon offered
+    /// to a shell that is not ready is dropped, and Windows only replays that for
+    /// applications when Explorer itself restarts - so an app that started minimised
+    /// would be running with no window and no icon, which is precisely what "it
+    /// never opens" looks like. Toggling visibility makes the shell take it again.
+    /// </remarks>
+    public void EnsureVisible()
+    {
+        try
+        {
+            _icon.Visible = false;
+            _icon.Visible = true;
+        }
+        catch (Exception)
+        {
+            // Nothing else to try; the caller shows the window instead.
+        }
+    }
 
     public void Update(string headline, string detail, bool isRunning)
     {

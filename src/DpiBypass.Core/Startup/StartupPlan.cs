@@ -1,0 +1,116 @@
+namespace DpiBypass.Core.Startup;
+
+/// <summary>What a launch should put on screen.</summary>
+public enum StartupVisibility
+{
+    /// <summary>Put the window up. The only outcome the user can be sure to notice.</summary>
+    ShowWindow = 0,
+
+    /// <summary>Stay in the notification area, because the user has asked for that and can get back.</summary>
+    StartHidden = 1,
+}
+
+/// <summary>
+/// Decides whether a launch shows its window.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Getting this wrong is indistinguishable from the app being broken, which is
+/// exactly what happened: the logon task starts the app with <c>--minimized</c>, so
+/// on a fresh machine the first thing that ever ran was a copy with no window - and
+/// on Windows 11 a notification area icon that has never been promoted lives behind
+/// the overflow chevron, where nobody looks. The app was running, protecting the
+/// connection, and completely invisible.
+/// </para>
+/// <para>
+/// So hiding is now something the app has to earn. Every condition below has to
+/// hold, and if any of them is in doubt the window goes up: a window the user did
+/// not ask for is a small annoyance, a missing one reads as a broken program.
+/// </para>
+/// </remarks>
+public sealed record StartupPlan(StartupVisibility Visibility, string Reason)
+{
+    /// <summary>The logon task and the Run key entry both pass this.</summary>
+    public const string MinimisedSwitch = "--minimized";
+
+    /// <summary>Forces the window up even for a launch that would otherwise hide.</summary>
+    public const string ShowSwitch = "--show";
+
+    public bool ShowsWindow => Visibility == StartupVisibility.ShowWindow;
+
+    public static bool WantsMinimised(IReadOnlyList<string>? arguments)
+        => HasSwitch(arguments, MinimisedSwitch);
+
+    public static bool WantsWindow(IReadOnlyList<string>? arguments)
+        => HasSwitch(arguments, ShowSwitch);
+
+    /// <param name="arguments">The command line this launch was given.</param>
+    /// <param name="startMinimisedSetting">The user's "start in the tray" preference.</param>
+    /// <param name="hasShownWindowBefore">
+    /// Whether this installation has ever put its window in front of the user. Until
+    /// it has, nobody knows the app exists, where it lives, or that there is an icon
+    /// to look for - so the first run is always visible whatever else is set.
+    /// </param>
+    /// <param name="trayIconAvailable">Whether there is an icon to come back through.</param>
+    public static StartupPlan Decide(
+        IReadOnlyList<string>? arguments,
+        bool startMinimisedSetting,
+        bool hasShownWindowBefore,
+        bool trayIconAvailable)
+    {
+        if (WantsWindow(arguments))
+        {
+            return new StartupPlan(StartupVisibility.ShowWindow, "pencere açıkça istendi");
+        }
+
+        if (!WantsMinimised(arguments))
+        {
+            // Someone double-clicked something. That is a request to see the app.
+            return new StartupPlan(StartupVisibility.ShowWindow, "elle başlatıldı");
+        }
+
+        if (!startMinimisedSetting)
+        {
+            return new StartupPlan(StartupVisibility.ShowWindow, "\"tepside başla\" kapalı");
+        }
+
+        if (!trayIconAvailable)
+        {
+            // Hiding without an icon leaves no way back in at all.
+            return new StartupPlan(StartupVisibility.ShowWindow, "bildirim alanı simgesi yok");
+        }
+
+        if (!hasShownWindowBefore)
+        {
+            return new StartupPlan(StartupVisibility.ShowWindow, "ilk çalıştırma");
+        }
+
+        return new StartupPlan(StartupVisibility.StartHidden, "tepside başlatıldı");
+    }
+
+    private static bool HasSwitch(IReadOnlyList<string>? arguments, string name)
+    {
+        if (arguments is null)
+        {
+            return false;
+        }
+
+        var bare = name.TrimStart('-', '/');
+
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            var argument = arguments[i];
+            if (string.IsNullOrWhiteSpace(argument))
+            {
+                continue;
+            }
+
+            if (string.Equals(argument.Trim().TrimStart('-', '/'), bare, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}

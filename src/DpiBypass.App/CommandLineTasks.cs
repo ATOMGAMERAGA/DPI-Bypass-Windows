@@ -171,6 +171,9 @@ internal static class CommandLineTasks
           DpiBypass.exe restore-dns         DNS ayarlarını geri yükle
           DpiBypass.exe version             sürüm
 
+          DpiBypass.exe --show              pencereyi her koşulda aç
+          DpiBypass.exe --minimized         tepside başlat (oturum açma görevi bunu kullanır)
+
         Durum ve denetim komutları çalışan uygulamaya bağlanır; uygulama kapalıysa
         bunu söyler. Argümansız çalıştırmak pencereyi açar.
         """;

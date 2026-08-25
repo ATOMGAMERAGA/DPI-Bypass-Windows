@@ -67,6 +67,25 @@ jobs:
           --logger "trx;LogFileName=tests.trx"
           --results-directory artifacts/test-results
 
+      - name: Run the script and resource tests
+        shell: pwsh
+        run: |
+          # The install script decides whether a machine gets updated at all, and a
+          # XAML key that does not resolve takes the window down before anyone sees
+          # it. Neither is covered by the C# tests.
+          $tests = @(Get-ChildItem scripts/tests -Filter '*.tests.ps1' | Sort-Object Name)
+          if ($tests.Count -eq 0) { throw 'No script tests were found.' }
+
+          foreach ($test in $tests) {
+            Write-Host "--- $($test.Name)"
+
+            # Cleared first: a script that ends without exiting would otherwise be
+            # judged by the exit code of whatever ran before it.
+            $global:LASTEXITCODE = 0
+            & $test.FullName
+            if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed" }
+          }
+
       - name: Publish the application
         shell: pwsh
         run: >
@@ -147,7 +166,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $ErrorActionPreference = 'Stop'
+
+          # PowerShell 7.4 turns a non-zero exit from a native command into a
+          # terminating error, which would take the retry loops below out of the
+          # picture entirely - the first failed upload would end the step instead of
+          # being retried. Exit codes are checked by hand here.
+          $PSNativeCommandUseErrorActionPreference = $false
+
           $tag = '${{ steps.version.outputs.tag }}'
+          $repo = '${{ github.repository }}'
+
+          # A run that dies partway through uploading assets leaves a draft release
+          # behind, and a draft is invisible to "releases/latest" - so every user
+          # running the install command keeps getting the version before it, which is
+          # exactly how a fixed build fails to reach anybody. Clear ours out first.
+          $existingJson = gh api "repos/$repo/releases?per_page=100"
+          $existing = @()
+          if ($LASTEXITCODE -eq 0 -and $existingJson) { $existing = $existingJson | ConvertFrom-Json }
+
+          foreach ($candidate in $existing) {
+            if ($candidate.draft -and ($candidate.name -like 'DPI Bypass*' -or $candidate.tag_name -like 'v*')) {
+              Write-Host "Removing stale draft release: $($candidate.name) [$($candidate.tag_name)]"
+              gh api -X DELETE "repos/$repo/releases/$($candidate.id)" | Out-Null
+            }
+          }
+
           # Single quoted here-string: the notes contain markdown backticks, and in a
           # double quoted one PowerShell would treat each of them as an escape.
           $notes = @'
@@ -156,13 +200,16 @@ jobs:
           Türkiye'deki DPI engellerini aşan Windows uygulaması. Discord başta olmak
           üzere HTTPS/HTTP bağlantılarını, ping ve ses trafiğine dokunmadan korur.
 
-          ### Kurulum
+          ### Kurulum ve güncelleme
 
           Tek satırlık kurulum (PowerShell):
 
           ```powershell
           irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
           ```
+
+          Aynı komut güncelleme komutudur: yeni sürüm varsa eski kurulumu kaldırıp
+          yenisini kurar, en güncel sürüm zaten kuruluysa bunu söyleyip çıkar.
 
           Ya da aşağıdaki `DpiBypass-Setup-${{ steps.version.outputs.full }}.exe`
           dosyasını indirip çalıştırın.
@@ -181,8 +228,52 @@ jobs:
           Derleme: `${{ github.sha }}`
           '@
 
-          gh release create $tag `
-            (Get-ChildItem artifacts/release -File | ForEach-Object { $_.FullName }) `
-            --title "DPI Bypass ${{ steps.version.outputs.full }}" `
-            --notes $notes `
-            --latest
+          $release = $null
+          $releaseJson = gh api "repos/$repo/releases/tags/$tag" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $releaseJson) { $release = $releaseJson | ConvertFrom-Json }
+
+          if (-not $release) {
+            # Created empty, then filled: an asset upload that fails is retried below
+            # rather than taking the whole release down with it.
+            gh release create $tag --title "DPI Bypass ${{ steps.version.outputs.full }}" --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { throw "Could not create the release $tag" }
+          }
+          else {
+            Write-Host "Release $tag already exists; uploading into it."
+          }
+
+          $files = Get-ChildItem artifacts/release -File
+          foreach ($file in $files) {
+            $uploaded = $false
+
+            # The uploads endpoint answers 404 or 5xx under load often enough that a
+            # single attempt is not a release process. Four tries, backing off.
+            for ($attempt = 1; $attempt -le 4 -and -not $uploaded; $attempt++) {
+              Write-Host "Uploading $($file.Name) (attempt $attempt)..."
+              gh release upload $tag $file.FullName --clobber
+              if ($LASTEXITCODE -eq 0) {
+                $uploaded = $true
+              }
+              else {
+                Start-Sleep -Seconds (10 * $attempt)
+              }
+            }
+
+            if (-not $uploaded) { throw "Could not upload $($file.Name) to $tag" }
+          }
+
+          # The install command reads this list, so a release missing the installer is
+          # worse than no release at all: it is an update everyone downloads and none
+          # of them can install.
+          $publishedJson = gh api "repos/$repo/releases/tags/$tag"
+          if ($LASTEXITCODE -ne 0 -or -not $publishedJson) { throw "Release $tag could not be read back" }
+
+          $published = $publishedJson | ConvertFrom-Json
+          $names = @($published.assets | ForEach-Object { $_.name })
+          foreach ($file in $files) {
+            if ($names -notcontains $file.Name) { throw "$($file.Name) is missing from the published release" }
+          }
+
+          if ($published.draft) { throw "Release $tag is still a draft" }
+
+          Write-Host "Published $tag with $($names.Count) assets: $($names -join ', ')"

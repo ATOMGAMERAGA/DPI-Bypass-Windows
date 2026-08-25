@@ -32,6 +32,18 @@ public sealed class ThemeManager : IDisposable
 
     public event Action<bool>? ThemeChanged;
 
+    /// <summary>
+    /// Raised for any personalisation change, including the ones that leave the
+    /// light/dark choice alone.
+    /// </summary>
+    /// <remarks>
+    /// Turning "transparency effects" off does not change the theme, but it does stop
+    /// Windows drawing the material behind the window - and a window still handing
+    /// its client area to a compositor that has stopped painting is invisible. So
+    /// this fires whether or not the palette needs swapping.
+    /// </remarks>
+    public event Action? PersonalisationChanged;
+
     public void Apply()
     {
         var source = new Uri(_isDark ? "Theme/Dark.xaml" : "Theme/Light.xaml", UriKind.Relative);
@@ -76,17 +88,21 @@ public sealed class ThemeManager : IDisposable
         }
 
         var dark = IsSystemDark();
-        if (dark == _isDark)
-        {
-            return;
-        }
-
+        var themeSwitched = dark != _isDark;
         _isDark = dark;
 
-        _application.Dispatcher.Invoke(() =>
+        // Queued rather than waited on: this runs on the SystemEvents thread, which
+        // every other listener in the process shares, and a busy UI thread would hold
+        // all of them up.
+        _application.Dispatcher.BeginInvoke(() =>
         {
-            Apply();
-            ThemeChanged?.Invoke(dark);
+            if (themeSwitched)
+            {
+                Apply();
+                ThemeChanged?.Invoke(dark);
+            }
+
+            PersonalisationChanged?.Invoke();
         });
     }
 

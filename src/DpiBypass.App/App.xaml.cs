@@ -7,6 +7,7 @@ using DpiBypass.Core;
 using DpiBypass.Core.Interop;
 using DpiBypass.Core.Ipc;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.Startup;
 
 namespace DpiBypass.App;
 
@@ -19,7 +20,10 @@ public partial class App : Application
     private TrayIcon? _tray;
     private MainViewModel? _viewModel;
     private MainWindow? _window;
+    private DispatcherTimer? _visibilityWatchdog;
+    private StartupPlan _plan = new(StartupVisibility.ShowWindow, "başlatılıyor");
     private bool _shuttingDown;
+    private bool _windowEverShown;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -128,11 +132,7 @@ public partial class App : Application
         var trayReady = TryCreateTrayIcon();
 
         _window = new MainWindow(_viewModel, _theme);
-        _window.CloseToTrayRequested += () =>
-        {
-            _window.Hide();
-            _tray?.Notify(AppPaths.ProductName, "Uygulama tepside çalışmaya devam ediyor.");
-        };
+        _window.CloseToTrayRequested += OnCloseToTray;
         _window.ExitRequested += () => _ = ShutdownAsync();
 
         // A second launch (Start menu, desktop shortcut) arrives here.
@@ -145,23 +145,124 @@ public partial class App : Application
         _control = new ControlServer(request => commands.HandleAsync(request), AppLog.InfoSink);
         _control.Start();
 
-        // Starting in the tray is only a sane thing to do when there is a tray icon to
-        // come back through. Without one the window is the only way into the app, so a
-        // failed icon means the window is shown whatever the setting says.
-        var startHidden = trayReady
-            && e.Args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase))
-            && _service.Settings.StartMinimised;
+        _plan = StartupPlan.Decide(
+            e.Args,
+            _service.Settings.StartMinimised,
+            _service.Settings.HasShownWindow,
+            trayReady);
 
-        if (!startHidden)
+        AppLog.Info($"Açılış kararı: {(_plan.ShowsWindow ? "pencere gösteriliyor" : "tepside")} ({_plan.Reason}).");
+
+        if (_plan.ShowsWindow)
         {
-            _window.Show();
+            ShowMainWindow();
         }
+
+        // Whatever was decided above, something has to be reachable once the message
+        // loop is running: a window on screen, or an icon in the notification area.
+        // The watchdog is the last line of defence for the failure this app has been
+        // bitten by more than once - a live process the user cannot get to.
+        StartVisibilityWatchdog();
 
         if (_service.Settings.StartEngineOnLaunch)
         {
             // Background priority puts this behind layout and rendering, so the window
             // is drawn and interactive before the engine starts taking its time.
             Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => _ = StartEngineAsync()));
+        }
+    }
+
+    private void OnCloseToTray()
+    {
+        _window?.Hide();
+
+        // Windows 11 files an icon it has not seen before behind the overflow
+        // chevron, so "it is in the tray" is not, on its own, directions anybody can
+        // follow. Say where to look, and what to do when it is not there.
+        _tray?.Notify(
+            AppPaths.ProductName,
+            "Koruma çalışmaya devam ediyor. Pencereyi geri getirmek için saatin yanındaki "
+                + "ok (^) altında bulunan simgeye tıklayın ya da kısayolu yeniden çalıştırın.");
+    }
+
+    /// <summary>
+    /// Checks, once the message loop is running, that this process actually put
+    /// something on screen - and puts the window up if it did not.
+    /// </summary>
+    /// <remarks>
+    /// Everything before this point can succeed and still leave nothing for the user:
+    /// the shell can drop a notification area icon it was offered while it was still
+    /// starting up, and a window can be shown into a compositor state that never
+    /// paints it. Neither reports an error. Rather than trust the startup path, the
+    /// app looks at the result twice - soon, and then once more after the desktop has
+    /// settled - and shows the window if it cannot account for itself.
+    /// </remarks>
+    private void StartVisibilityWatchdog()
+    {
+        var checks = 0;
+
+        _visibilityWatchdog = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+        {
+            Interval = TimeSpan.FromSeconds(4),
+        };
+
+        _visibilityWatchdog.Tick += (_, _) =>
+        {
+            checks++;
+
+            var windowUp = _window is { IsVisible: true };
+
+            // "Never got there", not "is not there now": a user who closed the window
+            // to the tray in the first seconds meant it, and having it climb back out
+            // would be its own kind of broken.
+            if (!windowUp && _plan.ShowsWindow && !_windowEverShown)
+            {
+                AppLog.Warning("Pencere görünmüyor; yeniden gösteriliyor.");
+                ShowMainWindow();
+            }
+            else if (!windowUp)
+            {
+                // Hidden on purpose: make sure the way back in is really there.
+                _tray?.EnsureVisible();
+            }
+
+            if (checks >= 2)
+            {
+                // The one line in the log that answers "was it ever on screen?".
+                AppLog.Info(
+                    $"Görünürlük denetimi: pencere {(_windowEverShown ? "gösterildi" : "gizli")} · "
+                        + $"bildirim alanı simgesi {(_tray is null ? "yok" : "var")} · arka plan: {WindowBackdrop.Availability}.");
+
+                _visibilityWatchdog!.Stop();
+                _visibilityWatchdog = null;
+            }
+        };
+
+        _visibilityWatchdog.Start();
+    }
+
+    /// <summary>
+    /// Records that the window has been seen, so later launches are allowed to start
+    /// in the notification area.
+    /// </summary>
+    private void RememberWindowWasShown()
+    {
+        _windowEverShown = true;
+
+        var service = _service;
+        if (service is null || service.Settings.HasShownWindow)
+        {
+            return;
+        }
+
+        try
+        {
+            service.Settings.HasShownWindow = true;
+            service.SaveSettings();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Ayar kaydedilemedi", ex);
         }
     }
 
@@ -175,6 +276,28 @@ public partial class App : Application
         {
             return true;
         }
+
+        // A copy on another user's desktop would answer this launch, raise its window
+        // where this user cannot see it, and leave the shortcut looking dead.
+        var located = SingleInstance.LocateInstances();
+        if (located.OnAnotherDesktop && !located.OnThisDesktop)
+        {
+            AppLog.Warning("Uygulama başka bir Windows oturumunda çalışıyor.");
+            MessageBox.Show(
+                $"{AppPaths.ProductName} bu bilgisayarda başka bir kullanıcı oturumunda çalışıyor.\n\n"
+                    + "Koruma tüm bilgisayar için tek bir kopyadan yürütülür. Uygulamayı burada "
+                    + "kullanmak için diğer oturumdan kapatın ya da o oturumu kapatın.",
+                AppPaths.ProductName,
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return false;
+        }
+
+        // Windows will not let a background process take the foreground on its own.
+        // This launch has the right and is about to exit, so it hands it over first;
+        // without this the running copy shows its window behind everything the user
+        // is looking at, which reads as the shortcut having done nothing at all.
+        WindowActivation.AllowForegroundHandover();
 
         if (_instance.SignalExistingInstance())
         {
@@ -198,8 +321,13 @@ public partial class App : Application
         // Waiting for the UI thread to finish is the whole point: what this returns is
         // what the waiting launch is told, so a stuck dispatcher has to report failure
         // rather than let the request disappear into a queue that is not being drained.
-        var operation = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(ShowMainWindow));
-        return operation.Wait(TimeSpan.FromSeconds(4)) == DispatcherOperationStatus.Completed;
+        // And the answer is the window's, not the dispatcher's - an operation that
+        // completed while failing to raise the window is still a launch that showed
+        // the user nothing.
+        var shown = false;
+        var operation = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => shown = ShowMainWindow()));
+
+        return operation.Wait(TimeSpan.FromSeconds(4)) == DispatcherOperationStatus.Completed && shown;
     }
 
     private bool TryCreateTrayIcon()
@@ -207,7 +335,7 @@ public partial class App : Application
         try
         {
             var tray = new TrayIcon();
-            tray.OpenRequested += ShowMainWindow;
+            tray.OpenRequested += () => ShowMainWindow();
             tray.ToggleRequested += () => _viewModel?.ToggleCommand.Execute(null);
             tray.TestRequested += () => _viewModel?.TestCommand.Execute(null);
             tray.ExitRequested += () => _ = ShutdownAsync();
@@ -261,26 +389,34 @@ public partial class App : Application
         }
     }
 
-    private void ShowMainWindow()
+    /// <summary>
+    /// Puts the window in front of the user. Returns whether it is genuinely there.
+    /// </summary>
+    /// <remarks>
+    /// The return value is not decoration: it is what a second launch is told, and
+    /// that launch takes over when the answer is no. Reporting success because
+    /// <c>Show()</c> did not throw is how a wedged copy keeps every later launch
+    /// from ever producing a window.
+    /// </remarks>
+    private bool ShowMainWindow()
     {
         if (_window is null)
         {
-            return;
+            return false;
         }
 
-        if (!_window.IsVisible)
+        var shown = WindowActivation.BringToFront(_window);
+
+        if (shown)
         {
-            _window.Show();
+            RememberWindowWasShown();
         }
-
-        if (_window.WindowState == WindowState.Minimized)
+        else
         {
-            _window.WindowState = WindowState.Normal;
+            AppLog.Warning("Pencere öne getirilemedi.");
         }
 
-        _window.Activate();
-        _window.Topmost = true;
-        _window.Topmost = false;
+        return shown;
     }
 
     /// <summary>
@@ -380,6 +516,8 @@ public partial class App : Application
 
         try
         {
+            _visibilityWatchdog?.Stop();
+            _visibilityWatchdog = null;
             _window?.Hide();
             _viewModel?.Detach();
 

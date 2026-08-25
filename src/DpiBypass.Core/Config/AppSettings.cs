@@ -40,6 +40,17 @@ public sealed record AppSettings
 
     public bool MinimiseToTrayOnClose { get; set; } = true;
 
+    /// <summary>
+    /// Whether this installation has ever had its window in front of the user.
+    /// </summary>
+    /// <remarks>
+    /// The logon task starts the app minimised, so without this a freshly installed
+    /// copy would spend its whole life in the notification area - behind the Windows
+    /// 11 overflow chevron, where a user who has never seen the app has no reason to
+    /// look. Until the window has been shown once, every launch shows it.
+    /// </remarks>
+    public bool HasShownWindow { get; set; }
+
     public DnsMode DnsMode { get; set; } = DnsMode.EncryptedLoopback;
 
     public bool BlockQuicHandshakes { get; set; } = true;
