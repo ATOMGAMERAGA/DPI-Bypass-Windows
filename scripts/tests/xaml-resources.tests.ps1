@@ -101,3 +101,6 @@ if ($onlyInLight.Count -gt 0 -or $onlyInDark.Count -gt 0) {
 Write-Host "  light and dark palettes define the same $($paletteKeys['Light.xaml'].Count) key(s)"
 Write-Host ''
 Write-Host 'All XAML resource tests passed.' -ForegroundColor Green
+
+# As above: success has to be an exit code the caller can read.
+exit 0

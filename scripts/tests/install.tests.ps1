@@ -161,3 +161,7 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host 'All install script tests passed.' -ForegroundColor Green
+
+# Said out loud, because a script that just ends leaves $LASTEXITCODE at whatever
+# the caller had before it - which is not an answer.
+exit 0

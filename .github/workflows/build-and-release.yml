@@ -73,8 +73,15 @@ jobs:
           # The install script decides whether a machine gets updated at all, and a
           # XAML key that does not resolve takes the window down before anyone sees
           # it. Neither is covered by the C# tests.
-          foreach ($test in Get-ChildItem scripts/tests -Filter '*.tests.ps1' | Sort-Object Name) {
+          $tests = @(Get-ChildItem scripts/tests -Filter '*.tests.ps1' | Sort-Object Name)
+          if ($tests.Count -eq 0) { throw 'No script tests were found.' }
+
+          foreach ($test in $tests) {
             Write-Host "--- $($test.Name)"
+
+            # Cleared first: a script that ends without exiting would otherwise be
+            # judged by the exit code of whatever ran before it.
+            $global:LASTEXITCODE = 0
             & $test.FullName
             if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed" }
           }
