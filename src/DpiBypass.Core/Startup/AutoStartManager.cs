@@ -124,7 +124,9 @@ public sealed class AutoStartManager
 
     private string BuildTaskXml(bool startMinimised)
     {
-        var arguments = startMinimised ? "--minimized" : string.Empty;
+        // The same constant the launch path parses, so the two can never drift apart
+        // and leave a logon task whose switch nothing recognises.
+        var arguments = startMinimised ? StartupPlan.MinimisedSwitch : string.Empty;
         var sid = Elevation.CurrentUserSid;
         var userName = Elevation.CurrentUserName;
 
@@ -193,7 +195,9 @@ public sealed class AutoStartManager
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true);
-            key?.SetValue(RunValueName, $"\"{_executablePath}\"{(startMinimised ? " --minimized" : string.Empty)}");
+            key?.SetValue(
+                RunValueName,
+                $"\"{_executablePath}\"{(startMinimised ? " " + StartupPlan.MinimisedSwitch : string.Empty)}");
             return key is not null;
         }
         catch (Exception ex)

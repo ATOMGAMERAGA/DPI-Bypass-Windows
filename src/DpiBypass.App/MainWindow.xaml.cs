@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.App.ViewModels;
+using DpiBypass.Core.Logging;
 
 namespace DpiBypass.App;
 
@@ -27,6 +28,7 @@ public partial class MainWindow : Window
 #pragma warning restore WPF0001
 
         _theme.ThemeChanged += OnThemeChanged;
+        _theme.PersonalisationChanged += OnPersonalisationChanged;
         ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged += OnLogLinesChanged;
     }
 
@@ -41,6 +43,7 @@ public partial class MainWindow : Window
         // Mica needs a window handle, which only exists from here on. When it is not
         // available the solid Fluent background stays, so nothing else has to change.
         _micaApplied = WindowBackdrop.TryApply(this, _theme.IsDark);
+        AppLog.Info($"Pencere arka planı: {WindowBackdrop.Availability}.");
     }
 
     private void OnThemeChanged(bool isDark)
@@ -51,6 +54,35 @@ public partial class MainWindow : Window
         {
             SetResourceReference(BackgroundProperty, "AppWindowBackgroundBrush");
         }
+    }
+
+    /// <summary>
+    /// Takes the window off the compositor when Windows stops drawing the material.
+    /// </summary>
+    /// <remarks>
+    /// A Mica window paints nothing itself - that is what makes the material visible.
+    /// The moment Windows stops drawing it (transparency effects switched off, a high
+    /// contrast theme, a session moved to Remote Desktop) the client area becomes a
+    /// see-through hole with the controls floating in it, and the app looks like it
+    /// failed to open. Going back to a painted background is not as pretty and is
+    /// always readable.
+    /// </remarks>
+    private void OnPersonalisationChanged()
+    {
+        if (!_micaApplied)
+        {
+            return;
+        }
+
+        var blocker = WindowBackdrop.DescribeUnavailability();
+        if (blocker is null)
+        {
+            return;
+        }
+
+        WindowBackdrop.Remove(this);
+        _micaApplied = false;
+        AppLog.Info($"Pencere arka planı düz renge alındı: {blocker}.");
     }
 
     private void OnLogLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -82,6 +114,7 @@ public partial class MainWindow : Window
         }
 
         _theme.ThemeChanged -= OnThemeChanged;
+        _theme.PersonalisationChanged -= OnPersonalisationChanged;
         ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged -= OnLogLinesChanged;
         base.OnClosing(e);
 

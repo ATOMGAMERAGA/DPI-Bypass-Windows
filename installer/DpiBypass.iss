@@ -91,7 +91,12 @@ Filename: "{app}\{#AppExeName}"; Parameters: "--install-autostart"; Flags: runhi
 ; on by default in the settings file, so leaving it unticked has to be recorded too -
 ; otherwise the app reconciles the missing task on first launch and puts it back.
 Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; Flags: runhidden waituntilterminated; Tasks: not autostart
-Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchAfterInstall}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Description: "{cm:LaunchAfterInstall}"; Flags: nowait postinstall skipifsilent
+; A silent install - which is what the one line PowerShell installer runs - never
+; reaches the checkbox above, and the logon task does not fire until the next sign
+; in. Without this the whole installation finishes having put nothing on screen,
+; which is indistinguishable from it having failed.
+Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 ; Put the user's DNS back before anything is deleted, using the same code that changed it.

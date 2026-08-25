@@ -269,49 +269,79 @@ public sealed class SingleInstance : IDisposable
         }
     }
 
+    /// <summary>Where the copies of this executable that are already running live.</summary>
+    /// <param name="OnThisDesktop">At least one is in this Windows session.</param>
+    /// <param name="OnAnotherDesktop">At least one is in a different Windows session.</param>
+    public readonly record struct InstanceLocations(bool OnThisDesktop, bool OnAnotherDesktop);
+
     /// <summary>
-    /// Ends copies of this exact executable that are holding the lock without
-    /// answering. Never touches a different program that happens to share the name,
-    /// and never this process.
+    /// Finds out whose desktop the running copies are on.
     /// </summary>
-    private static void EndUnresponsiveInstances(Action<string>? log)
+    /// <remarks>
+    /// The engine is a machine-wide packet filter, so the instance lock has to be
+    /// machine-wide too - which means a launch here can be answered by a copy running
+    /// on somebody else's desktop after a user switch. That copy dutifully raises its
+    /// window where this user cannot see it and reports success, and this launch exits
+    /// without a word: the shortcut appears to do nothing, for ever. Detecting it is
+    /// the only way to say something useful instead.
+    /// </remarks>
+    public static InstanceLocations LocateInstances()
     {
-        var self = Environment.ProcessPath;
-        if (string.IsNullOrEmpty(self))
-        {
-            return;
-        }
+        var mine = CurrentSessionId();
+        var here = false;
+        var elsewhere = false;
 
-        Process[] candidates;
-        try
-        {
-            candidates = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(self));
-        }
-        catch (Exception)
-        {
-            return;
-        }
-
-        var current = Environment.ProcessId;
-
-        foreach (var process in candidates)
+        foreach (var process in FindSiblingProcesses())
         {
             try
             {
-                if (process.Id == current)
+                if (process.SessionId == mine)
                 {
-                    continue;
+                    here = true;
                 }
-
-                if (!string.Equals(process.MainModule?.FileName, self, StringComparison.OrdinalIgnoreCase))
+                else
                 {
-                    continue;
+                    elsewhere = true;
                 }
+            }
+            catch (Exception)
+            {
+                // A copy we cannot read is assumed to be ours, which keeps the normal
+                // handover in charge rather than putting a dialog in front of it.
+                here = true;
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
 
+        return new InstanceLocations(here, elsewhere);
+    }
+
+    /// <summary>
+    /// Ends copies of this exact executable that are holding the lock without
+    /// answering. Never touches a different program that happens to share the name,
+    /// never another user's session, and never this process.
+    /// </summary>
+    private static void EndUnresponsiveInstances(Action<string>? log)
+    {
+        var mine = CurrentSessionId();
+
+        foreach (var process in FindSiblingProcesses())
+        {
+            try
+            {
                 // A copy that started moments ago is a sibling still finding its feet -
                 // a command line verb, or the elevated relaunch of another shortcut -
                 // not the wedged instance this is recovering from.
                 if (DateTime.Now - process.StartTime < TimeSpan.FromSeconds(10))
+                {
+                    continue;
+                }
+
+                // Another user's copy may be perfectly healthy and serving them.
+                if (process.SessionId != mine)
                 {
                     continue;
                 }
@@ -328,6 +358,65 @@ public sealed class SingleInstance : IDisposable
             {
                 process.Dispose();
             }
+        }
+    }
+
+    /// <summary>Every other process running this exact executable. Caller disposes.</summary>
+    private static IEnumerable<Process> FindSiblingProcesses()
+    {
+        var self = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(self))
+        {
+            yield break;
+        }
+
+        Process[] candidates;
+        try
+        {
+            candidates = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(self));
+        }
+        catch (Exception)
+        {
+            yield break;
+        }
+
+        var current = Environment.ProcessId;
+
+        foreach (var process in candidates)
+        {
+            var match = false;
+
+            try
+            {
+                match = process.Id != current
+                    && string.Equals(process.MainModule?.FileName, self, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception)
+            {
+                // A process we cannot read is not one we are going to act on.
+            }
+
+            if (match)
+            {
+                yield return process;
+            }
+            else
+            {
+                process.Dispose();
+            }
+        }
+    }
+
+    private static int CurrentSessionId()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            return process.SessionId;
+        }
+        catch (Exception)
+        {
+            return -1;
         }
     }
 
