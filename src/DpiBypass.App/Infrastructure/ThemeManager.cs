@@ -91,7 +91,10 @@ public sealed class ThemeManager : IDisposable
         var themeSwitched = dark != _isDark;
         _isDark = dark;
 
-        _application.Dispatcher.Invoke(() =>
+        // Queued rather than waited on: this runs on the SystemEvents thread, which
+        // every other listener in the process shares, and a busy UI thread would hold
+        // all of them up.
+        _application.Dispatcher.BeginInvoke(() =>
         {
             if (themeSwitched)
             {

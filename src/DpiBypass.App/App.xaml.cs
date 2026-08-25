@@ -211,16 +211,18 @@ public partial class App : Application
             checks++;
 
             var windowUp = _window is { IsVisible: true };
-            if (!windowUp && _plan.ShowsWindow)
+
+            // "Never got there", not "is not there now": a user who closed the window
+            // to the tray in the first seconds meant it, and having it climb back out
+            // would be its own kind of broken.
+            if (!windowUp && _plan.ShowsWindow && !_windowEverShown)
             {
-                // We meant to be on screen and we are not. Nothing about that is
-                // recoverable by waiting.
                 AppLog.Warning("Pencere görünmüyor; yeniden gösteriliyor.");
                 ShowMainWindow();
             }
             else if (!windowUp)
             {
-                // Deliberately hidden: make sure the way back in is really there.
+                // Hidden on purpose: make sure the way back in is really there.
                 _tray?.EnsureVisible();
             }
 
