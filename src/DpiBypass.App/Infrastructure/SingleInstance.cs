@@ -40,11 +40,12 @@ public sealed class SingleInstance : IDisposable
     private const string AcknowledgeEventName = @"Global\DpiBypass.Activated";
 
     /// <summary>
-    /// How long a launch waits for the running copy to confirm the window is up.
-    /// Long enough for a busy machine to schedule the UI thread, short enough that a
-    /// user who double-clicked an icon is not left staring at nothing.
+    /// How long a launch waits for the running copy to confirm the window is up when
+    /// the caller does not say. Long enough for a busy machine to schedule the UI
+    /// thread, short enough that a user who double-clicked an icon is not left
+    /// staring at nothing.
     /// </summary>
-    private static readonly TimeSpan HandoverTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultHandoverTimeout = TimeSpan.FromSeconds(5);
 
     private readonly CancellationTokenSource _stopping = new();
     private Mutex? _mutex;
@@ -121,9 +122,16 @@ public sealed class SingleInstance : IDisposable
     /// <summary>
     /// Asks the running instance to show its window and waits for it to confirm.
     /// Returns false when nobody answered, which means the lock is held by a copy
-    /// that is not serving anyone.
+    /// that is not serving anyone - or one that is simply taking longer than the
+    /// caller was prepared to wait.
     /// </summary>
-    public bool SignalExistingInstance()
+    /// <remarks>
+    /// The timeout is the caller's to choose because the two answers are worth very
+    /// different amounts. A short first wait keeps a shortcut feeling immediate; a
+    /// long second one, spent only on a copy that has separately proved it is alive,
+    /// is what stops a busy instance being mistaken for a dead one and ended.
+    /// </remarks>
+    public bool SignalExistingInstance(TimeSpan? timeout = null)
     {
         if (_activate is null)
         {
@@ -141,7 +149,7 @@ public sealed class SingleInstance : IDisposable
                 return false;
             }
 
-            return _acknowledge is not null && _acknowledge.WaitOne(HandoverTimeout);
+            return _acknowledge is not null && _acknowledge.WaitOne(timeout ?? DefaultHandoverTimeout);
         }
         catch (Exception)
         {

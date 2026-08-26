@@ -35,7 +35,7 @@ if ($errors -and $errors.Count -gt 0) {
     throw 'install.ps1 does not parse.'
 }
 
-foreach ($name in @('ConvertTo-ComparableVersion', 'Get-UpdateDecision', 'Get-InstalledRelease')) {
+foreach ($name in @('ConvertTo-ComparableVersion', 'Get-UpdateDecision', 'Get-InstalledRelease', 'Get-SafeWorkingDirectory')) {
     $definition = $ast.Find(
         [Func[System.Management.Automation.Language.Ast, bool]] {
             param($node)
@@ -142,6 +142,41 @@ Test-Case 'the decision carries the versions it compared' {
     $decision = Get-UpdateDecision -InstalledVersion '1.0.0.25' -LatestVersion 'v1.0.0.28'
     Assert-Equal ([version]'1.0.0.25') $decision.Installed
     Assert-Equal ([version]'1.0.0.28') $decision.Latest
+}
+
+Test-Case 'the working directory handed to Start-Process is a real folder' {
+    # Start-Process passes this straight to CreateProcess, and a PowerShell location
+    # that is a registry key, a mapped drive or an unreachable share fails the launch
+    # with "the system cannot find the path specified" before the install has done
+    # anything at all.
+    $directory = Get-SafeWorkingDirectory
+
+    if (-not $directory) {
+        throw 'no working directory was chosen'
+    }
+
+    if (-not [System.IO.Directory]::Exists($directory)) {
+        throw "'$directory' is not a directory"
+    }
+}
+
+Test-Case 'the working directory is never the caller''s own location' {
+    # Deliberately not $PWD: the point of the helper is that the location this script
+    # happens to be run from has no say, because that location is the thing that
+    # breaks - a registry drive, a mapped drive the elevated token does not have, or
+    # a folder that has since been deleted.
+    $elsewhere = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+
+    Push-Location $elsewhere
+    try {
+        $directory = (Get-SafeWorkingDirectory).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        $here = (Get-Location).ProviderPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+
+        Assert-Equal $false ($directory -eq $here) 'picked the current location'
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 Test-Case 'nothing installed is reported as nothing installed' {

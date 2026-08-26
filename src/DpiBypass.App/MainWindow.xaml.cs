@@ -1,7 +1,9 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
-using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.App.ViewModels;
 using DpiBypass.Core.Logging;
@@ -11,11 +13,13 @@ namespace DpiBypass.App;
 public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel;
-    private readonly ThemeManager _theme;
+    private readonly ThemeManager? _theme;
     private bool _micaApplied;
+    private nint _backdropHandle;
+    private bool _scrollPending;
     private bool _exiting;
 
-    public MainWindow(MainViewModel viewModel, ThemeManager theme)
+    public MainWindow(MainViewModel viewModel, ThemeManager? theme)
     {
         _viewModel = viewModel;
         _theme = theme;
@@ -27,8 +31,12 @@ public partial class MainWindow : Window
         ThemeMode = ThemeMode.System;
 #pragma warning restore WPF0001
 
-        _theme.ThemeChanged += OnThemeChanged;
-        _theme.PersonalisationChanged += OnPersonalisationChanged;
+        if (_theme is not null)
+        {
+            _theme.ThemeChanged += OnThemeChanged;
+            _theme.PersonalisationChanged += OnPersonalisationChanged;
+        }
+
         ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged += OnLogLinesChanged;
     }
 
@@ -42,8 +50,74 @@ public partial class MainWindow : Window
 
         // Mica needs a window handle, which only exists from here on. When it is not
         // available the solid Fluent background stays, so nothing else has to change.
-        _micaApplied = WindowBackdrop.TryApply(this, _theme.IsDark);
+        _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
+        _backdropHandle = _micaApplied ? new WindowInteropHelper(this).Handle : nint.Zero;
         AppLog.Info($"Pencere arka planı: {WindowBackdrop.Availability}.");
+    }
+
+    /// <summary>
+    /// Makes sure the client area is being painted by somebody - the compositor or
+    /// the window itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A Mica window paints nothing of its own; that is what makes the material
+    /// visible. So the instant the material stops being drawn the window becomes a
+    /// see-through hole with the controls floating in it, which to anybody who just
+    /// double-clicked a shortcut is indistinguishable from the app having failed to
+    /// open. Two things cause it and neither reports an error.
+    /// </para>
+    /// <para>
+    /// The first is Windows deciding not to draw it any more - transparency effects
+    /// switched off, a high contrast theme, the session moved to Remote Desktop. The
+    /// second is subtler: several ordinary WPF property writes rebuild the window
+    /// handle, and the replacement handle carries none of the attributes the old one
+    /// was given, so the window carries on not painting over a material nobody is
+    /// drawing. Raising the window is one of the paths that can do it, which is why
+    /// this is checked every time the window is brought to the front as well as on a
+    /// timer while it is up.
+    /// </para>
+    /// </remarks>
+    public void EnsureBackgroundIsPainted()
+    {
+        try
+        {
+            if (_micaApplied)
+            {
+                var handle = new WindowInteropHelper(this).Handle;
+                if (handle != nint.Zero && handle != _backdropHandle)
+                {
+                    // New handle: ask for the material again rather than assuming the
+                    // old answer still holds.
+                    _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
+                    _backdropHandle = _micaApplied ? handle : nint.Zero;
+                }
+
+                if (_micaApplied && WindowBackdrop.DescribeUnavailability() is null)
+                {
+                    return;
+                }
+            }
+
+            if (_micaApplied)
+            {
+                WindowBackdrop.Remove(this);
+                _micaApplied = false;
+                _backdropHandle = nint.Zero;
+                AppLog.Info("Pencere arka planı düz renge alındı.");
+            }
+
+            // Nothing is drawing the client area, so the window has to. A fully
+            // transparent brush here is the failure being repaired, not a choice.
+            if (Background is null or SolidColorBrush { Color.A: 0 })
+            {
+                SetResourceReference(BackgroundProperty, "AppWindowBackgroundBrush");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Pencere arka planı denetlenemedi", ex);
+        }
     }
 
     private void OnThemeChanged(bool isDark)
@@ -59,41 +133,39 @@ public partial class MainWindow : Window
     /// <summary>
     /// Takes the window off the compositor when Windows stops drawing the material.
     /// </summary>
+    private void OnPersonalisationChanged() => EnsureBackgroundIsPainted();
+
+    /// <summary>
+    /// Keeps the tail of the log in view, the way a console would - once per batch of
+    /// new lines rather than once per line.
+    /// </summary>
     /// <remarks>
-    /// A Mica window paints nothing itself - that is what makes the material visible.
-    /// The moment Windows stops drawing it (transparency effects switched off, a high
-    /// contrast theme, a session moved to Remote Desktop) the client area becomes a
-    /// see-through hole with the controls floating in it, and the app looks like it
-    /// failed to open. Going back to a painted background is not as pretty and is
-    /// always readable.
+    /// <see cref="System.Windows.Controls.ListBox.ScrollIntoView"/> forces a layout
+    /// pass, and the engine logs in bursts: opening the driver, measuring a strategy
+    /// and rewriting DNS between them produce dozens of lines in a second. One forced
+    /// layout each is enough to keep the dispatcher busy for as long as the burst
+    /// lasts, and a dispatcher that is never idle is a window that never paints - the
+    /// blank rectangle that looks like a hung application. Coalescing to one scroll
+    /// per idle moment keeps the behaviour and drops the cost.
     /// </remarks>
-    private void OnPersonalisationChanged()
-    {
-        if (!_micaApplied)
-        {
-            return;
-        }
-
-        var blocker = WindowBackdrop.DescribeUnavailability();
-        if (blocker is null)
-        {
-            return;
-        }
-
-        WindowBackdrop.Remove(this);
-        _micaApplied = false;
-        AppLog.Info($"Pencere arka planı düz renge alındı: {blocker}.");
-    }
-
     private void OnLogLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.Action != NotifyCollectionChangedAction.Add || LogList.Items.Count == 0)
+        if (e.Action != NotifyCollectionChangedAction.Add || _scrollPending)
         {
             return;
         }
 
-        // Keep the tail visible, the way a console would.
-        LogList.ScrollIntoView(LogList.Items[^1]);
+        _scrollPending = true;
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _scrollPending = false;
+
+            if (LogList.Items.Count > 0)
+            {
+                LogList.ScrollIntoView(LogList.Items[^1]);
+            }
+        }));
     }
 
     private void OnExitClicked(object sender, RoutedEventArgs e)
@@ -113,8 +185,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        _theme.ThemeChanged -= OnThemeChanged;
-        _theme.PersonalisationChanged -= OnPersonalisationChanged;
+        if (_theme is not null)
+        {
+            _theme.ThemeChanged -= OnThemeChanged;
+            _theme.PersonalisationChanged -= OnPersonalisationChanged;
+        }
+
         ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged -= OnLogLinesChanged;
         base.OnClosing(e);
 

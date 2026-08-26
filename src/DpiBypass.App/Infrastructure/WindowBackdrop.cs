@@ -241,6 +241,22 @@ public static class WindowBackdrop
             return "saydamlık efektleri kapalı";
         }
 
+        try
+        {
+            // Tier 0 is WPF rendering in software - a virtual machine, a remoted
+            // session, a driver that failed to initialise. The material is a
+            // compositor effect, so on a window whose client area is being painted by
+            // the CPU there is nothing behind the transparency but the desktop.
+            if ((RenderCapability.Tier >> 16) == 0)
+            {
+                return "donanım hızlandırma kapalı";
+            }
+        }
+        catch (Exception)
+        {
+            // Cannot tell; the checks above already cover the common refusals.
+        }
+
         return null;
     }
 

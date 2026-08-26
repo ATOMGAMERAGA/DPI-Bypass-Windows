@@ -39,7 +39,7 @@ public static class DiscordDetector
         foreach (var (folder, executable, label) in SquirrelBuilds)
         {
             var root = Path.Combine(localAppData, folder);
-            if (!Directory.Exists(root))
+            if (!SafeDirectoryExists(root))
             {
                 continue;
             }
@@ -135,32 +135,72 @@ public static class DiscordDetector
         return null;
     }
 
-    private static IEnumerable<string> FindStoreDiscord()
+    private static IReadOnlyList<string> FindStoreDiscord()
     {
-        var windowsApps = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            "WindowsApps");
+        var found = new List<string>();
 
-        foreach (var directory in SafeEnumerateDirectories(windowsApps, "*Discord*"))
+        try
         {
-            var candidate = Path.Combine(directory, "Discord.exe");
-            if (File.Exists(candidate))
+            var windowsApps = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "WindowsApps");
+
+            foreach (var directory in SafeEnumerateDirectories(windowsApps, "*Discord*"))
             {
-                yield return candidate;
+                var candidate = Path.Combine(directory, "Discord.exe");
+                if (File.Exists(candidate))
+                {
+                    found.Add(candidate);
+                }
             }
         }
+        catch (Exception)
+        {
+            // A store build we cannot see is one we do not report; the desktop builds
+            // found above are still worth returning.
+        }
+
+        return found;
     }
 
-    private static IEnumerable<string> SafeEnumerateDirectories(string root, string pattern)
+    /// <summary>
+    /// The matching sub-directories of <paramref name="root"/>, or nothing when they
+    /// cannot be listed.
+    /// </summary>
+    /// <remarks>
+    /// The result is materialised inside the try on purpose.
+    /// <see cref="Directory.EnumerateDirectories(string, string)"/> is lazy, so a
+    /// <c>try</c> around the call catches nothing at all: the access check happens
+    /// when the caller starts walking the sequence, by which time this method has
+    /// returned and its handler is gone. That matters here because one of the roots
+    /// is <c>%ProgramFiles%\WindowsApps</c>, which denies enumeration to
+    /// administrators on a stock Windows install - so the "which Discord is
+    /// installed" lookup threw on essentially every machine, took the browser lookup
+    /// queued behind it with it, and left both summaries on the status page reading
+    /// "Aranıyor…" for as long as the app was open.
+    /// </remarks>
+    internal static IReadOnlyList<string> SafeEnumerateDirectories(string root, string pattern)
     {
         try
         {
-            return Directory.Exists(root) ? Directory.EnumerateDirectories(root, pattern) : [];
+            return Directory.Exists(root) ? [.. Directory.EnumerateDirectories(root, pattern)] : [];
         }
         catch (Exception)
         {
             // WindowsApps in particular denies enumeration on many machines.
             return [];
+        }
+    }
+
+    private static bool SafeDirectoryExists(string path)
+    {
+        try
+        {
+            return Directory.Exists(path);
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
