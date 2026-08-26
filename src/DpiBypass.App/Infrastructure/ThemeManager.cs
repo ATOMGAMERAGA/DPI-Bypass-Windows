@@ -1,4 +1,5 @@
 using System.Windows;
+using DpiBypass.Core.Logging;
 using Microsoft.Win32;
 
 namespace DpiBypass.App.Infrastructure;
@@ -44,26 +45,43 @@ public sealed class ThemeManager : IDisposable
     /// </remarks>
     public event Action? PersonalisationChanged;
 
+    /// <summary>
+    /// Merges the palette for the current Windows setting, replacing the previous one.
+    /// </summary>
+    /// <remarks>
+    /// A palette that will not load leaves the window looking like the Fluent theme
+    /// alone, which is plain but perfectly readable - so this reports rather than
+    /// throws. It is called from a dispatcher callback raised by a Windows
+    /// personalisation change as well as from start-up, and neither is a place worth
+    /// losing the application over a colour.
+    /// </remarks>
     public void Apply()
     {
-        var source = new Uri(_isDark ? "Theme/Dark.xaml" : "Theme/Light.xaml", UriKind.Relative);
-        var replacement = new ResourceDictionary { Source = source };
-        var merged = _application.Resources.MergedDictionaries;
-
-        // Swap by reference, never by position. Setting ThemeMode makes WPF insert its
-        // own Fluent dictionaries into this same collection, and a positional swap
-        // would overwrite one of those instead of the palette.
-        var index = _palette is null ? -1 : merged.IndexOf(_palette);
-        if (index >= 0)
+        try
         {
-            merged[index] = replacement;
-        }
-        else
-        {
-            merged.Add(replacement);
-        }
+            var source = new Uri(_isDark ? "Theme/Dark.xaml" : "Theme/Light.xaml", UriKind.Relative);
+            var replacement = new ResourceDictionary { Source = source };
+            var merged = _application.Resources.MergedDictionaries;
 
-        _palette = replacement;
+            // Swap by reference, never by position. Setting ThemeMode makes WPF insert its
+            // own Fluent dictionaries into this same collection, and a positional swap
+            // would overwrite one of those instead of the palette.
+            var index = _palette is null ? -1 : merged.IndexOf(_palette);
+            if (index >= 0)
+            {
+                merged[index] = replacement;
+            }
+            else
+            {
+                merged.Add(replacement);
+            }
+
+            _palette = replacement;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Renk paleti yüklenemedi", ex);
+        }
     }
 
     public static bool IsSystemDark()
@@ -80,30 +98,50 @@ public sealed class ThemeManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Reacts to a Windows personalisation change. Runs on the SystemEvents thread.
+    /// </summary>
+    /// <remarks>
+    /// Everything here is inside a handler because of where it runs. SystemEvents
+    /// raises its notifications on a thread of its own and does not catch what a
+    /// handler throws, so an exception escaping this method is unhandled on a thread
+    /// nobody owns - which ends the process rather than the notification. And there
+    /// is a real way to throw: once shutdown has begun the dispatcher rejects new
+    /// work, so a theme change arriving while the app is closing would take it down
+    /// on the way out.
+    /// </remarks>
     private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
     {
-        if (e.Category is not (UserPreferenceCategory.General or UserPreferenceCategory.VisualStyle or UserPreferenceCategory.Color))
+        try
         {
-            return;
-        }
-
-        var dark = IsSystemDark();
-        var themeSwitched = dark != _isDark;
-        _isDark = dark;
-
-        // Queued rather than waited on: this runs on the SystemEvents thread, which
-        // every other listener in the process shares, and a busy UI thread would hold
-        // all of them up.
-        _application.Dispatcher.BeginInvoke(() =>
-        {
-            if (themeSwitched)
+            if (e.Category is not (UserPreferenceCategory.General or UserPreferenceCategory.VisualStyle or UserPreferenceCategory.Color))
             {
-                Apply();
-                ThemeChanged?.Invoke(dark);
+                return;
             }
 
-            PersonalisationChanged?.Invoke();
-        });
+            var dark = IsSystemDark();
+            var themeSwitched = dark != _isDark;
+            _isDark = dark;
+
+            // Queued rather than waited on: this runs on the SystemEvents thread, which
+            // every other listener in the process shares, and a busy UI thread would hold
+            // all of them up.
+            _application.Dispatcher.BeginInvoke(() =>
+            {
+                if (themeSwitched)
+                {
+                    Apply();
+                    ThemeChanged?.Invoke(dark);
+                }
+
+                PersonalisationChanged?.Invoke();
+            });
+        }
+        catch (Exception)
+        {
+            // The palette staying as it is costs the user a colour. Letting this
+            // escape costs them the application.
+        }
     }
 
     public void Dispose() => SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;

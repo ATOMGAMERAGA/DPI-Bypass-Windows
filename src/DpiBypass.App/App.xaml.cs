@@ -4,6 +4,7 @@ using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.App.ViewModels;
 using DpiBypass.Core;
+using DpiBypass.Core.Dns;
 using DpiBypass.Core.Interop;
 using DpiBypass.Core.Ipc;
 using DpiBypass.Core.Logging;
@@ -13,6 +14,21 @@ namespace DpiBypass.App;
 
 public partial class App : Application
 {
+    /// <summary>
+    /// How long a launch waits for the running copy to put its window up before it
+    /// starts asking whether that copy is alive at all.
+    /// </summary>
+    private static readonly TimeSpan FirstHandover = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// The second, longer wait, given only to a copy that has proved it is alive.
+    /// A busy instance is worth waiting for; a dead one is not.
+    /// </summary>
+    private static readonly TimeSpan BusyHandover = TimeSpan.FromSeconds(12);
+
+    /// <summary>How long the running copy gets to answer its control channel.</summary>
+    private static readonly TimeSpan LivenessProbe = TimeSpan.FromSeconds(2);
+
     private SingleInstance? _instance;
     private ControlServer? _control;
     private ProtectionService? _service;
@@ -39,6 +55,8 @@ public partial class App : Application
         // keeps the whole of startup on the thread that owns the UI.
         SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher));
 
+        PinWorkingDirectory();
+
         // Startup runs before the dispatcher loop, so an exception escaping here kills
         // the process without a window, a tray icon or a log line - which is exactly
         // what "the app does not open" looks like from the outside. Everything is
@@ -55,24 +73,71 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Moves the process off whatever directory it was launched from, onto its own.
+    /// </summary>
+    /// <remarks>
+    /// A process inherits the current directory of whoever started it, and the things
+    /// that start this one are not careful with it: the installer runs the app from a
+    /// temporary folder it deletes as it exits, and the one line installer runs it
+    /// from a shell whose directory may not even exist by then. A current directory
+    /// that has been deleted is not a harmless detail on Windows - every
+    /// <c>CreateProcess</c> made from it fails with "the system cannot find the path
+    /// specified", so registering the logon task and configuring DNS both report a
+    /// path error that has nothing to do with either. It is also where the loader
+    /// looks first for a DLL or an executable named without a path, which is a
+    /// planting risk in a process running as administrator. The install folder cannot
+    /// be deleted while the running executable is in it, so it is always a valid
+    /// answer.
+    /// </remarks>
+    private static void PinWorkingDirectory()
+    {
+        try
+        {
+            var install = AppContext.BaseDirectory;
+            if (!string.IsNullOrEmpty(install) && Directory.Exists(install))
+            {
+                Directory.SetCurrentDirectory(install);
+            }
+        }
+        catch (Exception)
+        {
+            // Nothing here is fatal; the helpers all resolve absolute paths anyway.
+        }
+    }
+
+    /// <summary>
     /// Gets the window on screen. Everything that can be slow is queued behind it.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// This method is deliberately synchronous from end to end. Anything awaited here
     /// runs before WPF starts pumping messages, which means an unpainted window, a
     /// tray icon the shell never gets told about, and an app that looks hung for as
     /// long as the work takes. Opening the driver, rewriting DNS and measuring
     /// strategies all belong after the loop is running, not in front of it.
+    /// </para>
+    /// <para>
+    /// It is also deliberately phased. Only the first phase can stop the app: a
+    /// window and the model behind it. Everything after that - the palette, the
+    /// notification area icon, the control channel, the engine - is something the app
+    /// is better off without than dead over, so each is taken on its own and a
+    /// failure is logged and stepped past. Losing the whole application to a theme
+    /// file that would not load is how a working installation ends up showing an
+    /// error dialog and nothing else.
+    /// </para>
     /// </remarks>
     private void Start(StartupEventArgs e)
     {
         AppPaths.MigrateLegacyState();
         AppLog.Initialise();
         AppLog.Info($"{AppPaths.ProductName} başlatılıyor · {AppPaths.Author}");
+        AppLog.Info($"Sürüm {typeof(App).Assembly.GetName().Version?.ToString(4) ?? "-"} · "
+            + $"klasör: {AppPaths.InstallDirectory} · komut satırı: {(e.Args.Length == 0 ? "(yok)" : string.Join(' ', e.Args))}");
 
         // The installer, the uninstaller and the command line share this executable.
         if (CommandLineTasks.IsHeadlessVerb(e.Args))
         {
+            InstallExceptionHandlers();
             _ = RunHeadlessAsync(e.Args);
             return;
         }
@@ -110,40 +175,45 @@ public partial class App : Application
             return;
         }
 
-        DispatcherUnhandledException += OnDispatcherUnhandledException;
-        AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
-        TaskScheduler.UnobservedTaskException += (_, args) =>
-        {
-            AppLog.Error("Gözlenmeyen görev hatası", args.Exception);
-            args.SetObserved();
-        };
-        SessionEnding += OnSessionEnding;
+        InstallExceptionHandlers();
 
-#pragma warning disable WPF0001 // Fluent theming is still marked experimental.
-        ThemeMode = ThemeMode.System;
-#pragma warning restore WPF0001
-
-        _theme = new ThemeManager(this);
-        _theme.Apply();
-
+        // --- phase one: the parts without which there is nothing to show -----------
         _service = new ProtectionService();
         _viewModel = new MainViewModel(_service, Dispatcher);
 
+        // The palette is applied before the window is built so the first frame is
+        // already the right colour, but a palette that will not load is a cosmetic
+        // problem: the Fluent theme underneath it still renders every control.
+        TryApplyTheme();
+
         var trayReady = TryCreateTrayIcon();
 
-        _window = new MainWindow(_viewModel, _theme);
-        _window.CloseToTrayRequested += OnCloseToTray;
-        _window.ExitRequested += () => _ = ShutdownAsync();
+        if (!TryCreateWindow())
+        {
+            // No window, but the engine and the notification area icon are still
+            // usable, so the app keeps protecting the connection instead of vanishing.
+            if (_tray is null)
+            {
+                throw new InvalidOperationException(
+                    "Uygulama penceresi oluşturulamadı ve bildirim alanı simgesi de kullanılamıyor.");
+            }
 
-        // A second launch (Start menu, desktop shortcut) arrives here.
-        _instance.ActivationRequested += OnActivationRequested;
-        _instance.BeginListening();
+            _tray.Notify(
+                AppPaths.ProductName,
+                "Pencere açılamadı; koruma bildirim alanı simgesinden yönetilebilir.",
+                warning: true);
+        }
 
-        // The command line drives this instance rather than guessing from the
-        // settings file what the running engine has decided.
-        var commands = new ControlCommands(_service);
-        _control = new ControlServer(request => commands.HandleAsync(request), AppLog.InfoSink);
-        _control.Start();
+        // Listening starts here rather than with the rest of the background work: the
+        // window it answers with now exists, and until this is up a second launch
+        // gets no answer at all - which is the one situation that ends with a healthy
+        // instance being taken over and killed. It costs one thread.
+        Guarded("Etkinleştirme dinleyicisi", () =>
+        {
+            // A second launch (Start menu, desktop shortcut) arrives here.
+            _instance!.ActivationRequested += OnActivationRequested;
+            _instance.BeginListening();
+        });
 
         _plan = StartupPlan.Decide(
             e.Args,
@@ -164,11 +234,106 @@ public partial class App : Application
         // bitten by more than once - a live process the user cannot get to.
         StartVisibilityWatchdog();
 
-        if (_service.Settings.StartEngineOnLaunch)
+        // --- phase two: everything the window does not depend on --------------------
+        // Queued behind the first frame rather than run in front of it, and each part
+        // guarded on its own so one refusing has no say over the others.
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(StartBackgroundServices));
+    }
+
+    /// <summary>
+    /// Brings up the parts of the app that the window does not need in order to
+    /// appear: the control channel and the engine.
+    /// </summary>
+    private void StartBackgroundServices()
+    {
+        if (_shuttingDown)
         {
-            // Background priority puts this behind layout and rendering, so the window
-            // is drawn and interactive before the engine starts taking its time.
-            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => _ = StartEngineAsync()));
+            return;
+        }
+
+        Guarded("Denetim kanalı", () =>
+        {
+            // The command line drives this instance rather than guessing from the
+            // settings file what the running engine has decided.
+            var commands = new ControlCommands(_service!);
+            _control = new ControlServer(request => commands.HandleAsync(request), AppLog.InfoSink);
+            _control.Start();
+        });
+
+        if (_service!.Settings.StartEngineOnLaunch)
+        {
+            Guarded("Koruma", () => _ = StartEngineAsync());
+        }
+        else
+        {
+            // Not starting the engine means nobody is going to re-apply the DNS
+            // settings this session, and a run that ended without restoring them - a
+            // crash, a hard power off, a copy that was taken over - leaves the machine
+            // resolving against a loopback proxy that is not listening. That is a
+            // machine with no name resolution at all, which reads as the app having
+            // broken the internet.
+            Guarded("DNS kurtarma", () => _ = RestorePendingDnsAsync());
+        }
+    }
+
+    /// <summary>Runs one startup step, logging rather than propagating a failure.</summary>
+    private static void Guarded(string what, Action step)
+    {
+        try
+        {
+            step();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"{what} başlatılamadı", ex);
+        }
+    }
+
+    private void InstallExceptionHandlers()
+    {
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            AppLog.Error("Gözlenmeyen görev hatası", args.Exception);
+            args.SetObserved();
+        };
+        SessionEnding += OnSessionEnding;
+    }
+
+    private void TryApplyTheme()
+    {
+        try
+        {
+#pragma warning disable WPF0001 // Fluent theming is still marked experimental.
+            ThemeMode = ThemeMode.System;
+#pragma warning restore WPF0001
+
+            _theme = new ThemeManager(this);
+            _theme.Apply();
+        }
+        catch (Exception ex)
+        {
+            // The window is built with whatever survived. Its own null check covers a
+            // manager that never got as far as being constructed.
+            AppLog.Error("Renk paleti uygulanamadı", ex);
+        }
+    }
+
+    private bool TryCreateWindow()
+    {
+        try
+        {
+            _window = new MainWindow(_viewModel!, _theme);
+            _window.CloseToTrayRequested += OnCloseToTray;
+            _window.ExitRequested += () => _ = ShutdownAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Pencere oluşturulamadı", ex);
+            _window = null;
+            return false;
         }
     }
 
@@ -225,6 +390,14 @@ public partial class App : Application
                 // Hidden on purpose: make sure the way back in is really there.
                 _tray?.EnsureVisible();
             }
+            else
+            {
+                // On screen, but a window handed to a compositor that has stopped
+                // drawing the material is a see-through hole with the controls
+                // floating in it - running, reachable, and indistinguishable from an
+                // app that failed to open. The window paints itself again if so.
+                _window?.EnsureBackgroundIsPainted();
+            }
 
             if (checks >= 2)
             {
@@ -270,6 +443,17 @@ public partial class App : Application
     /// Decides whether this process should build the UI. False means a healthy
     /// instance took the request and this launch is finished.
     /// </summary>
+    /// <remarks>
+    /// The hard case is the copy that is running, healthy, and busy. A start-up sweep
+    /// measures strategies over real handshakes, and while it is doing that the
+    /// dispatcher can be slow to answer. Treating "slow" as "dead" is expensive in a
+    /// way nothing on screen explains: the running copy owns the driver handles and
+    /// has pointed the machine's resolvers at its own DNS proxy, so ending it takes
+    /// the connection with it and the replacement has to build all of it again. So
+    /// liveness is established over the control channel - which is served from the
+    /// thread pool and answers whatever the UI thread is doing - before this launch
+    /// is allowed to conclude that nobody is home.
+    /// </remarks>
     private bool TryContinueAsPrimary()
     {
         if (_instance!.IsPrimary)
@@ -299,10 +483,20 @@ public partial class App : Application
         // is looking at, which reads as the shortcut having done nothing at all.
         WindowActivation.AllowForegroundHandover();
 
-        if (_instance.SignalExistingInstance())
+        if (_instance.SignalExistingInstance(FirstHandover))
         {
             AppLog.Info("Uygulama zaten çalışıyor; pencereyi öne getirmesi istendi.");
             return false;
+        }
+
+        if (RunningInstanceAnswers())
+        {
+            AppLog.Info("Çalışan kopya meşgul ama ayakta; pencereyi açması için daha uzun bekleniyor.");
+
+            if (_instance.SignalExistingInstance(BusyHandover))
+            {
+                return false;
+            }
         }
 
         // The lock is held by a copy that will not answer - hung, or half torn down.
@@ -310,6 +504,28 @@ public partial class App : Application
         // there is nothing there to click, and every later launch would say the same.
         AppLog.Warning("Çalışan kopya yanıt vermedi; bu kopya devralıyor.");
         return _instance.TryTakeOver(AppLog.InfoSink);
+    }
+
+    /// <summary>
+    /// Asks the copy holding the instance lock for its status over the control pipe.
+    /// True means it is alive, whatever its window is doing.
+    /// </summary>
+    private static bool RunningInstanceAnswers()
+    {
+        try
+        {
+            // On the thread pool, because this runs on the UI thread of a launch that
+            // has no window yet and must not deadlock against its own dispatcher.
+            var probe = Task.Run(() => ControlClient.SendAsync(
+                new ControlRequest { Command = ControlProtocol.Commands.Status },
+                LivenessProbe));
+
+            return probe.Wait(LivenessProbe + TimeSpan.FromSeconds(1)) && probe.Result is not null;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -327,7 +543,10 @@ public partial class App : Application
         var shown = false;
         var operation = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => shown = ShowMainWindow()));
 
-        return operation.Wait(TimeSpan.FromSeconds(4)) == DispatcherOperationStatus.Completed && shown;
+        // Longer than the first wait on the other side and matched to the second one,
+        // so a busy dispatcher gets to finish rather than being written off while the
+        // launch that asked is still waiting for it.
+        return operation.Wait(BusyHandover) == DispatcherOperationStatus.Completed && shown;
     }
 
     private bool TryCreateTrayIcon()
@@ -390,6 +609,37 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Puts the machine's resolvers back when a previous run left them redirected and
+    /// this one is not going to take them over.
+    /// </summary>
+    private async Task RestorePendingDnsAsync()
+    {
+        try
+        {
+            var configurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
+            if (!configurator.HasPendingRestore)
+            {
+                return;
+            }
+
+            // The engine owns the resolvers whenever it is running, and it re-applies
+            // them itself on the way up. Undoing a redirect it has just installed
+            // would be worse than the leftover this is here to clean up.
+            if (_service is not { State: ProtectionState.Stopped })
+            {
+                return;
+            }
+
+            AppLog.Warning("Önceki çalıştırmadan kalan DNS yönlendirmesi bulundu; geri alınıyor.");
+            await configurator.RestoreAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("DNS ayarları geri yüklenemedi", ex);
+        }
+    }
+
+    /// <summary>
     /// Puts the window in front of the user. Returns whether it is genuinely there.
     /// </summary>
     /// <remarks>
@@ -410,6 +660,11 @@ public partial class App : Application
         if (shown)
         {
             RememberWindowWasShown();
+
+            // Raising a window can rebuild its handle, and a rebuilt handle has none
+            // of the backdrop state the old one was given - which leaves a window
+            // that paints nothing over a material nobody is drawing.
+            _window.EnsureBackgroundIsPainted();
         }
         else
         {

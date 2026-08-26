@@ -85,26 +85,33 @@ Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
+; WorkingDir is on every entry on purpose. A child process inherits its working
+; directory, Setup's own is a temporary folder it deletes as it exits, and a process
+; whose working directory has been deleted cannot start any child of its own -
+; CreateProcess fails with "the system cannot find the path specified". The app
+; launched by the last entry here outlives Setup, so without this the very first run
+; after an installation is the one run that cannot register its logon task or
+; configure DNS, and it reports a path error that has nothing to do with either.
 ; Registering the logon task through the app keeps one implementation of it.
-Filename: "{app}\{#AppExeName}"; Parameters: "--install-autostart"; Flags: runhidden waituntilterminated; Tasks: autostart
+Filename: "{app}\{#AppExeName}"; Parameters: "--install-autostart"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Tasks: autostart
 ; And the other way round, or the checkbox only works when it is ticked: autostart is
 ; on by default in the settings file, so leaving it unticked has to be recorded too -
 ; otherwise the app reconciles the missing task on first launch and puts it back.
-Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; Flags: runhidden waituntilterminated; Tasks: not autostart
-Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Description: "{cm:LaunchAfterInstall}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Tasks: not autostart
+Filename: "{app}\{#AppExeName}"; Parameters: "--show"; WorkingDir: "{app}"; Description: "{cm:LaunchAfterInstall}"; Flags: nowait postinstall skipifsilent
 ; A silent install - which is what the one line PowerShell installer runs - never
 ; reaches the checkbox above, and the logon task does not fire until the next sign
 ; in. Without this the whole installation finishes having put nothing on screen,
 ; which is indistinguishable from it having failed.
-Filename: "{app}\{#AppExeName}"; Parameters: "--show"; Flags: nowait; Check: WizardSilent
+Filename: "{app}\{#AppExeName}"; Parameters: "--show"; WorkingDir: "{app}"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 ; Put the user's DNS back before anything is deleted, using the same code that changed it.
-Filename: "{app}\{#AppExeName}"; Parameters: "--restore-dns"; RunOnceId: "RestoreDns"; Flags: runhidden waituntilterminated
-Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; RunOnceId: "RemoveTask"; Flags: runhidden waituntilterminated
+Filename: "{app}\{#AppExeName}"; Parameters: "--restore-dns"; WorkingDir: "{app}"; RunOnceId: "RestoreDns"; Flags: runhidden waituntilterminated
+Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; WorkingDir: "{app}"; RunOnceId: "RemoveTask"; Flags: runhidden waituntilterminated
 ; The driver service is created on demand by WinDivert; remove it so nothing is left behind.
-Filename: "{sys}\sc.exe"; Parameters: "stop WinDivert"; RunOnceId: "StopDriver"; Flags: runhidden waituntilterminated
-Filename: "{sys}\sc.exe"; Parameters: "delete WinDivert"; RunOnceId: "DeleteDriver"; Flags: runhidden waituntilterminated
+Filename: "{sys}\sc.exe"; Parameters: "stop WinDivert"; WorkingDir: "{sys}"; RunOnceId: "StopDriver"; Flags: runhidden waituntilterminated
+Filename: "{sys}\sc.exe"; Parameters: "delete WinDivert"; WorkingDir: "{sys}"; RunOnceId: "DeleteDriver"; Flags: runhidden waituntilterminated
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{commonappdata}\{#AppName}\logs"

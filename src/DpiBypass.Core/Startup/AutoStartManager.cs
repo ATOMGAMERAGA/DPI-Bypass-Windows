@@ -36,11 +36,27 @@ public sealed class AutoStartManager
 
     public async Task<bool> IsEnabledAsync(CancellationToken cancellationToken = default)
     {
-        var query = await ProcessRunner
-            .RunAsync("schtasks.exe", ["/Query", "/TN", TaskName], TimeSpan.FromSeconds(20), cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            var query = await ProcessRunner
+                .RunAsync("schtasks.exe", ["/Query", "/TN", TaskName], TimeSpan.FromSeconds(20), cancellationToken)
+                .ConfigureAwait(false);
 
-        return query.Success || RunKeyExists();
+            if (query.Success)
+            {
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Answering "we do not know" as "not registered" would have the caller
+            // register it again, which is harmless. Throwing would not be: this is
+            // awaited from a fire and forget started at construction time, where the
+            // failure disappears and the autostart checkbox never finishes loading.
+            _log?.Invoke($"Autostart state could not be read: {ex.Message}");
+        }
+
+        return RunKeyExists();
     }
 
     public async Task<bool> EnableAsync(bool startMinimised, CancellationToken cancellationToken = default)
@@ -89,9 +105,18 @@ public sealed class AutoStartManager
 
     public async Task DisableAsync(CancellationToken cancellationToken = default)
     {
-        await ProcessRunner
-            .RunAsync("schtasks.exe", ["/Delete", "/TN", TaskName, "/F"], TimeSpan.FromSeconds(20), cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            await ProcessRunner
+                .RunAsync("schtasks.exe", ["/Delete", "/TN", TaskName, "/F"], TimeSpan.FromSeconds(20), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The Run key below is the half that a non-elevated launch can still fix,
+            // so it is always attempted rather than skipped because the task tool failed.
+            _log?.Invoke($"Scheduled task could not be removed: {ex.Message}");
+        }
 
         RemoveRunKey();
         await RemoveLegacyAutoStartAsync(cancellationToken).ConfigureAwait(false);

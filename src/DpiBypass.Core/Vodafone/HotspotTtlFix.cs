@@ -226,7 +226,15 @@ public sealed class HotspotTtlFix : IDisposable
                 // fills, which black-holes the adapter while IsActive still claims all is
                 // well. Clear() joins this very thread, so it has to run somewhere else.
                 _log?.Invoke("Removing the TTL rule so the adapter is not left black-holed.");
-                ThreadPool.QueueUserWorkItem(_ => TearDownAfterFailure(handle));
+
+                // Task.Run, not QueueUserWorkItem: an exception escaping a work item
+                // is unhandled on a thread pool thread and ends the process, and the
+                // teardown below touches a cancellation source a concurrent stop may
+                // already have disposed. A faulted task is merely observed and logged.
+                _ = Task.Run(() => TearDownAfterFailure(handle))
+                    .ContinueWith(
+                        t => _log?.Invoke($"TTL rule teardown failed: {t.Exception?.GetBaseException().Message}"),
+                        TaskContinuationOptions.OnlyOnFaulted);
             }
         }
     }

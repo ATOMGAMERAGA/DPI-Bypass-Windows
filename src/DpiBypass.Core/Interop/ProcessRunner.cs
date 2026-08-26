@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 
@@ -12,10 +13,24 @@ public readonly record struct ProcessResult(int ExitCode, string StandardOutput,
 /// Runs short lived console helpers.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Network configuration goes through PowerShell cmdlets rather than
 /// <c>netsh</c>: netsh prints localised text that would have to be parsed, and on
 /// Turkish Windows that parsing breaks. The cmdlets return objects, so JSON out is
 /// stable regardless of the display language.
+/// </para>
+/// <para>
+/// Everything here is launched by absolute path, from a working directory this
+/// process picked. Both matter more than they look. With
+/// <see cref="ProcessStartInfo.UseShellExecute"/> off, Windows resolves a bare file
+/// name against the current directory before anything else - so a copy of
+/// <c>powershell.exe</c> sitting in whatever folder the app happened to be started
+/// from would be run in its place, elevated. And when that folder has since been
+/// deleted - the installer's temp directory is the usual culprit, because the app is
+/// launched from it and it is removed the moment setup exits - the launch fails
+/// outright with "the system cannot find the path specified", which is how a
+/// perfectly good installation ends up reporting a path error it cannot explain.
+/// </para>
 /// </remarks>
 public static class ProcessRunner
 {
@@ -27,7 +42,8 @@ public static class ProcessRunner
     {
         var startInfo = new ProcessStartInfo
         {
-            FileName = fileName,
+            FileName = ResolveExecutable(fileName),
+            WorkingDirectory = SafeWorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -60,9 +76,19 @@ public static class ProcessRunner
             }
         };
 
-        if (!process.Start())
+        try
         {
-            return new ProcessResult(-1, string.Empty, $"could not start {fileName}");
+            if (!process.Start())
+            {
+                return new ProcessResult(-1, string.Empty, $"could not start {fileName}");
+            }
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or PlatformNotSupportedException)
+        {
+            // A helper that will not launch is a degraded feature, never a reason to
+            // take the caller down: autostart falls back to the Run key, DNS falls
+            // back to leaving the system alone, and the app keeps running.
+            return new ProcessResult(-1, string.Empty, $"{fileName}: {ex.Message}");
         }
 
         process.BeginOutputReadLine();
@@ -104,6 +130,71 @@ public static class ProcessRunner
             ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", Utf8OutputPrelude + script],
             timeout,
             cancellationToken);
+
+    /// <summary>
+    /// A directory that is certain to exist for the lifetime of this process.
+    /// </summary>
+    /// <remarks>
+    /// The app's own folder, because it cannot be removed while the executable inside
+    /// it is running. <see cref="Environment.CurrentDirectory"/> deliberately is not
+    /// used: whoever launched this process chose it, and the launcher this app is
+    /// most often started by - the installer - deletes it on the way out.
+    /// </remarks>
+    private static readonly string SafeWorkingDirectory = ResolveSafeWorkingDirectory();
+
+    private static string ResolveSafeWorkingDirectory()
+    {
+        foreach (var candidate in new[] { AppContext.BaseDirectory, Environment.SystemDirectory })
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(candidate) && Directory.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+            catch (Exception)
+            {
+                // Try the next one.
+            }
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// Turns a Windows tool name into the full path of the copy shipped with Windows.
+    /// </summary>
+    /// <remarks>
+    /// Anything that is already a path is handed back untouched, so callers keep
+    /// their say. A bare name only resolves when the file really is in the system
+    /// directory; otherwise the name is returned and the normal search runs, which
+    /// keeps this from breaking on a machine that puts its tools somewhere else.
+    /// </remarks>
+    internal static string ResolveExecutable(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)
+            || fileName.AsSpan().IndexOfAny('\\', '/', ':') >= 0)
+        {
+            return fileName;
+        }
+
+        try
+        {
+            var system = Environment.SystemDirectory;
+            if (string.IsNullOrEmpty(system))
+            {
+                return fileName;
+            }
+
+            var candidate = Path.Combine(system, fileName);
+            return File.Exists(candidate) ? candidate : fileName;
+        }
+        catch (Exception)
+        {
+            return fileName;
+        }
+    }
 
     private static void TryKill(Process process)
     {

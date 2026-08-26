@@ -100,12 +100,21 @@ public sealed class TrayIcon : IDisposable
 
     public void Update(string headline, string detail, bool isRunning)
     {
-        _statusItem.Text = headline;
-        _toggleItem.Text = isRunning ? "Korumayı durdur" : "Korumayı başlat";
+        try
+        {
+            _statusItem.Text = headline;
+            _toggleItem.Text = isRunning ? "Korumayı durdur" : "Korumayı başlat";
 
-        // NotifyIcon.Text is capped at 127 characters by the shell.
-        var tooltip = $"{AppPaths.ProductName}\n{headline}\n{detail}";
-        _icon.Text = tooltip.Length > 127 ? tooltip[..127] : tooltip;
+            // NotifyIcon.Text is capped at 127 characters by the shell.
+            var tooltip = $"{AppPaths.ProductName}\n{headline}\n{detail}";
+            _icon.Text = tooltip.Length > 127 ? tooltip[..127] : tooltip;
+        }
+        catch (Exception)
+        {
+            // This is driven by the service's state changes, which keep arriving while
+            // the app is being torn down - by which point the icon may already be
+            // disposed. A tooltip is not worth an exception on the way out.
+        }
     }
 
     public void Notify(string title, string message, bool warning = false)

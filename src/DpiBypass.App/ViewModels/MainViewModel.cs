@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
@@ -60,10 +61,18 @@ public sealed record DnsOption(DnsMode Mode, string Display, string Description)
 /// <summary>Everything the main window binds to.</summary>
 public sealed class MainViewModel : ObservableObject
 {
+    /// <summary>How many lines the log page keeps. The file keeps everything.</summary>
+    private const int LogCapacity = 500;
+
     private readonly ProtectionService _service;
     private readonly AutoStartManager _autoStart;
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _refreshTimer;
+
+    /// <summary>Lines waiting to be handed to the UI thread, oldest first.</summary>
+    private readonly ConcurrentQueue<string> _pendingLogLines = new();
+
+    private int _logDrainQueued;
 
     private string _statusHeadline = "Koruma kapalı";
     private string _statusDetail = "Başlatmak için düğmeye dokunun.";
@@ -195,6 +204,9 @@ public sealed class MainViewModel : ObservableObject
         _refreshTimer.Tick += (_, _) => RefreshCounters();
         _refreshTimer.Start();
 
+        // Both are discarded on purpose - nothing waits for them - so both have to be
+        // answerable for themselves. A fault here used to disappear with the task and
+        // leave the two summaries reading "Aranıyor…" for the life of the process.
         _ = LoadInstalledAppsAsync();
         _ = LoadAutoStartStateAsync();
     }
@@ -907,48 +919,115 @@ public sealed class MainViewModel : ObservableObject
         TuningStatus = $"Deneniyor ({index}/{total}): {name}";
     }
 
+    /// <summary>
+    /// Queues a log line for the UI, batching whatever arrives before the dispatcher
+    /// next comes up for air.
+    /// </summary>
+    /// <remarks>
+    /// This is called from every thread in the app - the packet workers, the tuner,
+    /// the DNS proxy, the IPC loop - and the engine logs in bursts. Posting one
+    /// dispatcher operation per line meant a start-up sweep could queue hundreds of
+    /// them ahead of layout and rendering, and a dispatcher with a backlog it never
+    /// clears is a window that never paints: the blank rectangle that reads as a
+    /// crashed application. One operation per burst puts the lines on screen just as
+    /// promptly and leaves the UI thread free between them.
+    /// </remarks>
     private void OnLogWritten(LogEntry entry)
     {
-        if (!_dispatcher.CheckAccess())
+        _pendingLogLines.Enqueue(entry.ToString());
+
+        // Already queued: the pending drain will pick this line up as well.
+        if (Interlocked.Exchange(ref _logDrainQueued, 1) == 1)
         {
-            _dispatcher.BeginInvoke(() => OnLogWritten(entry));
             return;
         }
 
-        LogLines.Add(entry.ToString());
-        while (LogLines.Count > 500)
+        try
+        {
+            _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainLogLines));
+        }
+        catch (Exception)
+        {
+            // The dispatcher is shutting down. The lines are already in the log file,
+            // and throwing here would take down whichever engine thread logged.
+            Interlocked.Exchange(ref _logDrainQueued, 0);
+        }
+    }
+
+    private void DrainLogLines()
+    {
+        // Cleared first, so a line written while this is running queues its own drain
+        // rather than being left in the queue with nobody coming back for it.
+        Interlocked.Exchange(ref _logDrainQueued, 0);
+
+        while (_pendingLogLines.TryDequeue(out var line))
+        {
+            LogLines.Add(line);
+        }
+
+        while (LogLines.Count > LogCapacity)
         {
             LogLines.RemoveAt(0);
         }
     }
 
+    /// <summary>
+    /// Fills in what is installed on this machine. Each half stands on its own so a
+    /// folder Windows refuses to enumerate costs one line rather than both.
+    /// </summary>
     private async Task LoadInstalledAppsAsync()
     {
-        var discord = await Task.Run(DiscordDetector.FindDiscord).ConfigureAwait(true);
-        var browsers = await Task.Run(DiscordDetector.FindBrowsers).ConfigureAwait(true);
+        try
+        {
+            var discord = await Task.Run(DiscordDetector.FindDiscord).ConfigureAwait(true);
 
-        DiscordSummary = discord.Count == 0
-            ? "Discord bulunamadı. Koruma yine de Discord alan adları için çalışır."
-            : string.Join(" · ", discord.Select(d => d.Version is null ? d.Name : $"{d.Name} {d.Version}"));
+            DiscordSummary = discord.Count == 0
+                ? "Discord bulunamadı. Koruma yine de Discord alan adları için çalışır."
+                : string.Join(" · ", discord.Select(d => d.Version is null ? d.Name : $"{d.Name} {d.Version}"));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Discord aranamadı", ex);
+            DiscordSummary = "Discord aranamadı. Koruma yine de Discord alan adları için çalışır.";
+        }
 
-        BrowserSummary = browsers.Count == 0
-            ? "Kurulu tarayıcı bulunamadı."
-            : string.Join(" · ", browsers.Select(b => b.Name));
+        try
+        {
+            var browsers = await Task.Run(DiscordDetector.FindBrowsers).ConfigureAwait(true);
+
+            BrowserSummary = browsers.Count == 0
+                ? "Kurulu tarayıcı bulunamadı."
+                : string.Join(" · ", browsers.Select(b => b.Name));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Tarayıcılar aranamadı", ex);
+            BrowserSummary = "Tarayıcılar aranamadı.";
+        }
     }
 
     private async Task LoadAutoStartStateAsync()
     {
-        var enabled = await _autoStart.IsEnabledAsync().ConfigureAwait(true);
+        try
+        {
+            var enabled = await _autoStart.IsEnabledAsync().ConfigureAwait(true);
 
-        // Reconcile: the setting says it should be on but the task is missing (for
-        // example after the app folder moved), so put it back.
-        if (_service.Settings.StartWithWindows && !enabled)
-        {
-            await _autoStart.EnableAsync(_service.Settings.StartMinimised).ConfigureAwait(true);
+            // Reconcile: the setting says it should be on but the task is missing (for
+            // example after the app folder moved), so put it back.
+            if (_service.Settings.StartWithWindows && !enabled)
+            {
+                await _autoStart.EnableAsync(_service.Settings.StartMinimised).ConfigureAwait(true);
+            }
+            else if (!_service.Settings.StartWithWindows && enabled)
+            {
+                await _autoStart.DisableAsync().ConfigureAwait(true);
+            }
         }
-        else if (!_service.Settings.StartWithWindows && enabled)
+        catch (Exception ex)
         {
-            await _autoStart.DisableAsync().ConfigureAwait(true);
+            // Autostart is a convenience. Losing it must not cost the window the rest
+            // of its start-up, which is what an unobserved fault here used to do.
+            AppLog.Error("Otomatik başlatma durumu okunamadı", ex);
         }
     }
 

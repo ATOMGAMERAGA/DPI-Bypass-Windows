@@ -89,6 +89,41 @@ function Get-InstalledRelease {
 }
 
 <#
+    A directory every Start-Process in this script can safely be handed.
+
+    Start-Process gives the working directory straight to CreateProcess, and a
+    PowerShell session's location is not necessarily one CreateProcess will take: it
+    can be a registry key or a certificate store rather than a folder, a mapped drive
+    the elevated token does not have, or a network share that needs credentials the
+    new process will not carry. Any of those fails the launch outright with "the
+    system cannot find the path specified" - a path error, reported before the
+    install has done anything, about a path the user never chose. The Windows
+    directory is the one answer that is a real folder in every context this runs in,
+    and nothing here cares what the working directory actually is.
+
+    Returns null only if none of the candidates exist, in which case the callers
+    leave the parameter off and get the old behaviour.
+#>
+function Get-SafeWorkingDirectory {
+    $candidates = @($env:SystemRoot, $env:windir, 'C:\Windows', $env:TEMP)
+
+    try { $candidates += [System.IO.Path]::GetTempPath() } catch { }
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+
+        try {
+            if ([System.IO.Directory]::Exists($candidate)) { return $candidate }
+        }
+        catch {
+            # Not reachable from here; try the next one.
+        }
+    }
+
+    return $null
+}
+
+<#
     Turns "1.0.0.28", "v1.0.0.28" or "1.0.0" into something comparable. Returns null
     for anything that is not a version, so the caller can fall back to installing.
 #>
@@ -166,11 +201,34 @@ if (-not $isAdmin) {
     if ($Tag) { $switches += " -Tag '$Tag'" }
 
     $command = "& ([scriptblock]::Create((irm $url)))$switches"
-    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command', $command
-    ) | Out-Null
+
+    $startArgs = @{
+        FilePath     = 'powershell.exe'
+        Verb         = 'RunAs'
+        ArgumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command', $command)
+    }
+
+    # Never the caller's location: see Get-SafeWorkingDirectory. The elevated shell
+    # downloads the script again, so it needs nothing from the folder this ran in.
+    $safeDirectory = Get-SafeWorkingDirectory
+    if ($safeDirectory) { $startArgs['WorkingDirectory'] = $safeDirectory }
+
+    try {
+        Start-Process @startArgs | Out-Null
+    }
+    catch {
+        Write-Host ''
+        Write-Warn "Yükseltilmiş pencere açılamadı: $($_.Exception.Message)"
+        Write-Note 'Başlat menüsünden PowerShell''i sağ tıklayıp "Yönetici olarak çalıştır"'
+        Write-Note 'seçeneğiyle açın ve aynı komutu orada çalıştırın.'
+        exit 1
+    }
+
     return
 }
+
+# Used for every process this script starts from here on, for the reason above.
+$SafeWorkingDirectory = Get-SafeWorkingDirectory
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -286,7 +344,9 @@ try {
             }
 
             if (Test-Path $exe) {
-                Start-Process -FilePath $exe -ArgumentList $uninstallArgs -Wait | Out-Null
+                $uninstallStart = @{ FilePath = $exe; ArgumentList = $uninstallArgs; Wait = $true }
+                if ($SafeWorkingDirectory) { $uninstallStart['WorkingDirectory'] = $SafeWorkingDirectory }
+                Start-Process @uninstallStart | Out-Null
 
                 # Inno's uninstaller copies itself to the temp folder and the first
                 # process exits immediately, so waiting on it proves nothing. The
@@ -313,7 +373,10 @@ try {
     $arguments = @('/SILENT', '/NORESTART', '/SUPPRESSMSGBOXES')
     if ($Quiet) { $arguments = @('/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES') }
 
-    $process = Start-Process -FilePath $setupPath -ArgumentList $arguments -Wait -PassThru
+    $setupStart = @{ FilePath = $setupPath; ArgumentList = $arguments; Wait = $true; PassThru = $true }
+    if ($SafeWorkingDirectory) { $setupStart['WorkingDirectory'] = $SafeWorkingDirectory }
+
+    $process = Start-Process @setupStart
     if ($process.ExitCode -ne 0) {
         throw "Kurulum $($process.ExitCode) kodu ile sonlandı."
     }
@@ -334,7 +397,14 @@ try {
     if ($now -and $now.InstallLocation) { $appExe = Join-Path $now.InstallLocation 'DpiBypass.exe' }
     if ($appExe -and (Test-Path $appExe)) {
         Write-Step 'Uygulama başlatılıyor...'
-        Start-Process -FilePath $appExe -ArgumentList '--show' | Out-Null
+
+        # Started in its own folder, not in this script's temporary one: that folder
+        # is deleted in the finally block below, and a running process whose working
+        # directory has been removed cannot launch a child of its own - which is how
+        # the very first run after an install ends up unable to register its logon
+        # task or configure DNS, reporting a path error about neither.
+        Start-Process -FilePath $appExe -ArgumentList '--show' `
+            -WorkingDirectory $now.InstallLocation | Out-Null
     }
 
     Write-Host ''

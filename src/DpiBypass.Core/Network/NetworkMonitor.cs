@@ -61,7 +61,30 @@ public sealed class NetworkMonitor : IDisposable
         _log?.Invoke($"Network monitor started on '{_current.DisplayName}' ({_current.Key}).");
     }
 
-    private void OnSystemNetworkEvent(object? sender, EventArgs e) => ScheduleCheck();
+    /// <summary>
+    /// Windows told us an adapter changed. Runs on a thread pool thread owned by
+    /// <see cref="NetworkChange"/>.
+    /// </summary>
+    /// <remarks>
+    /// Guarded because of where it runs, not because a failure matters. NetworkChange
+    /// raises this on a thread nobody in this process owns and does not catch what a
+    /// handler throws, so an exception escaping here ends the process rather than the
+    /// notification - and there is a real way to throw. Unsubscribing does not recall
+    /// a notification already in flight, so a change arriving while the monitor is
+    /// being disposed reaches this after the cancellation source it is about to use
+    /// has been disposed. The next poll notices the same change anyway.
+    /// </remarks>
+    private void OnSystemNetworkEvent(object? sender, EventArgs e)
+    {
+        try
+        {
+            ScheduleCheck();
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"Network change notification dropped: {ex.Message}");
+        }
+    }
 
     private async Task PollAsync()
     {
