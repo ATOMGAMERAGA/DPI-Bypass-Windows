@@ -220,10 +220,11 @@ jobs:
           - Ağ değiştiğinde çalışan yöntem arka planda yeniden bulunur, düzenli denetimle doğrulanır.
           - Yeni engelli siteler kendiliğinden ölçülüp listeye eklenir; liste arayüzden düzenlenebilir.
           - Vodafone sınırsız modu: hotspot TTL düzeltmesi (yalnızca kaydettiğiniz ağlarda).
+          - Beta Ping Düşürme: gerçek RTT/jitter/kayıp ölçümüyle yalnızca güvenli NIC ayarlarını dener; kazanç yoksa geri alır.
           - Şifreli DNS: Cloudflare birincil, Google ve Quad9 yedek.
           - Kapsam seçimi: yalnızca Discord, engelli site listesi, + tarayıcılar veya tüm sistem.
           - Her Windows açılışında yükseltilmiş oturum açma göreviyle başlar.
-          - Kaldırma sırasında özgün DNS ayarları geri yüklenir.
+          - Kaldırma sırasında özgün NIC ve DNS ayarları geri yüklenir.
 
           Derleme: `${{ github.sha }}`
           '@

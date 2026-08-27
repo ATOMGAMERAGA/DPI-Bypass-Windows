@@ -70,6 +70,33 @@ public sealed class ControlCommands
             case ControlProtocol.Commands.VodafoneStatus:
                 return ControlResponse.Success(DescribeVodafone());
 
+            case ControlProtocol.Commands.LatencyOn:
+            {
+                var result = await _service.SetLowLatencyModeAsync(true, cancellationToken).ConfigureAwait(false);
+                return result.Status == LatencyOptimizationStatus.Failed
+                    ? ControlResponse.Failure(result.StatusLine)
+                    : ControlResponse.Success(result.StatusLine);
+            }
+
+            case ControlProtocol.Commands.LatencyOff:
+            {
+                var result = await _service.SetLowLatencyModeAsync(false, cancellationToken).ConfigureAwait(false);
+                return result.Status == LatencyOptimizationStatus.Failed
+                    ? ControlResponse.Failure(result.StatusLine)
+                    : ControlResponse.Success(result.StatusLine);
+            }
+
+            case ControlProtocol.Commands.LatencyRestore:
+            {
+                var result = await _service.SetLowLatencyModeAsync(false, cancellationToken).ConfigureAwait(false);
+                return result.Status == LatencyOptimizationStatus.Failed
+                    ? ControlResponse.Failure(result.StatusLine)
+                    : ControlResponse.Success(result.StatusLine);
+            }
+
+            case ControlProtocol.Commands.LatencyStatus:
+                return ControlResponse.Success(DescribeLatency());
+
             case ControlProtocol.Commands.Domains:
                 return ControlResponse.Success(DescribeDomains());
 
@@ -91,6 +118,7 @@ public sealed class ControlCommands
         builder.AppendLine($"DNS         : {DescribeDns()}");
         builder.AppendLine($"Alan adları : {_service.ProtectedDomainCount} ({_service.LearnedDomains.Count} kendiliğinden bulundu)");
         builder.AppendLine($"Sınırsız mod: {DescribeVodafone()}");
+        builder.AppendLine($"Ping düşürme: {DescribeLatency().Replace(Environment.NewLine, " · ")}");
 
         if (stats is not null)
         {
@@ -133,6 +161,16 @@ public sealed class ControlCommands
         }
 
         return $"etkin · TTL {status.TimeToLive} · düzeltilen paket {status.RewrittenPackets:N0}";
+    }
+
+    private string DescribeLatency()
+    {
+        if (!_service.Settings.LowLatencyMode)
+        {
+            return "kapalı";
+        }
+
+        return _service.LatencyResult.StatusLine;
     }
 
     private string DescribeDomains()

@@ -18,6 +18,8 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $scriptPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'install.ps1'
+$root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+$installerPath = Join-Path $root 'installer/DpiBypass.iss'
 if (-not (Test-Path $scriptPath)) {
     throw "install.ps1 not found at $scriptPath"
 }
@@ -185,6 +187,24 @@ Test-Case 'nothing installed is reported as nothing installed' {
     $installed = Get-InstalledRelease
     if ($null -ne $installed -and -not $installed.RegistryPath) {
         throw 'an installation was reported without a registry path'
+    }
+}
+
+Test-Case 'uninstall restores latency before DNS and the driver are removed' {
+    if (-not (Test-Path $installerPath)) {
+        throw "installer script not found at $installerPath"
+    }
+
+    $installer = Get-Content -Path $installerPath -Raw
+    $latency = $installer.IndexOf('Parameters: "latency restore"', [StringComparison]::Ordinal)
+    $dns = $installer.IndexOf('Parameters: "--restore-dns"', [StringComparison]::Ordinal)
+    $driver = $installer.IndexOf('Parameters: "stop WinDivert"', [StringComparison]::Ordinal)
+
+    if ($latency -lt 0) { throw 'latency restore command is missing from UninstallRun' }
+    if ($dns -lt 0) { throw 'DNS restore command is missing from UninstallRun' }
+    if ($driver -lt 0) { throw 'WinDivert stop command is missing from UninstallRun' }
+    if (-not ($latency -lt $dns -and $dns -lt $driver)) {
+        throw 'restore commands are not ordered before driver removal'
     }
 }
 

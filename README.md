@@ -178,6 +178,46 @@ kalkar — sistemde kalıcı bir değişiklik yapılmaz.
 > adil kullanım incelemesine takılabilir — orada TTL'in bir etkisi olmaz.
 > Sorumluluk kullanıcıya aittir.
 
+## Ping düşürme (Beta)
+
+**DNS ve ayarlar → Ping düşürme** kartındaki özellik, aktif fiziksel ağ
+bağdaştırıcısının desteklediği güvenli NIC seçeneklerini tek tek sınar. Önce
+gateway ve doğrudan IP adresli internet uçlarında birden çok batch ölçüm yapar;
+minimum, median, p95, jitter ve paket kaybını hesaplar. ICMP engelliyse internet
+ölçümü açıkça `TCP/443` olarak etiketlenen bağlantı süresiyle devam eder.
+
+Her aday için süreç aynıdır: özgün değer atomik snapshot'a yazılır, **yalnız bir
+ayar** `-NoRestart` ile uygulanır, bağlantı denetlenir ve aynı uzak IP yeniden
+ölçülür. Paket kaybı artarsa, median belirgin kötüleşirse veya median/jitter/p95
+birlikte doğrulanabilir kazanç göstermiyorsa o değişiklik hemen geri alınır.
+Son bir doğrulama ölçümü kazancı tekrarlamazsa tutulan değişikliklerin tamamı
+ters sırada geri yüklenir. Arayüz yalnız gerçek önce/sonra örneklerini gösterir;
+rastgele kazanç yüzdesi ya da sahte milisaniye üretmez.
+
+Beta sürümünün dokunabildiği özellikler, sürücü gerçekten destekliyorsa:
+
+- `SelectiveSuspend`, `DeviceSleepOnDisconnect` ve `D0PacketCoalescing`
+  (`Get/Set-NetAdapterPowerManagement`);
+- yalnız fiziksel Ethernet'te NDIS `*InterruptModeration` registry keyword'ü
+  (`Get/Set-NetAdapterAdvancedProperty`). Bu seçenek daha düşük gecikme karşılığında
+  CPU kullanımını bir miktar artırabilir.
+
+RSS, checksum/LSO/RSC offload, MTU, TCP autotuning, ECN, Nagle/registry hack'leri,
+HPET/timer ayarları, DNS, IPv6, route/metric, QoS, firewall ve işlem önceliği
+değiştirilmez. Bağdaştırıcı kapatılıp açılmaz ve yeniden başlatılmaz. VPN,
+TAP/TUN, Hyper-V, Docker ve WSL sanal bağdaştırıcıları atlanır.
+
+Bu özellik ISP rotasını değiştirmez, VPN değildir ve uzaktaki oyun sunucusunu
+fiziksel olarak yakınlaştırmaz. Her bağlantıda daha düşük RTT garanti edemez;
+bilgisayarın NIC/power-management kaynaklı latency ve jitter payını hedefler.
+Doğrulanmış kazanç yoksa doğru sonuç **“Kazanç doğrulanamadı; sistem özgün
+ayarlarına geri döndürüldü.”** mesajıdır.
+
+Özgün değerler `C:\ProgramData\DPI Bypass\latency-snapshot.json` içinde tutulur.
+Mod kapatıldığında, ağ değiştiğinde, uygulama normal kapandığında ve kaldırma
+başlamadan önce geri yüklenir. Bir crash sonrasında dosya sonraki açılışta önce
+restore edilir; kayıp bağdaştırıcı varsa kurtarma bilgisi silinmez.
+
 ## Ping ve hıza etkisi
 
 Tasarım gereği yok denecek kadar az:
@@ -231,6 +271,10 @@ DpiBypass.exe strategies          # yöntem kataloğu
 DpiBypass.exe isps                # operatör profilleri
 DpiBypass.exe enable / disable    # korumayı aç / kapat
 DpiBypass.exe vodafone [on|off]   # hotspot TTL düzeltmesi
+DpiBypass.exe latency status      # düşük-gecikme durumu
+DpiBypass.exe latency on / off    # ölçümlü optimizasyonu aç / kapat
+DpiBypass.exe latency test        # kalıcı ayar değiştirmeden ölç
+DpiBypass.exe latency restore     # özgün NIC değerlerini kurtar
 DpiBypass.exe restore-dns         # DNS ayarlarını geri yükle
 ```
 
@@ -260,17 +304,18 @@ istenir. İstemiyorsanız **DNS ve ayarlar** sekmesinden kapatabilirsiniz.
 
 | Dosya | İçerik |
 | --- | --- |
-| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Vodafone modu, başlangıç seçenekleri |
+| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping/Vodafone modları, başlangıç seçenekleri |
 | `networks.json` | Ağ başına öğrenilen yöntem belleği |
 | `learned-domains.json` | Otomatik keşfin bulduğu engelli alan adları |
 | `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |
+| `latency-snapshot.json` | Ping düşürmenin değiştirdiği NIC özelliklerinin tam özgün değerleri |
 | `logs\` | Günlük kayıtları (14 gün saklanır) |
 
 ## Kaldırma
 
 Ayarlar → Uygulamalar üzerinden normal şekilde kaldırılır. Kaldırma sırasında
-özgün DNS ayarlarınız geri yüklenir, oturum açma görevi silinir ve WinDivert
-sürücü servisi kaldırılır.
+özgün NIC ve DNS ayarlarınız geri yüklenir, oturum açma görevi silinir ve
+WinDivert sürücü servisi kaldırılır.
 
 ## Kaynaktan derleme
 
@@ -305,7 +350,7 @@ python3 tools/generate_assets.py assets/logo/source.png
 | --- | --- |
 | `src/DpiBypass.Core` | Paket motoru, DNS, operatör profilleri, otomatik ayarlama, TTL düzeltmesi, denetim kanalı |
 | `src/DpiBypass.App` | WPF arayüzü, tepsi simgesi, otomatik başlatma, komut satırı |
-| `tests/DpiBypass.Tests` | Birim testleri (184 test) |
+| `tests/DpiBypass.Tests` | Birim testleri (224 test) |
 | `installer/` | Inno Setup betiği ve sihirbaz görselleri |
 | `tools/` | Sürücü indirme ve logo üretme betikleri |
 | `.github/workflows/` | Derleme, test ve sürüm yayınlama hattı |
@@ -324,6 +369,8 @@ src/DpiBypass.Core/
   Dns/DnsProxyServer.cs       yerel DNS köprüsü
   Dns/DnsConfigurator.cs      sistem DNS ayarları (ve geri alma)
   Network/IspProfile.cs       operatör profilleri
+  Network/LatencyOptimizer.cs ölç, tek tek uygula, doğrula ve rollback et
+  Network/LatencyProbe.cs     gateway/uzak IP RTT, p95, jitter ve kayıp ölçümü
   Diagnostics/StrategyTuner.cs        gerçek bağlantı testleriyle yöntem arama
   Diagnostics/BlockedSiteDiscovery.cs yeni engelli siteleri ölçerek bulma
   Vodafone/HotspotTtlFix.cs   hotspot TTL düzeltmesi (eşik korumalı)

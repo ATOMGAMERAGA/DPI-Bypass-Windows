@@ -98,6 +98,9 @@ public sealed class MainViewModel : ObservableObject
     private DomainEntry? _selectedDomain;
     private TtlNetworkEntry? _selectedTtlNetwork;
     private string _ttlStatusLine = "Kapalı.";
+    private bool _lowLatencyMode;
+    private bool _isLatencyBusy;
+    private string _latencyStatusLine = "Kapalı.";
     private string _domainStatus = string.Empty;
     private bool _suppressPersist;
 
@@ -176,11 +179,15 @@ public sealed class MainViewModel : ObservableObject
         _selectedScope = ScopeOptions.FirstOrDefault(o => o.Scope == _service.Settings.Scope) ?? ScopeOptions[1];
         _selectedRecheck = RecheckOptions.FirstOrDefault(o => o.Seconds == _service.Settings.RecheckIntervalSeconds)
             ?? RecheckOptions[2];
+        _lowLatencyMode = _service.Settings.LowLatencyMode;
+        _latencyStatusLine = _service.LatencyResult.StatusLine;
 
         ToggleCommand = new AsyncRelayCommand(ToggleAsync);
-        TestCommand = new AsyncRelayCommand(TestAsync, () => _isRunning);
+        TestCommand = new AsyncRelayCommand(TestAsync);
         RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !_tuningInProgress);
-        TestAllCommand = new AsyncRelayCommand(TestAllAsync, () => _isRunning);
+        TestAllCommand = new AsyncRelayCommand(TestAllAsync);
+        LatencyTestCommand = new AsyncRelayCommand(TestLatencyAsync, () => !_isLatencyBusy);
+        LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
         AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
@@ -237,6 +244,10 @@ public sealed class MainViewModel : ObservableObject
     public AsyncRelayCommand RetuneCommand { get; }
 
     public AsyncRelayCommand TestAllCommand { get; }
+
+    public AsyncRelayCommand LatencyTestCommand { get; }
+
+    public AsyncRelayCommand LatencyRestoreCommand { get; }
 
     public RelayCommand OpenLogFolderCommand { get; }
 
@@ -460,6 +471,92 @@ public sealed class MainViewModel : ObservableObject
             _service.SaveSettings();
             Raise();
         }
+    }
+
+    public bool LowLatencyMode
+    {
+        get => _lowLatencyMode;
+        set
+        {
+            if (!Set(ref _lowLatencyMode, value))
+            {
+                return;
+            }
+
+            _ = ApplyLowLatencyModeAsync(value);
+        }
+    }
+
+    public bool IsLatencyBusy
+    {
+        get => _isLatencyBusy;
+        private set
+        {
+            if (Set(ref _isLatencyBusy, value))
+            {
+                LatencyTestCommand.RaiseCanExecuteChanged();
+                LatencyRestoreCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public string LatencyStatusLine
+    {
+        get => _latencyStatusLine;
+        private set => Set(ref _latencyStatusLine, value);
+    }
+
+    private async Task ApplyLowLatencyModeAsync(bool enabled)
+    {
+        IsLatencyBusy = true;
+        LatencyStatusLine = enabled
+            ? "Aktif bağdaştırıcı ölçülüyor; yalnız doğrulanan değişiklikler tutulacak…"
+            : "Özgün NIC ayarları geri yükleniyor…";
+
+        try
+        {
+            var result = await _service.SetLowLatencyModeAsync(enabled).ConfigureAwait(true);
+            LatencyStatusLine = result.StatusLine;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Ping düşürme durumu değiştirilemedi", ex);
+            LatencyStatusLine = $"Ping düşürme değiştirilemedi: {ex.Message}";
+        }
+        finally
+        {
+            _lowLatencyMode = _service.Settings.LowLatencyMode;
+            Raise(nameof(LowLatencyMode));
+            IsLatencyBusy = false;
+        }
+    }
+
+    private async Task TestLatencyAsync()
+    {
+        IsLatencyBusy = true;
+        LatencyStatusLine = "NIC ayarı değiştirilmeden gateway ve internet gecikmesi ölçülüyor…";
+
+        try
+        {
+            var result = await _service.TestLatencyAsync().ConfigureAwait(true);
+            LatencyStatusLine = result.StatusLine;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Gecikme ölçümü başarısız", ex);
+            LatencyStatusLine = $"Gecikme ölçülemedi: {ex.Message}";
+        }
+        finally
+        {
+            IsLatencyBusy = false;
+        }
+    }
+
+    private async Task RestoreLatencyAsync()
+    {
+        _lowLatencyMode = false;
+        Raise(nameof(LowLatencyMode));
+        await ApplyLowLatencyModeAsync(false).ConfigureAwait(true);
     }
 
     // --- Siteler -------------------------------------------------------------
@@ -761,16 +858,46 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task TestAsync()
     {
+        if (!_isRunning)
+        {
+            ProbeSummary = "Test için önce korumayı başlatın. Bu düğme DPI motorunun gerçek sonucunu sınar.";
+            return;
+        }
+
         ProbeSummary = "discord.com test ediliyor…";
-        var result = await _service.VerifyAsync().ConfigureAwait(true);
-        ProbeSummary = FormatProbe("discord.com", result);
+        try
+        {
+            var result = await _service.VerifyAsync().ConfigureAwait(true);
+            ProbeSummary = FormatProbe("discord.com", result);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("discord.com testi başarısız", ex);
+            ProbeSummary = $"discord.com testi çalıştırılamadı: {ex.Message}";
+        }
     }
 
     private async Task TestAllAsync()
     {
+        if (!_isRunning)
+        {
+            ProbeSummary = "Test için önce korumayı başlatın.";
+            return;
+        }
+
         ProbeSummary = "Tüm Discord adresleri test ediliyor…";
-        var results = await _service.VerifyAllAsync().ConfigureAwait(true);
-        ProbeSummary = string.Join(Environment.NewLine, results.Select(r => FormatProbe(r.Host, r.Result)));
+        try
+        {
+            var results = await _service.VerifyAllAsync().ConfigureAwait(true);
+            ProbeSummary = results.Count == 0
+                ? "Test sonucu alınamadı; günlük ayrıntılarını denetleyin."
+                : string.Join(Environment.NewLine, results.Select(r => FormatProbe(r.Host, r.Result)));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Discord adresleri testi başarısız", ex);
+            ProbeSummary = $"Discord adresleri test edilemedi: {ex.Message}";
+        }
     }
 
     private async Task RetuneAsync()
@@ -851,6 +978,10 @@ public sealed class MainViewModel : ObservableObject
 
         RefreshCounters();
         RefreshTtlStatus();
+        _lowLatencyMode = _service.Settings.LowLatencyMode;
+        Raise(nameof(LowLatencyMode));
+        LatencyStatusLine = _service.LatencyResult.StatusLine;
+        IsLatencyBusy = _service.IsLatencyBusy;
         StateChanged?.Invoke();
     }
 
