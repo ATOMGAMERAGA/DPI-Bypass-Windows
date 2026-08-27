@@ -19,6 +19,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
     private const int MaxUdpResponse = 4096;
 
     private readonly DohResolver _resolver;
+    private readonly PlainDnsClient _plain = new();
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly List<Task> _workers = [];
@@ -30,6 +31,8 @@ public sealed class DnsProxyServer : IAsyncDisposable
     private Socket? _tcp6;
     private long _served;
     private long _cacheHits;
+    private long _plainFallbacks;
+    private long _upstreamFailures;
 
     public DnsProxyServer(DohResolver resolver, Action<string>? log = null)
     {
@@ -42,6 +45,18 @@ public sealed class DnsProxyServer : IAsyncDisposable
     public long QueriesServed => Interlocked.Read(ref _served);
 
     public long CacheHits => Interlocked.Read(ref _cacheHits);
+
+    /// <summary>Answers that had to come from plain UDP because DoH would not answer.</summary>
+    public long PlainFallbacks => Interlocked.Read(ref _plainFallbacks);
+
+    /// <summary>Queries nothing upstream could answer. A non-zero count is a broken network.</summary>
+    public long UpstreamFailures => Interlocked.Read(ref _upstreamFailures);
+
+    /// <summary>
+    /// Tells the fallback which resolvers the machine used before it was redirected,
+    /// so a network whose only working DNS is the operator's own still resolves.
+    /// </summary>
+    public void UseOriginalServersAsLastResort(IEnumerable<string> servers) => _plain.UseAsLastResort(servers);
 
     public int Port { get; private set; } = 53;
 
@@ -285,6 +300,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
         }
 
         var response = await _resolver.QueryAsync(query, cancellationToken).ConfigureAwait(false);
+
         if (response is null)
         {
             // Serve a stale answer rather than nothing - a slightly old IP beats a
@@ -296,7 +312,19 @@ public sealed class DnsProxyServer : IAsyncDisposable
                 return stale;
             }
 
-            return BuildServerFailure(query);
+            // Encrypted DNS is unreachable and there is nothing cached for this name.
+            // Windows is pointed at this socket, so answering SERVFAIL here is the
+            // whole machine losing name resolution. Plain UDP is a worse answer than
+            // an encrypted one and a far better one than none.
+            response = await _plain.QueryAsync(query, cancellationToken).ConfigureAwait(false);
+
+            if (response is null)
+            {
+                Interlocked.Increment(ref _upstreamFailures);
+                return BuildServerFailure(query);
+            }
+
+            Interlocked.Increment(ref _plainFallbacks);
         }
 
         if (DnsMessage.GetResponseCode(response) == 0)

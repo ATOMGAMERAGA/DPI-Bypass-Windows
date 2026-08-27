@@ -10,6 +10,10 @@
     <RootNamespace>DpiBypass.App</RootNamespace>
     <ApplicationIcon>Assets\dpibypass.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Our own entry point rather than the one WPF generates, so a failure loading
+         the application resources is reported instead of ending the process in
+         silence. See Program.cs. -->
+    <StartupObject>DpiBypass.App.Program</StartupObject>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- WPF0001: the Fluent ThemeMode API is still marked experimental.
          WFO0003: a Windows Forms warning about DPI settings in the manifest. This is

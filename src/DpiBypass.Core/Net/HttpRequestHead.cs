@@ -17,7 +17,12 @@ public readonly record struct HttpRequestHeadInfo(
 /// </summary>
 public static class HttpRequestHead
 {
-    private static readonly string[] Methods =
+    /// <summary>
+    /// The request methods the parser recognises. Internal because the kernel filter
+    /// has to admit a packet starting with any of them, and the test that pins the
+    /// two together reads this rather than a second copy of the list.
+    /// </summary>
+    internal static readonly string[] Methods =
     [
         "GET ", "POST ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ", "PATCH ", "TRACE ", "CONNECT ",
     ];

@@ -24,9 +24,41 @@ namespace DpiBypass.Core.Engine;
 public sealed class BypassEngine : IDisposable
 {
     /// <summary>
-    /// The kernel side filter. Narrow on purpose - the driver drops everything else
-    /// before it ever reaches user mode.
+    /// The kernel side filter, matched on the payload so only a handshake is ever
+    /// diverted.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the single most important line in the engine for how the machine
+    /// feels. The obvious filter - every outbound packet with a payload on 443 or 80
+    /// - is what the app used to install, and it does not mean "the first packet of
+    /// each connection": it means <i>every</i> byte anybody uploads over HTTPS. Each
+    /// one is taken out of the network stack, copied to user mode, parsed by managed
+    /// code, and re-injected, on four worker threads. Uploading a file, sending video
+    /// in a call, or pushing a commit all ran through that path, and when the workers
+    /// could not keep up the driver's queue filled and started dropping packets -
+    /// which is a connection that stalls and retransmits, i.e. exactly the "it broke
+    /// my internet" the user sees.
+    /// </para>
+    /// <para>
+    /// The conditions below are the same ones
+    /// <see cref="TlsClientHello.IsClientHello"/> and
+    /// <see cref="HttpRequestHead.IsRequest"/> apply in user mode, moved into the
+    /// kernel where they cost nothing: a TLS record whose type is handshake and whose
+    /// first handshake byte is ClientHello, or a payload starting with the first
+    /// letter of an HTTP method. Application data records (0x17) - all of the bulk
+    /// traffic - never leave the kernel now.
+    /// </para>
+    /// </remarks>
+    private const string HandshakeFilter =
+        "outbound and tcp and ("
+        + "(tcp.DstPort == 443 and tcp.PayloadLength >= 6 and tcp.Payload[0] == 0x16 and tcp.Payload[5] == 0x01)"
+        + " or (tcp.DstPort == 80 and tcp.PayloadLength >= 5 and ("
+        + "tcp.Payload[0] == 0x47 or tcp.Payload[0] == 0x50 or tcp.Payload[0] == 0x48 or tcp.Payload[0] == 0x44"
+        + " or tcp.Payload[0] == 0x4F or tcp.Payload[0] == 0x54 or tcp.Payload[0] == 0x43))"
+        + ")";
+
+    /// <summary>Used if the driver rejects payload indexing in a TCP filter.</summary>
     private const string TcpFilter =
         "outbound and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
@@ -53,9 +85,13 @@ public sealed class BypassEngine : IDisposable
     private readonly Action<string>? _log;
     private readonly List<Thread> _workers = [];
 
+    /// <summary>Guards opening and closing the QUIC handle against the toggle.</summary>
+    private readonly Lock _quicGate = new();
+
     private CancellationTokenSource _stopping = new();
     private WinDivertHandle? _tcpHandle;
     private WinDivertHandle? _quicHandle;
+    private volatile bool _blockQuic = true;
     private volatile BypassStrategy _strategy = StrategyLibrary.Default;
 
     public BypassEngine(TargetMatcher matcher, ProcessPortMap? portMap = null, Action<string>? log = null)
@@ -80,12 +116,34 @@ public sealed class BypassEngine : IDisposable
     /// Drop new QUIC handshakes for protected processes so they fall back to TCP.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// QUIC hides its ClientHello behind handshake encryption, so the desync tricks
     /// here cannot reach it. Refusing the handshake makes browsers retry over TCP
     /// within a few hundred milliseconds, where the bypass does work. Only Initial
     /// packets are dropped, so QUIC sessions already running are left alone.
+    /// </para>
+    /// <para>
+    /// Switching this off closes the QUIC handle rather than leaving it open and
+    /// forwarding everything it catches. A diversion handle is not free just because
+    /// the loop behind it does nothing: the driver still lifts each matching packet
+    /// out of the stack, and it still has to come back through user mode to be put
+    /// back. With the feature off there is no reason to pay for any of that.
+    /// </para>
     /// </remarks>
-    public bool BlockQuicHandshakes { get; set; } = true;
+    public bool BlockQuicHandshakes
+    {
+        get => _blockQuic;
+        set
+        {
+            if (_blockQuic == value)
+            {
+                return;
+            }
+
+            _blockQuic = value;
+            SyncQuicHandle();
+        }
+    }
 
     /// <summary>Raised the first time each hostname is rewritten. Used for the activity list.</summary>
     public event Action<string, string>? HostRewritten;
@@ -113,25 +171,72 @@ public sealed class BypassEngine : IDisposable
         _tcpHandle.SetParam(WinDivertParam.QueueTime, 2000);
         _tcpHandle.SetParam(WinDivertParam.QueueSize, 16 * 1024 * 1024);
 
-        // Opened regardless of the current setting so the toggle takes effect
-        // immediately instead of waiting for a restart. With the narrow filter above
-        // this costs a handful of packets per new QUIC connection.
-        _quicHandle = TryOpenQuicHandle();
-
-        var tcpGroup = new WorkerGroup(_tcpHandle);
+        var tcp = _tcpHandle;
+        var tcpGroup = new WorkerGroup(tcp);
         var threads = workerCount > 0 ? workerCount : Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
         for (var i = 0; i < threads; i++)
         {
-            StartWorker($"DpiBypass.Tcp{i}", () => TcpLoop(_tcpHandle), tcpGroup);
+            StartWorker($"DpiBypass.Tcp{i}", () => TcpLoop(tcp), tcpGroup);
         }
 
-        if (_quicHandle is not null)
-        {
-            StartWorker("DpiBypass.Quic", () => QuicLoop(_quicHandle), new WorkerGroup(_quicHandle));
-        }
+        SyncQuicHandle();
 
         Stats.StartedAt = DateTimeOffset.UtcNow;
         _log?.Invoke($"Engine running with {threads} worker thread(s); strategy '{_strategy.Id}'.");
+    }
+
+    /// <summary>
+    /// Brings the QUIC handle into line with <see cref="BlockQuicHandshakes"/>.
+    /// </summary>
+    /// <remarks>
+    /// Called from start-up and from the toggle, which is the UI thread, so it is
+    /// guarded: two callers arriving at once must not each open a handle, and the one
+    /// that closes must not leave the worker reading a handle the other just replaced.
+    /// </remarks>
+    private void SyncQuicHandle()
+    {
+        lock (_quicGate)
+        {
+            // Nothing to sync until the engine is up; Start calls this itself.
+            if (_tcpHandle is not { IsOpen: true })
+            {
+                return;
+            }
+
+            if (_blockQuic)
+            {
+                if (_quicHandle is { IsOpen: true })
+                {
+                    return;
+                }
+
+                // The local, not the field: the worker outlives this method and the
+                // field is cleared the moment the toggle goes the other way.
+                var opened = TryOpenQuicHandle();
+                _quicHandle = opened;
+
+                if (opened is not null)
+                {
+                    StartWorker("DpiBypass.Quic", () => QuicLoop(opened), new WorkerGroup(opened));
+                }
+
+                return;
+            }
+
+            var handle = _quicHandle;
+            _quicHandle = null;
+
+            if (handle is null)
+            {
+                return;
+            }
+
+            // Shut down first: the worker is parked inside Receive and comes out of it
+            // when the handle stops delivering, at which point it disposes the handle
+            // through its own group.
+            handle.Shutdown();
+            _log?.Invoke("QUIC suppression off; the driver is no longer diverting handshakes.");
+        }
     }
 
     private WinDivertHandle? TryOpenQuicHandle()
@@ -165,16 +270,65 @@ public sealed class BypassEngine : IDisposable
         return null;
     }
 
+    /// <summary>The filters to try, best first. Public so the tests can pin the order.</summary>
+    internal static IReadOnlyList<string> TcpFilterLadder => [HandshakeFilter, TcpFilter, TcpFilterV6];
+
+    /// <summary>
+    /// Opens the TCP handle on the narrowest filter this driver will accept.
+    /// </summary>
+    /// <remarks>
+    /// Each candidate is compiled before it is opened. Compiling asks the same parser
+    /// the driver uses but touches nothing, so a filter this build of WinDivert does
+    /// not understand - payload indexing is the one in question - costs a rejected
+    /// parse rather than an opened handle that has to be closed again. An opened
+    /// handle is not free to abandon: between the open and the close the driver is
+    /// already pulling matching packets out of the stack for a queue nobody reads.
+    /// </remarks>
     private WinDivertHandle OpenWithFallback()
+    {
+        WinDivertException? last = null;
+
+        foreach (var filter in TcpFilterLadder)
+        {
+            if (!Compiles(filter))
+            {
+                _log?.Invoke("Filter rejected by the driver's parser; trying a simpler one.");
+                continue;
+            }
+
+            try
+            {
+                var handle = WinDivertHandle.Open(filter, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+                _log?.Invoke(filter == HandshakeFilter
+                    ? "Kernel filter: handshakes only."
+                    : "Kernel filter: all HTTP/HTTPS payload packets (the driver would not take the narrow one).");
+                return handle;
+            }
+            catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+            {
+                // Compiled but refused. Keep going; the next one is simpler.
+                last = ex;
+                _log?.Invoke("Primary filter rejected; retrying with a simpler one.");
+            }
+        }
+
+        // Every candidate was refused. The last real error is the useful one, and if
+        // the parser rejected all of them the broadest filter still has to be tried
+        // so the failure the caller reports comes from the driver rather than from us.
+        throw last ?? new WinDivertException(87, "No packet filter was accepted by the driver.");
+    }
+
+    /// <summary>Whether the driver's own parser accepts a filter, without opening it.</summary>
+    private static bool Compiles(string filter)
     {
         try
         {
-            return WinDivertHandle.Open(TcpFilter, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+            return WinDivertHandle.TryCompileFilter(filter, WinDivertLayer.Network, out _);
         }
-        catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+        catch (Exception)
         {
-            _log?.Invoke("Primary filter rejected; retrying without the IPv4 clause.");
-            return WinDivertHandle.Open(TcpFilterV6, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+            // The helper is missing from this build of the DLL. Let the open decide.
+            return true;
         }
     }
 
@@ -197,6 +351,10 @@ public sealed class BypassEngine : IDisposable
         public int Live;
     }
 
+    /// <summary>
+    /// Starts one reader. Safe to call while the engine is running: the QUIC toggle
+    /// does exactly that.
+    /// </summary>
     private void StartWorker(string name, Action body, WorkerGroup group)
     {
         Interlocked.Increment(ref group.Live);
@@ -236,7 +394,14 @@ public sealed class BypassEngine : IDisposable
             Priority = ThreadPriority.AboveNormal,
         };
 
-        _workers.Add(thread);
+        lock (_quicGate)
+        {
+            // Toggling QUIC suppression on and off adds a worker each time, so the
+            // ones that have already finished are dropped rather than joined again.
+            _workers.RemoveAll(worker => !worker.IsAlive);
+            _workers.Add(thread);
+        }
+
         thread.Start();
     }
 
@@ -549,14 +714,24 @@ public sealed class BypassEngine : IDisposable
 
         _stopping.Cancel();
         _tcpHandle?.Shutdown();
-        _quicHandle?.Shutdown();
 
-        foreach (var worker in _workers)
+        Thread[] workers;
+        lock (_quicGate)
+        {
+            // Under the lock, because the QUIC toggle owns this handle too and is
+            // driven from the UI thread.
+            _quicHandle?.Shutdown();
+
+            // Copied out: the joins below take seconds that the lock has no business
+            // holding.
+            workers = [.. _workers];
+            _workers.Clear();
+        }
+
+        foreach (var worker in workers)
         {
             worker.Join(TimeSpan.FromSeconds(2));
         }
-
-        _workers.Clear();
 
         _tcpHandle?.Dispose();
         _tcpHandle = null;

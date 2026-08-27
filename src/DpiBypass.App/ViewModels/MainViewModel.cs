@@ -211,11 +211,20 @@ public sealed class MainViewModel : ObservableObject
         _refreshTimer.Tick += (_, _) => RefreshCounters();
         _refreshTimer.Start();
 
+        // Queued behind the first frame rather than started here. Both sweep the
+        // process table and the registry and one of them starts schtasks.exe, and this
+        // constructor runs on the UI thread before the dispatcher is pumping - so
+        // anything they do before their first await is time the window spends not
+        // existing. At Background priority they run once there is something on screen.
+        //
         // Both are discarded on purpose - nothing waits for them - so both have to be
         // answerable for themselves. A fault here used to disappear with the task and
         // leave the two summaries reading "Aranıyor…" for the life of the process.
-        _ = LoadInstalledAppsAsync();
-        _ = LoadAutoStartStateAsync();
+        _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _ = LoadInstalledAppsAsync();
+            _ = LoadAutoStartStateAsync();
+        }));
     }
 
     public ObservableCollection<IspOption> IspOptions { get; }

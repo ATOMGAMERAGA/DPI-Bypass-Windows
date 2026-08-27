@@ -39,7 +39,30 @@ public static class ProcessRunner
         IEnumerable<string> arguments,
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
-        => await RunCoreAsync(fileName, arguments, environment: null, timeout, cancellationToken).ConfigureAwait(false);
+        => await RunOffThreadAsync(fileName, arguments, environment: null, timeout, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Starts the helper away from the caller's thread, then waits for it there.
+    /// </summary>
+    /// <remarks>
+    /// Everything up to the first await in <see cref="RunCoreAsync"/> - building the
+    /// start info and, crucially, <see cref="Process.Start()"/> itself - runs on
+    /// whoever called. Creating a process on Windows is tens to hundreds of
+    /// milliseconds, and several of these are kicked off during start-up from the UI
+    /// thread, before the dispatcher is pumping: the window cannot paint while
+    /// <c>schtasks.exe</c> or <c>powershell.exe</c> is being created. Hopping to the
+    /// pool first costs nothing and takes every one of those out of the UI thread's
+    /// budget.
+    /// </remarks>
+    private static Task<ProcessResult> RunOffThreadAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        IReadOnlyDictionary<string, string?>? environment,
+        TimeSpan? timeout,
+        CancellationToken cancellationToken)
+        => Task.Run(
+            () => RunCoreAsync(fileName, arguments, environment, timeout, cancellationToken),
+            CancellationToken.None);
 
     private static async Task<ProcessResult> RunCoreAsync(
         string fileName,
@@ -158,7 +181,7 @@ public static class ProcessRunner
         IReadOnlyDictionary<string, string?> environment,
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
-        => RunCoreAsync(
+        => RunOffThreadAsync(
             "powershell.exe",
             ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", Utf8OutputPrelude + script],
             environment,

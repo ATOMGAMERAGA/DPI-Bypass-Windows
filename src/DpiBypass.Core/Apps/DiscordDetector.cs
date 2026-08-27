@@ -34,6 +34,7 @@ public static class DiscordDetector
     public static IReadOnlyList<InstalledApp> FindDiscord()
     {
         var found = new List<InstalledApp>();
+        var running = RunningProcessNames();
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
         foreach (var (folder, executable, label) in SquirrelBuilds)
@@ -57,7 +58,7 @@ public static class DiscordDetector
                     label,
                     candidate,
                     Path.GetFileName(versioned!)["app-".Length..],
-                    IsProcessRunning(executable)));
+                    IsRunning(running, executable)));
                 continue;
             }
 
@@ -65,13 +66,13 @@ public static class DiscordDetector
             var direct = Path.Combine(root, executable);
             if (File.Exists(direct))
             {
-                found.Add(new InstalledApp(label, direct, null, IsProcessRunning(executable)));
+                found.Add(new InstalledApp(label, direct, null, IsRunning(running, executable)));
             }
         }
 
         foreach (var path in FindStoreDiscord())
         {
-            found.Add(new InstalledApp("Discord (Microsoft Store)", path, null, IsProcessRunning("Discord.exe")));
+            found.Add(new InstalledApp("Discord (Microsoft Store)", path, null, IsRunning(running, "Discord.exe")));
         }
 
         return found;
@@ -82,6 +83,7 @@ public static class DiscordDetector
     public static IReadOnlyList<InstalledApp> FindBrowsers()
     {
         var found = new List<InstalledApp>();
+        var running = RunningProcessNames();
         var roots = new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
@@ -98,7 +100,7 @@ public static class DiscordDetector
 
             if (path is not null)
             {
-                found.Add(new InstalledApp(label, path, null, IsProcessRunning(executable)));
+                found.Add(new InstalledApp(label, path, null, IsRunning(running, executable)));
             }
         }
 
@@ -213,12 +215,55 @@ public static class DiscordDetector
             : new Version(0, 0);
     }
 
-    private static bool IsProcessRunning(string executable)
+    /// <summary>
+    /// The names of everything running right now, taken once per detection pass.
+    /// </summary>
+    /// <remarks>
+    /// This used to be a <c>GetProcessesByName</c> call per candidate - a full process
+    /// enumeration for each of four Discord builds and eight browsers, twelve sweeps
+    /// of the process table to answer twelve yes/no questions. Worse, the
+    /// <see cref="System.Diagnostics.Process"/> objects it hands back own native
+    /// handles and none of them were ever disposed, so each pass leaked one handle per
+    /// running process on the machine - and a browser alone accounts for dozens.
+    /// </remarks>
+    private static HashSet<string> RunningProcessNames()
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        System.Diagnostics.Process[] processes;
+        try
+        {
+            processes = System.Diagnostics.Process.GetProcesses();
+        }
+        catch (Exception)
+        {
+            return names;
+        }
+
+        foreach (var process in processes)
+        {
+            try
+            {
+                names.Add(process.ProcessName);
+            }
+            catch (Exception)
+            {
+                // A process that ended between the enumeration and this read.
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
+        return names;
+    }
+
+    private static bool IsRunning(HashSet<string> running, string executable)
     {
         try
         {
-            var name = Path.GetFileNameWithoutExtension(executable);
-            return System.Diagnostics.Process.GetProcessesByName(name).Length > 0;
+            return running.Contains(Path.GetFileNameWithoutExtension(executable));
         }
         catch (Exception)
         {

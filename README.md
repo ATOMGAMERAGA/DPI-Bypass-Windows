@@ -222,11 +222,15 @@ restore edilir; kayıp bağdaştırıcı varsa kurtarma bilgisi silinmez.
 
 Tasarım gereği yok denecek kadar az:
 
-- Çekirdek süzgeci yalnızca **giden, 80/443 hedefli, veri taşıyan TCP
-  paketlerini** alır. ICMP (ping), UDP, Discord ses trafiği ve indirme akışı bu
-  sürece hiç girmez.
-- Girenler arasında da yalnızca **ilk** paket (ClientHello / HTTP istek başlığı)
-  işlenir; el sıkışma bittikten sonraki hiçbir bayta dokunulmaz.
+- Çekirdek süzgeci yalnızca **el sıkışma paketlerini** alır: 443'e giden TLS
+  ClientHello ve 80'e giden HTTP istek başlığı. Bunun kararı çekirdekte, paket
+  içeriğine bakılarak verilir — yani yüklediğiniz dosyalar, görüntülü görüşme,
+  indirme akışı, ICMP (ping), UDP ve Discord ses trafiği bu sürece **hiç
+  girmez**.
+- Bu ayrım önemlidir: süzgeç "80/443'e giden veri taşıyan her paket" olsaydı,
+  HTTPS üzerinden gönderdiğiniz her bayt çekirdekten kullanıcı moduna kopyalanıp
+  geri enjekte edilirdi. Yoğunlukta bu, sürücü kuyruğunun dolup paket düşürmesi
+  demektir — bağlantının takılması ve yavaşlaması olarak hissedilir.
 - Bağlantı başına durum tutulmaz, dolayısıyla büyüyen bir tablo ya da arama
   maliyeti yoktur.
 - Trafik bir vekil sunucudan (proxy) veya VPN'den geçmez; paketler doğrudan
@@ -349,8 +353,8 @@ python3 tools/generate_assets.py assets/logo/source.png
 | Yol | İçerik |
 | --- | --- |
 | `src/DpiBypass.Core` | Paket motoru, DNS, operatör profilleri, otomatik ayarlama, TTL düzeltmesi, denetim kanalı |
-| `src/DpiBypass.App` | WPF arayüzü, tepsi simgesi, otomatik başlatma, komut satırı |
-| `tests/DpiBypass.Tests` | Birim testleri (224 test) |
+| `src/DpiBypass.App` | WPF arayüzü, tepsi simgesi, otomatik başlatma, komut satırı, açılış hata yakalayıcı (`Program.cs`) |
+| `tests/DpiBypass.Tests` | Birim testleri (247 test) |
 | `installer/` | Inno Setup betiği ve sihirbaz görselleri |
 | `tools/` | Sürücü indirme ve logo üretme betikleri |
 | `.github/workflows/` | Derleme, test ve sürüm yayınlama hattı |
@@ -365,9 +369,11 @@ src/DpiBypass.Core/
   Engine/StrategyLibrary.cs   yöntem kataloğu
   Net/TlsRecordFragmenter.cs  ClientHello'yu birden çok TLS kaydına bölme
   Net/TlsClientHello.cs       ClientHello ayrıştırma
-  Dns/DohResolver.cs          DNS-over-HTTPS çözümleyici
+  Dns/DohResolver.cs          DNS-over-HTTPS çözümleyici (yarıştırmalı, devre kesicili)
+  Dns/PlainDnsClient.cs       DoH engellendiğinde devreye giren şifresiz yedek
   Dns/DnsProxyServer.cs       yerel DNS köprüsü
   Dns/DnsConfigurator.cs      sistem DNS ayarları (ve geri alma)
+  Logging/AppLog.cs           arka planda yazan günlük (çağıranı hiç bekletmez)
   Network/IspProfile.cs       operatör profilleri
   Network/LatencyOptimizer.cs ölç, tek tek uygula, doğrula ve rollback et
   Network/LatencyProbe.cs     gateway/uzak IP RTT, p95, jitter ve kayıp ölçümü
@@ -397,6 +403,9 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
 | Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
 | DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
+| Uygulama açıkken hiçbir site açılmıyor | Şifreli DNS (DoH) ağınızda engelleniyor olabilir. Uygulama bu durumda isim çözümlemeyi şifresiz yedeğe düşürür ve günlüğe "Şifreli DNS'e ulaşılamıyor" satırını yazar. Sürüyorsa **Ayarlar → DNS** bölümünden *Sistem ayarına dokunma* seçin |
+| Uygulama açılır açılmaz kapanıyor | `%ProgramData%\DPI Bypass\logs\crash.log` dosyasına bakın; açılış hatası artık her koşulda oraya yazılır ve ekranda bir pencereyle bildirilir |
+| Açılış yavaş | O günün günlüğündeki "Tek örnek denetimi tamamlandı" ve "Arayüz hazır" satırları geçen süreyi milisaniye olarak verir; hangi aşamanın uzun sürdüğünü bunlar söyler |
 | Vodafone modu "kayıtlı değil" diyor | Mod yalnızca açtığınız ağlarda çalışır. Telefonun paylaşımına bağlıyken onay kutusunu yeniden işaretleyin |
 | Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 

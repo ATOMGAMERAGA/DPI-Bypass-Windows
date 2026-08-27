@@ -55,6 +55,32 @@ public sealed class DnsConfigurator
     /// <summary>True when a snapshot is on disk, meaning DNS is (or was) redirected.</summary>
     public bool HasPendingRestore => File.Exists(_snapshotPath);
 
+    /// <summary>
+    /// The resolvers the machine was using before this app redirected it.
+    /// </summary>
+    /// <remarks>
+    /// Handed to the proxy's plain fallback so that a network where encrypted DNS is
+    /// blocked outright still resolves names through whatever it was resolving them
+    /// with before. Empty when nothing has been redirected, or when the adapters were
+    /// on DHCP-assigned servers we never recorded.
+    /// </remarks>
+    public IReadOnlyList<string> OriginalServers()
+    {
+        var snapshot = LoadSnapshot();
+        if (snapshot is null)
+        {
+            return [];
+        }
+
+        return
+        [
+            .. snapshot
+                .SelectMany(adapter => adapter.OriginalV4.Concat(adapter.OriginalV6))
+                .Where(server => !string.IsNullOrWhiteSpace(server))
+                .Distinct(StringComparer.OrdinalIgnoreCase),
+        ];
+    }
+
     public async Task<bool> ApplyAsync(DnsMode mode, bool loopbackHasIPv6, CancellationToken cancellationToken = default)
     {
         if (mode == DnsMode.SystemDefault)
@@ -82,21 +108,18 @@ public sealed class DnsConfigurator
             ? (loopbackHasIPv6 ? ["::1"] : PublicV6)
             : PublicV6;
 
-        var applied = 0;
+        var steps = new List<DnsStep>();
         foreach (var adapter in adapters)
         {
-            if (await SetServersAsync(adapter.InterfaceIndexV4, v4, cancellationToken).ConfigureAwait(false))
-            {
-                applied++;
-            }
+            steps.Add(DnsStep.Set(adapter.InterfaceIndexV4, v4, counts: true));
 
             if (adapter.InterfaceIndexV6 > 0)
             {
-                await SetServersAsync(adapter.InterfaceIndexV6, v6, cancellationToken).ConfigureAwait(false);
+                steps.Add(DnsStep.Set(adapter.InterfaceIndexV6, v6, counts: false));
             }
         }
 
-        await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+        var applied = await RunPlanAsync(steps, cancellationToken).ConfigureAwait(false);
 
         if (applied == 0)
         {
@@ -126,34 +149,40 @@ public sealed class DnsConfigurator
             return;
         }
 
+        // The interface index is per adapter rather than per family and
+        // -ResetServerAddresses takes no family, so a reset clears both families at
+        // once. Every reset therefore has to happen before the explicit servers go
+        // back on, otherwise the v6 reset undoes the v4 servers just restored - which
+        // is why the plan is built in two passes rather than one.
+        var steps = new List<DnsStep>();
+
         foreach (var adapter in snapshot)
         {
-            // The interface index is per adapter rather than per family and
-            // -ResetServerAddresses takes no family, so a reset clears both families at
-            // once. Every reset therefore has to happen before the explicit servers go
-            // back on, otherwise the v6 reset undoes the v4 servers just restored.
             if (adapter.OriginalV4.Length == 0)
             {
-                await ResetServersAsync(adapter.InterfaceIndexV4, cancellationToken).ConfigureAwait(false);
+                steps.Add(DnsStep.Reset(adapter.InterfaceIndexV4));
             }
 
             if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length == 0)
             {
-                await ResetServersAsync(adapter.InterfaceIndexV6, cancellationToken).ConfigureAwait(false);
+                steps.Add(DnsStep.Reset(adapter.InterfaceIndexV6));
             }
+        }
 
+        foreach (var adapter in snapshot)
+        {
             if (adapter.OriginalV4.Length > 0)
             {
-                await SetServersAsync(adapter.InterfaceIndexV4, adapter.OriginalV4, cancellationToken).ConfigureAwait(false);
+                steps.Add(DnsStep.Set(adapter.InterfaceIndexV4, adapter.OriginalV4, counts: true));
             }
 
             if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length > 0)
             {
-                await SetServersAsync(adapter.InterfaceIndexV6, adapter.OriginalV6, cancellationToken).ConfigureAwait(false);
+                steps.Add(DnsStep.Set(adapter.InterfaceIndexV6, adapter.OriginalV6, counts: false));
             }
         }
 
-        await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+        await RunPlanAsync(steps, cancellationToken).ConfigureAwait(false);
         DeleteSnapshot();
         CurrentMode = DnsMode.SystemDefault;
         _log?.Invoke("Original DNS configuration restored.");
@@ -316,19 +345,91 @@ public sealed class DnsConfigurator
         return rows;
     }
 
-    private static async Task<bool> SetServersAsync(int interfaceIndex, string[] servers, CancellationToken cancellationToken)
+    /// <summary>One interface's worth of work: either explicit servers, or a reset.</summary>
+    internal readonly record struct DnsStep(int Index, string[]? Servers, bool Counts)
     {
-        var list = string.Join(',', servers.Select(s => $"'{s}'"));
-        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ServerAddresses ({list}) -ErrorAction Stop";
-        var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
-        return result.Success;
+        public static DnsStep Set(int index, string[] servers, bool counts) => new(index, servers, counts);
+
+        public static DnsStep Reset(int index) => new(index, null, Counts: false);
     }
 
-    private static async Task<bool> ResetServersAsync(int interfaceIndex, CancellationToken cancellationToken)
+    /// <summary>
+    /// The whole plan, plus the cache flush, in one PowerShell process.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This used to be one <c>powershell.exe</c> per interface per address family,
+    /// plus one to enumerate and one to flush. Starting PowerShell is not cheap -
+    /// half a second on a warm machine, several on a cold one, and every one of them
+    /// is a process the real time scanner opens - so a laptop with a Wi-Fi adapter, an
+    /// Ethernet port and a couple of virtual ones spent the better part of a minute
+    /// in here. That minute was spent with the machine's resolvers already pointing
+    /// at a proxy that was not finished starting, which is exactly what "it broke my
+    /// internet and then the window finally appeared" describes.
+    /// </para>
+    /// <para>
+    /// The plan is handed over as JSON in an environment variable rather than
+    /// interpolated into the script, so nothing derived from an adapter name or a
+    /// server address is ever parsed as PowerShell.
+    /// </para>
+    /// </remarks>
+    private static async Task<int> RunPlanAsync(IReadOnlyList<DnsStep> steps, CancellationToken cancellationToken)
     {
-        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ResetServerAddresses -ErrorAction SilentlyContinue";
-        var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
-        return result.Success;
+        if (steps.Count == 0)
+        {
+            await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+
+        var plan = JsonSerializer.Serialize(steps.Select(step => new
+        {
+            step.Index,
+            Reset = step.Servers is null,
+            Servers = step.Servers ?? [],
+            step.Counts,
+        }));
+
+        const string script = """
+            $applied = 0
+            foreach ($step in @($env:DPI_BYPASS_DNS_PLAN | ConvertFrom-Json)) {
+              try {
+                if ($step.Reset) {
+                  Set-DnsClientServerAddress -InterfaceIndex $step.Index -ResetServerAddresses -ErrorAction Stop
+                } else {
+                  Set-DnsClientServerAddress -InterfaceIndex $step.Index -ServerAddresses @($step.Servers) -ErrorAction Stop
+                }
+                if ($step.Counts) { $applied++ }
+              } catch { }
+            }
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
+            Write-Output "APPLIED=$applied"
+            """;
+
+        // Generous, because it now covers every interface rather than one: a machine
+        // with a stack of virtual adapters still has to finish inside it.
+        var result = await ProcessRunner.PowerShellWithEnvironmentAsync(
+            script,
+            new Dictionary<string, string?> { ["DPI_BYPASS_DNS_PLAN"] = plan },
+            TimeSpan.FromSeconds(45),
+            cancellationToken).ConfigureAwait(false);
+
+        return ReadApplied(result.StandardOutput);
+    }
+
+    /// <summary>Reads the count the script reported, ignoring anything else it printed.</summary>
+    internal static int ReadApplied(string output)
+    {
+        foreach (var line in output.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("APPLIED=", StringComparison.Ordinal)
+                && int.TryParse(trimmed["APPLIED=".Length..], out var value))
+            {
+                return value;
+            }
+        }
+
+        return 0;
     }
 
     public static Task FlushCacheAsync(CancellationToken cancellationToken = default)

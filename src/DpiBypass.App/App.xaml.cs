@@ -18,16 +18,27 @@ public partial class App : Application
     /// How long a launch waits for the running copy to put its window up before it
     /// starts asking whether that copy is alive at all.
     /// </summary>
+    /// <remarks>
+    /// The running copy answers this from its activation listener thread using plain
+    /// window-manager calls, so a healthy instance replies in milliseconds however
+    /// busy its UI thread is. A second of silence therefore means something is really
+    /// wrong, not that the other copy is mid-way through a measurement.
+    /// </remarks>
     private static readonly TimeSpan FirstHandover = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// The second, longer wait, given only to a copy that has proved it is alive.
     /// A busy instance is worth waiting for; a dead one is not.
     /// </summary>
-    private static readonly TimeSpan BusyHandover = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan BusyHandover = TimeSpan.FromSeconds(4);
 
     /// <summary>How long the running copy gets to answer its control channel.</summary>
-    private static readonly TimeSpan LivenessProbe = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan LivenessProbe = TimeSpan.FromMilliseconds(1200);
+
+    /// <summary>
+    /// How long a copy that is about to be ended gets to put the machine's DNS back.
+    /// </summary>
+    private static readonly TimeSpan StandDownTimeout = TimeSpan.FromSeconds(6);
 
     private SingleInstance? _instance;
     private ControlServer? _control;
@@ -40,6 +51,15 @@ public partial class App : Application
     private StartupPlan _plan = new(StartupVisibility.ShowWindow, "başlatılıyor");
     private bool _shuttingDown;
     private bool _windowEverShown;
+
+    /// <summary>
+    /// The main window's handle, readable from any thread.
+    /// </summary>
+    /// <remarks>
+    /// Kept here so the activation listener can raise the window without going
+    /// through the dispatcher. See <see cref="OnActivationRequested"/>.
+    /// </remarks>
+    private volatile nint _windowHandle;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -128,6 +148,11 @@ public partial class App : Application
     /// </remarks>
     private void Start(StartupEventArgs e)
     {
+        // Timed and logged because "it took ages to open" is otherwise unanswerable
+        // after the fact: the numbers say whether the wait was the handover, the
+        // window, or something queued behind it.
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
         AppPaths.MigrateLegacyState();
         AppLog.Initialise();
         AppLog.Info($"{AppPaths.ProductName} başlatılıyor · {AppPaths.Author}");
@@ -145,9 +170,13 @@ public partial class App : Application
         _instance = SingleInstance.Acquire();
         if (!TryContinueAsPrimary())
         {
+            AppLog.Info($"Bu kopya devretti ({clock.ElapsedMilliseconds} ms).");
+            AppLog.Shutdown();
             Shutdown();
             return;
         }
+
+        AppLog.Info($"Tek örnek denetimi tamamlandı ({clock.ElapsedMilliseconds} ms).");
 
         // The packet driver is unopenable without elevation. The manifest asks for it,
         // so reaching this branch means the manifest was bypassed somehow; ask once and
@@ -228,6 +257,8 @@ public partial class App : Application
             ShowMainWindow();
         }
 
+        AppLog.Info($"Arayüz hazır ({clock.ElapsedMilliseconds} ms).");
+
         // Whatever was decided above, something has to be reachable once the message
         // loop is running: a window on screen, or an icon in the notification area.
         // The watchdog is the last line of defence for the failure this app has been
@@ -266,6 +297,10 @@ public partial class App : Application
 
         if (_service!.Settings.StartEngineOnLaunch)
         {
+            // The engine re-applies the redirect itself on the way up, reusing the
+            // snapshot a previous run left behind, so a leftover is repaired rather
+            // than restored here. If it fails to start it puts the resolvers back as
+            // part of tearing down, which is the case the recovery below is for.
             Guarded("Koruma", () => _ = StartEngineAsync());
         }
         else
@@ -303,6 +338,42 @@ public partial class App : Application
             args.SetObserved();
         };
         SessionEnding += OnSessionEnding;
+
+        // The last line of defence for the one failure the user cannot work around on
+        // their own. While the engine runs, every name on this machine is resolved by
+        // this process, so a copy that exits without putting the resolvers back leaves
+        // the whole computer unable to look anything up - and nothing on screen
+        // explains it. This runs on an orderly exit however it was reached, including
+        // one the code above did not plan for.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => RestoreDnsOnExit();
+    }
+
+    /// <summary>
+    /// Puts the machine's resolvers back if this process is still holding them.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately blunt: no state to consult, no gate to take, and a hard timeout,
+    /// because Windows gives a process a couple of seconds at most here and the
+    /// alternative to finishing is a machine with no name resolution.
+    /// </remarks>
+    private void RestoreDnsOnExit()
+    {
+        if (_service is null || _service.State == ProtectionState.Stopped)
+        {
+            return;
+        }
+
+        try
+        {
+            Task.Run(() => _service.StopAsync()).Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception)
+        {
+            // On the way down with nowhere left to report it. The snapshot on disk is
+            // what the next launch, and the uninstaller, restore from.
+        }
+
+        AppLog.Shutdown();
     }
 
     private void TryApplyTheme()
@@ -331,6 +402,7 @@ public partial class App : Application
             _window = new MainWindow(_viewModel!, _theme);
             _window.CloseToTrayRequested += OnCloseToTray;
             _window.ExitRequested += () => _ = ShutdownAsync();
+            _window.HandleReady += handle => _windowHandle = handle;
             return true;
         }
         catch (Exception ex)
@@ -493,7 +565,8 @@ public partial class App : Application
             return false;
         }
 
-        if (RunningInstanceAnswers())
+        var alive = RunningInstanceAnswers();
+        if (alive)
         {
             AppLog.Info("Çalışan kopya meşgul ama ayakta; pencereyi açması için daha uzun bekleniyor.");
 
@@ -507,7 +580,43 @@ public partial class App : Application
         // Handing the user the "look in the notification area" message would be a lie:
         // there is nothing there to click, and every later launch would say the same.
         AppLog.Warning("Çalışan kopya yanıt vermedi; bu kopya devralıyor.");
+
+        if (alive)
+        {
+            // It is about to be ended, and it is the process holding the machine's DNS
+            // redirect. Asking it to stand down first is the difference between a
+            // takeover the user does not notice and one that leaves them with no name
+            // resolution until this copy has finished starting. It answered the pipe a
+            // moment ago, so this is worth a short wait and no more.
+            StandDownRunningInstance();
+        }
+
         return _instance.TryTakeOver(AppLog.InfoSink);
+    }
+
+    /// <summary>
+    /// Asks the copy that is about to be ended to put the machine's settings back.
+    /// </summary>
+    private static void StandDownRunningInstance()
+    {
+        try
+        {
+            var stop = Task.Run(() => ControlClient.SendAsync(
+                new ControlRequest { Command = ControlProtocol.Commands.Disable },
+                StandDownTimeout));
+
+            if (stop.Wait(StandDownTimeout + TimeSpan.FromSeconds(1)) && stop.Result is { Ok: true })
+            {
+                AppLog.Info("Çalışan kopya korumayı bıraktı; DNS ayarları geri alındı.");
+                return;
+            }
+
+            AppLog.Warning("Çalışan kopya korumayı bırakamadı; DNS bu kopya tarafından yeniden yapılandırılacak.");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Çalışan kopyaya durma isteği gönderilemedi", ex);
+        }
     }
 
     /// <summary>
@@ -538,18 +647,30 @@ public partial class App : Application
     /// </summary>
     private bool OnActivationRequested()
     {
-        // Waiting for the UI thread to finish is the whole point: what this returns is
-        // what the waiting launch is told, so a stuck dispatcher has to report failure
-        // rather than let the request disappear into a queue that is not being drained.
-        // And the answer is the window's, not the dispatcher's - an operation that
-        // completed while failing to raise the window is still a launch that showed
-        // the user nothing.
+        // The fast path, and the one that runs almost every time: the window is
+        // already up and only needs raising, which is a window-manager call this
+        // thread can make itself. Answering here rather than through the dispatcher is
+        // what keeps a launch from concluding that a merely busy copy is a dead one -
+        // and the launch that concludes that kills the copy, taking the packet driver
+        // and the machine's DNS redirect down with it.
+        if (WindowActivation.TryRaiseHandle(_windowHandle))
+        {
+            // The WPF side still gets told, so the window is un-minimised properly and
+            // its backdrop is rechecked. Nobody waits for it.
+            Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => ShowMainWindow()));
+            return true;
+        }
+
+        // Hidden to the notification area, or not built yet. This one genuinely needs
+        // the UI thread, because it is a WPF Show() rather than a raise. What this
+        // returns is what the waiting launch is told, and the answer is the window's,
+        // not the dispatcher's - an operation that completed while failing to raise
+        // the window is still a launch that showed the user nothing.
         var shown = false;
         var operation = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => shown = ShowMainWindow()));
 
-        // Longer than the first wait on the other side and matched to the second one,
-        // so a busy dispatcher gets to finish rather than being written off while the
-        // launch that asked is still waiting for it.
+        // Matched to the second wait on the other side, so a busy dispatcher gets to
+        // finish rather than being written off while the launch is still waiting.
         return operation.Wait(BusyHandover) == DispatcherOperationStatus.Completed && shown;
     }
 
@@ -609,6 +730,11 @@ public partial class App : Application
         {
             AppLog.Error("Koruma otomatik başlatılamadı", ex);
             _tray?.Notify(AppPaths.ProductName, ex.Message, warning: true);
+
+            // Starting tears itself down on failure, DNS included, but a teardown that
+            // was itself interrupted would leave the machine pointed at a proxy that is
+            // not there. Checking costs a file test and covers the case that hurts.
+            await RestorePendingDnsAsync().ConfigureAwait(true);
         }
     }
 
@@ -700,7 +826,7 @@ public partial class App : Application
     /// Last resort for a startup failure: say something the user can act on and leave
     /// a file behind, because at this point there is no window and no log page.
     /// </summary>
-    private static void ReportFatal(Exception exception)
+    internal static void ReportFatal(Exception exception)
     {
         var detail = exception.ToString();
 
@@ -731,6 +857,18 @@ public partial class App : Application
         catch (Exception)
         {
             // Nothing more we can do on the way down.
+        }
+
+        try
+        {
+            // Flushed before the dialog, not after: the dialog blocks until the user
+            // dismisses it, and a user who kills the process at that point would take
+            // the explanation with them.
+            AppLog.Shutdown();
+        }
+        catch (Exception)
+        {
+            // The logger itself may be what failed.
         }
 
         try
@@ -819,6 +957,10 @@ public partial class App : Application
             _theme?.Dispose();
             _instance?.Dispose();
             AppLog.Info("Kapatıldı.");
+
+            // The writer is a background thread, so without this the last few lines -
+            // the ones that say why the app is closing - never reach the file.
+            AppLog.Shutdown();
             Shutdown();
         }
     }

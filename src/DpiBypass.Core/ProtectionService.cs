@@ -369,7 +369,66 @@ public sealed class ProtectionService : IAsyncDisposable
             }
         }
 
-        await _dnsConfigurator!.ApplyAsync(mode, loopbackHasIPv6, cancellationToken).ConfigureAwait(false);
+        var applied = await _dnsConfigurator!.ApplyAsync(mode, loopbackHasIPv6, cancellationToken).ConfigureAwait(false);
+
+        if (_dnsProxy is null)
+        {
+            return;
+        }
+
+        if (!applied)
+        {
+            // Nothing was redirected, so the proxy is listening on a socket the machine
+            // is not asking. Shut it down rather than leave a port 53 listener up.
+            AppLog.Warning("DNS yönlendirmesi uygulanamadı; yerel çözümleyici kapatılıyor.");
+            await _dnsProxy.DisposeAsync().ConfigureAwait(false);
+            _dnsProxy = null;
+            return;
+        }
+
+        // The machine now depends on this process to resolve names, so the proxy is
+        // told what it was resolving them with before. Without this, an operator that
+        // blocks DNS-over-HTTPS turns the redirect into a total loss of name
+        // resolution - which is what "the app broke my internet" actually was.
+        _dnsProxy.UseOriginalServersAsLastResort(_dnsConfigurator.OriginalServers());
+
+        // Reported, not enforced: the proxy falls back to plain UDP on its own, so a
+        // blocked DoH path costs privacy rather than connectivity. Saying so in the
+        // log is the difference between diagnosing this in a minute and in an hour.
+        _ = Task.Run(() => ReportResolverHealthAsync(cancellationToken), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Says in the log whether encrypted DNS is actually reachable on this network.
+    /// </summary>
+    private async Task ReportResolverHealthAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var resolver = _resolver;
+            if (resolver is null)
+            {
+                return;
+            }
+
+            if (await resolver.IsHealthyAsync(cancellationToken).ConfigureAwait(false))
+            {
+                AppLog.Info($"Şifreli DNS çalışıyor · sağlayıcı: {resolver.ActiveProvider ?? "-"}.");
+                return;
+            }
+
+            AppLog.Warning(
+                "Şifreli DNS'e ulaşılamıyor; isim çözümleme şifresiz yedeğe düşürüldü. "
+                    + "Ağ, DNS-over-HTTPS trafiğini engelliyor olabilir.");
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down.
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Şifreli DNS denetlenemedi", ex);
+        }
     }
 
     private async Task InitialiseNetworkAsync(CancellationToken cancellationToken)

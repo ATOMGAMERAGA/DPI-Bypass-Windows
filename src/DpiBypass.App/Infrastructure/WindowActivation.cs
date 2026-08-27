@@ -51,6 +51,50 @@ public static class WindowActivation
     }
 
     /// <summary>
+    /// Raises a window by handle alone, from any thread.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is what an already-visible window needs when another launch asks for it,
+    /// and it deliberately does not involve the dispatcher. The alternative - post the
+    /// request to the UI thread and wait for it - makes answering a second launch
+    /// conditional on the UI thread being free, so a copy that is briefly busy is
+    /// indistinguishable from one that is wedged. That mattered: the launch that
+    /// asked responds to silence by killing the copy that did not answer, and the copy
+    /// it kills is the one holding the packet driver and the machine's DNS redirect.
+    /// A user who double-clicked a shortcut got their connection dropped for it.
+    /// </para>
+    /// <para>
+    /// Every call here is a Win32 window-manager call, which is exactly the sort of
+    /// thing that is safe to make about another thread's window.
+    /// </para>
+    /// </remarks>
+    public static bool TryRaiseHandle(nint handle)
+    {
+        if (handle == nint.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!IsWindowVisible(handle))
+            {
+                return false;
+            }
+
+            ShowWindow(handle, IsIconic(handle) ? SwRestore : SwShow);
+            SetForegroundWindow(handle);
+
+            return IsWindowVisible(handle);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Shows, restores and raises the window. Returns true when the window manager
     /// agrees it is on screen.
     /// </summary>

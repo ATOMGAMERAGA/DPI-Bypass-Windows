@@ -44,15 +44,29 @@ public partial class MainWindow : Window
 
     public event Action? ExitRequested;
 
+    /// <summary>
+    /// Raised on the UI thread once the window has a handle, and again if it is ever
+    /// rebuilt.
+    /// </summary>
+    /// <remarks>
+    /// The application keeps this so a second launch can be answered from the
+    /// activation listener thread with plain window-manager calls, rather than by
+    /// queueing work behind whatever the UI thread happens to be doing.
+    /// </remarks>
+    public event Action<nint>? HandleReady;
+
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
 
         // Mica needs a window handle, which only exists from here on. When it is not
         // available the solid Fluent background stays, so nothing else has to change.
+        var handle = new WindowInteropHelper(this).Handle;
         _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
-        _backdropHandle = _micaApplied ? new WindowInteropHelper(this).Handle : nint.Zero;
+        _backdropHandle = _micaApplied ? handle : nint.Zero;
         AppLog.Info($"Pencere arka planı: {WindowBackdrop.Availability}.");
+
+        HandleReady?.Invoke(handle);
     }
 
     /// <summary>
@@ -88,9 +102,11 @@ public partial class MainWindow : Window
                 if (handle != nint.Zero && handle != _backdropHandle)
                 {
                     // New handle: ask for the material again rather than assuming the
-                    // old answer still holds.
+                    // old answer still holds, and tell the application, whose copy is
+                    // what a second launch is raised through.
                     _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
                     _backdropHandle = _micaApplied ? handle : nint.Zero;
+                    HandleReady?.Invoke(handle);
                 }
 
                 if (_micaApplied && WindowBackdrop.DescribeUnavailability() is null)
