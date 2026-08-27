@@ -51,6 +51,10 @@ public static class ControlProtocol
         public const string VodafoneOn = "vodafone.on";
         public const string VodafoneOff = "vodafone.off";
         public const string VodafoneStatus = "vodafone.status";
+        public const string LatencyOn = "latency.on";
+        public const string LatencyOff = "latency.off";
+        public const string LatencyStatus = "latency.status";
+        public const string LatencyRestore = "latency.restore";
         public const string Domains = "domains";
     }
 }

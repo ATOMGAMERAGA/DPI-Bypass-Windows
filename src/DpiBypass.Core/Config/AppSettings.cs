@@ -74,6 +74,12 @@ public sealed record AppSettings
     /// <summary>How often to re-verify the chosen recipe, in seconds. Zero disables it.</summary>
     public int RecheckIntervalSeconds { get; set; } = 1800;
 
+    /// <summary>
+    /// Measure and test reversible NIC settings independently from the DPI engine.
+    /// Missing in older JSON files means false through the normal serializer default.
+    /// </summary>
+    public bool LowLatencyMode { get; set; }
+
     public List<string> ExtraDomains { get; set; } = [];
 
     public List<string> ExcludedDomains { get; set; } = [];

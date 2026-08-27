@@ -4,6 +4,9 @@
     <SolidColorBrush x:Key="AppWindowBackgroundBrush" Color="#111C2E" />
     <SolidColorBrush x:Key="AppCardBackgroundBrush" Color="#1B2438" />
     <SolidColorBrush x:Key="AppCardBorderBrush" Color="#2B3550" />
+    <SolidColorBrush x:Key="AppCardHoverBorderBrush" Color="#43516F" />
+    <SolidColorBrush x:Key="AppHeroBackgroundBrush" Color="#18243A" />
+    <SolidColorBrush x:Key="AppHeroBorderBrush" Color="#344765" />
     <SolidColorBrush x:Key="AppSubtleBackgroundBrush" Color="#162033" />
     <SolidColorBrush x:Key="AppTextPrimaryBrush" Color="#F2F5FA" />
     <SolidColorBrush x:Key="AppTextSecondaryBrush" Color="#9FAAC0" />
@@ -14,6 +17,9 @@
     <SolidColorBrush x:Key="AppDangerBrush" Color="#FF7C70" />
     <SolidColorBrush x:Key="AppNeutralBrush" Color="#6C7891" />
     <SolidColorBrush x:Key="AppCodeBackgroundBrush" Color="#0E1626" />
+    <SolidColorBrush x:Key="AppToggleOffBrush" Color="#303A50" />
+    <SolidColorBrush x:Key="AppToggleThumbBrush" Color="#F7F9FC" />
+    <SolidColorBrush x:Key="AppOnAccentTextBrush" Color="#FFFFFF" />
 
     <LinearGradientBrush x:Key="AppBrandBrush" StartPoint="0,0" EndPoint="1,0">
         <GradientStop Offset="0" Color="#25CBEF" />

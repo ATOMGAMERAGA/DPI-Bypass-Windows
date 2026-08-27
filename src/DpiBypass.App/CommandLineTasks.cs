@@ -5,6 +5,7 @@ using DpiBypass.Core.Config;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Ipc;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.Network;
 using DpiBypass.Core.Startup;
 
 namespace DpiBypass.App;
@@ -37,7 +38,7 @@ internal static class CommandLineTasks
     {
         "install-autostart", "uninstall-autostart", "restore-dns",
         "strategies", "isps", "version", "v", "help", "h", "?",
-        "status", "test", "search", "domains", "enable", "disable", "vodafone",
+        "status", "test", "search", "domains", "enable", "disable", "vodafone", "latency",
     };
 
     /// <summary>
@@ -122,6 +123,9 @@ internal static class CommandLineTasks
             case "vodafone":
                 return await SendAsync(ResolveVodafoneCommand(argument)).ConfigureAwait(false);
 
+            case "latency":
+                return await RunLatencyAsync(argument).ConfigureAwait(false);
+
             // --minimized and anything else fall through to the window.
             default:
                 return false;
@@ -135,10 +139,72 @@ internal static class CommandLineTasks
         _ => ControlProtocol.Commands.VodafoneStatus,
     };
 
+    private static async Task<bool> RunLatencyAsync(string? argument)
+    {
+        switch (argument?.Trim().ToLowerInvariant())
+        {
+            case "on":
+            case "ac":
+            case "aç":
+                return await SendAsync(ControlProtocol.Commands.LatencyOn).ConfigureAwait(false);
+
+            case "off":
+            case "kapat":
+                return await SendAsync(ControlProtocol.Commands.LatencyOff).ConfigureAwait(false);
+
+            case "test":
+            {
+                var network = NetworkFingerprint.Capture();
+                if (!network.IsOnline)
+                {
+                    WriteConsole("Aktif internet bağlantısı bulunamadı.");
+                    return true;
+                }
+
+                var measurement = await new LatencyProbe().MeasureAsync(network).ConfigureAwait(false);
+                WriteConsole(LatencyOptimizer.FormatMeasurement(network, measurement));
+                return true;
+            }
+
+            case "restore":
+                return await RestoreLatencyAsync().ConfigureAwait(false);
+
+            default:
+                return await SendAsync(ControlProtocol.Commands.LatencyStatus).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<bool> RestoreLatencyAsync()
+    {
+        // Prefer the owner process so its monitor is stopped as well as the settings
+        // being restored. During uninstall there is deliberately no owner process,
+        // so the exact same snapshot is recovered locally.
+        var response = await ControlClient.SendAsync(
+            new ControlRequest { Command = ControlProtocol.Commands.LatencyRestore },
+            TimeSpan.FromSeconds(45)).ConfigureAwait(false);
+
+        if (response is not null)
+        {
+            WriteConsole(response.Text);
+            return true;
+        }
+
+        var store = new ConfigStore();
+        var settings = store.Load();
+        settings.LowLatencyMode = false;
+        store.Save(settings);
+
+        await using var optimizer = new LatencyOptimizer(log: AppLog.InfoSink);
+        var result = await optimizer.RestoreAsync().ConfigureAwait(false);
+        WriteConsole(result.StatusLine);
+        return true;
+    }
+
     private static async Task<bool> SendAsync(string command, string? argument = null)
     {
         // Searching and re-tuning run real handshakes, so allow for them.
         var timeout = command is ControlProtocol.Commands.Search or ControlProtocol.Commands.Test
+                or ControlProtocol.Commands.LatencyOn or ControlProtocol.Commands.LatencyOff
             ? TimeSpan.FromSeconds(90)
             : TimeSpan.FromSeconds(10);
 
@@ -168,6 +234,10 @@ internal static class CommandLineTasks
           DpiBypass.exe isps                operatör profilleri
           DpiBypass.exe enable | disable    korumayı aç / kapat
           DpiBypass.exe vodafone [on|off]   hotspot TTL düzeltmesi (argümansız: durum)
+          DpiBypass.exe latency status      düşük-gecikme durumunu göster
+          DpiBypass.exe latency on | off    ölçümlü düşük-gecikme modunu aç / kapat
+          DpiBypass.exe latency test        hiçbir ayar değiştirmeden RTT/jitter ölç
+          DpiBypass.exe latency restore     özgün NIC ayarlarını kurtar
           DpiBypass.exe restore-dns         DNS ayarlarını geri yükle
           DpiBypass.exe version             sürüm
 

@@ -39,6 +39,14 @@ public static class ProcessRunner
         IEnumerable<string> arguments,
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
+        => await RunCoreAsync(fileName, arguments, environment: null, timeout, cancellationToken).ConfigureAwait(false);
+
+    private static async Task<ProcessResult> RunCoreAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        IReadOnlyDictionary<string, string?>? environment,
+        TimeSpan? timeout,
+        CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -55,6 +63,17 @@ public static class ProcessRunner
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
+        }
+
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                // Callers use fixed DPI_BYPASS_* names. Values go through the process
+                // environment block, never through PowerShell source code, so an
+                // adapter name containing quotes or metacharacters stays data.
+                startInfo.Environment[name] = value;
+            }
         }
 
         using var process = new Process { StartInfo = startInfo };
@@ -128,6 +147,21 @@ public static class ProcessRunner
         => RunAsync(
             "powershell.exe",
             ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", Utf8OutputPrelude + script],
+            timeout,
+            cancellationToken);
+
+    /// <summary>
+    /// Runs fixed PowerShell source with untrusted values supplied out of band.
+    /// </summary>
+    public static Task<ProcessResult> PowerShellWithEnvironmentAsync(
+        string script,
+        IReadOnlyDictionary<string, string?> environment,
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+        => RunCoreAsync(
+            "powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", Utf8OutputPrelude + script],
+            environment,
             timeout,
             cancellationToken);
 

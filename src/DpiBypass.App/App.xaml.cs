@@ -18,16 +18,16 @@ public partial class App : Application
     /// How long a launch waits for the running copy to put its window up before it
     /// starts asking whether that copy is alive at all.
     /// </summary>
-    private static readonly TimeSpan FirstHandover = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FirstHandover = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// The second, longer wait, given only to a copy that has proved it is alive.
     /// A busy instance is worth waiting for; a dead one is not.
     /// </summary>
-    private static readonly TimeSpan BusyHandover = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan BusyHandover = TimeSpan.FromSeconds(8);
 
     /// <summary>How long the running copy gets to answer its control channel.</summary>
-    private static readonly TimeSpan LivenessProbe = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan LivenessProbe = TimeSpan.FromMilliseconds(1500);
 
     private SingleInstance? _instance;
     private ControlServer? _control;
@@ -259,6 +259,10 @@ public partial class App : Application
             _control = new ControlServer(request => commands.HandleAsync(request), AppLog.InfoSink);
             _control.Start();
         });
+
+        // Low-latency mode owns its own NetworkMonitor and is intentionally not tied
+        // to whether the DPI engine is enabled.
+        Guarded("Ping düşürme", () => _ = StartIndependentFeaturesAsync());
 
         if (_service!.Settings.StartEngineOnLaunch)
         {
@@ -605,6 +609,24 @@ public partial class App : Application
         {
             AppLog.Error("Koruma otomatik başlatılamadı", ex);
             _tray?.Notify(AppPaths.ProductName, ex.Message, warning: true);
+        }
+    }
+
+    private async Task StartIndependentFeaturesAsync()
+    {
+        if (_service is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _service.StartIndependentFeaturesAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Bağımsız ağ özellikleri başlatılamadı", ex);
+            _tray?.Notify(AppPaths.ProductName, "Ping düşürme başlatılamadı; NIC ayarları değiştirilmedi.", warning: true);
         }
     }
 

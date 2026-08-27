@@ -106,6 +106,8 @@ Filename: "{app}\{#AppExeName}"; Parameters: "--show"; WorkingDir: "{app}"; Desc
 Filename: "{app}\{#AppExeName}"; Parameters: "--show"; WorkingDir: "{app}"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
+; Restore persistent NIC properties before the executable or WinDivert is removed.
+Filename: "{app}\{#AppExeName}"; Parameters: "latency restore"; WorkingDir: "{app}"; RunOnceId: "RestoreLatency"; Flags: runhidden waituntilterminated
 ; Put the user's DNS back before anything is deleted, using the same code that changed it.
 Filename: "{app}\{#AppExeName}"; Parameters: "--restore-dns"; WorkingDir: "{app}"; RunOnceId: "RestoreDns"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; WorkingDir: "{app}"; RunOnceId: "RemoveTask"; Flags: runhidden waituntilterminated

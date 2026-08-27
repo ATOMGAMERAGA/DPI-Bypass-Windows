@@ -41,6 +41,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly TargetMatcher _matcher = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly HotspotTtlFix _ttlFix = new(AppLog.InfoSink);
+    private readonly LatencyOptimizer _latencyOptimizer;
 
     private DohResolver? _resolver;
     private DnsProxyServer? _dnsProxy;
@@ -55,10 +56,15 @@ public sealed class ProtectionService : IAsyncDisposable
     private Task? _networkWork;
     private Task? _recheckWork;
 
-    public ProtectionService(ConfigStore? store = null, LearnedDomainStore? learnedDomains = null)
+    public ProtectionService(
+        ConfigStore? store = null,
+        LearnedDomainStore? learnedDomains = null,
+        LatencyOptimizer? latencyOptimizer = null)
     {
         _store = store ?? new ConfigStore();
         _learned = learnedDomains ?? new LearnedDomainStore();
+        _latencyOptimizer = latencyOptimizer ?? new LatencyOptimizer(log: AppLog.InfoSink);
+        _latencyOptimizer.Changed += OnLatencyChanged;
         Settings = _store.Load();
         ApplySettingsToMatcher();
     }
@@ -84,6 +90,10 @@ public sealed class ProtectionService : IAsyncDisposable
     public long DnsQueriesServed => _dnsProxy?.QueriesServed ?? 0;
 
     public long DnsCacheHits => _dnsProxy?.CacheHits ?? 0;
+
+    public LatencyOptimizationResult LatencyResult => _latencyOptimizer.Current;
+
+    public bool IsLatencyBusy => _latencyOptimizer.IsBusy;
 
     /// <summary>Last verification result against discord.com.</summary>
     public ProbeResult? LastProbe { get; private set; }
@@ -140,6 +150,38 @@ public sealed class ProtectionService : IAsyncDisposable
 
     /// <summary>Raised when the discovery pass adds a domain.</summary>
     public event Action<string>? DomainLearned;
+
+    /// <summary>
+    /// Starts settings that belong to the application rather than the DPI engine.
+    /// </summary>
+    public async Task StartIndependentFeaturesAsync(CancellationToken cancellationToken = default)
+    {
+        if (!Settings.LowLatencyMode)
+        {
+            return;
+        }
+
+        await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<LatencyOptimizationResult> SetLowLatencyModeAsync(
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        Settings.LowLatencyMode = enabled;
+        _store.Save(Settings);
+        Changed?.Invoke();
+
+        return enabled
+            ? await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false)
+            : await _latencyOptimizer.StopAndRestoreAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<LatencyOptimizationResult> TestLatencyAsync(CancellationToken cancellationToken = default)
+        => _latencyOptimizer.TestAsync(cancellationToken);
+
+    public Task<LatencyOptimizationResult> RestoreLatencyAsync(CancellationToken cancellationToken = default)
+        => _latencyOptimizer.RestoreAsync(cancellationToken);
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -245,6 +287,8 @@ public sealed class ProtectionService : IAsyncDisposable
         DomainLearned?.Invoke(domain);
         Changed?.Invoke();
     }
+
+    private void OnLatencyChanged(LatencyOptimizationResult result) => Changed?.Invoke();
 
     /// <summary>
     /// Re-verifies the chosen recipe on a timer, so an operator changing its rules
@@ -989,6 +1033,8 @@ public sealed class ProtectionService : IAsyncDisposable
             }
         }
 
+        _latencyOptimizer.Changed -= OnLatencyChanged;
+        await _latencyOptimizer.DisposeAsync().ConfigureAwait(false);
         _ttlFix.Dispose();
         _lifetime?.Dispose();
         _gate.Dispose();
