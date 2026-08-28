@@ -70,12 +70,41 @@ public sealed class DnsConfigurator
             return false;
         }
 
-        var snapshotWritten = false;
-        if (!HasPendingRestore)
+        // A snapshot is a hard precondition, not a best-effort courtesy. Redirecting
+        // Windows to a process-local DNS listener without first proving that the old
+        // values are durable is how a crash turns into a machine with no internet.
+        //
+        // A pending snapshot may belong to an earlier run or another network. Keep its
+        // original values, refresh interface indexes and add newly active adapters
+        // before touching any of them. Without the merge, starting after a Wi-Fi/
+        // Ethernet switch redirects the new adapter but later restores only the old
+        // one, leaving the current connection permanently on 127.0.0.1.
+        IReadOnlyList<AdapterDnsSnapshot>? previousSnapshot = null;
+        if (HasPendingRestore)
         {
-            SaveSnapshot(adapters);
-            snapshotWritten = true;
+            previousSnapshot = LoadSnapshot();
+            if (previousSnapshot is null)
+            {
+                _log?.Invoke("DNS snapshot is unreadable; recovering loopback DNS before continuing.");
+                if (!await RecoverOrphanedLoopbackAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    _log?.Invoke("Unreadable DNS snapshot could not be recovered; leaving DNS untouched.");
+                    return false;
+                }
+
+                PreserveUnreadableSnapshot();
+                previousSnapshot = [];
+                adapters = await EnumerateAsync(cancellationToken).ConfigureAwait(false);
+                if (adapters.Count == 0)
+                {
+                    _log?.Invoke("No active adapter found after DNS recovery; leaving DNS untouched.");
+                    return false;
+                }
+            }
         }
+
+        var snapshot = MergeSnapshots(previousSnapshot ?? [], adapters);
+        PersistSnapshot(snapshot);
 
         var v4 = mode == DnsMode.EncryptedLoopback ? ["127.0.0.1"] : PublicV4;
         var v6 = mode == DnsMode.EncryptedLoopback
@@ -102,11 +131,16 @@ public sealed class DnsConfigurator
         {
             _log?.Invoke("No adapter accepted the new DNS servers; the previous configuration is still in place.");
 
-            // A snapshot left behind here would offer to "restore" a change that never
-            // happened, and the caller would report encrypted DNS as active.
-            if (snapshotWritten)
+            // Put the snapshot file back exactly as it was. A brand-new one would
+            // claim a change happened when none did; an older one still represents a
+            // redirect from the earlier run and must remain available for recovery.
+            if (previousSnapshot is null or { Count: 0 })
             {
                 DeleteSnapshot();
+            }
+            else
+            {
+                PersistSnapshot(previousSnapshot);
             }
 
             return false;
@@ -122,9 +156,25 @@ public sealed class DnsConfigurator
         var snapshot = LoadSnapshot();
         if (snapshot is null)
         {
+            if (HasPendingRestore)
+            {
+                _log?.Invoke("DNS snapshot is unreadable; resetting adapters that still point only at the local proxy.");
+                if (!await RecoverOrphanedLoopbackAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    throw new InvalidOperationException(
+                        "DNS kurtarma dosyası okunamadı ve yerel DNS yönlendirmesi geri alınamadı.");
+                }
+
+                PreserveUnreadableSnapshot();
+                await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+                _log?.Invoke("Orphaned loopback DNS configuration reset to the network defaults.");
+            }
+
             CurrentMode = DnsMode.SystemDefault;
             return;
         }
+
+        var remaining = new List<AdapterDnsSnapshot>();
 
         foreach (var adapter in snapshot)
         {
@@ -132,32 +182,93 @@ public sealed class DnsConfigurator
             // -ResetServerAddresses takes no family, so a reset clears both families at
             // once. Every reset therefore has to happen before the explicit servers go
             // back on, otherwise the v6 reset undoes the v4 servers just restored.
-            if (adapter.OriginalV4.Length == 0)
+            var restored = true;
+            if (adapter.OriginalV4.Length == 0 || adapter.OriginalV6.Length == 0)
             {
-                await ResetServersAsync(adapter.InterfaceIndexV4, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length == 0)
-            {
-                await ResetServersAsync(adapter.InterfaceIndexV6, cancellationToken).ConfigureAwait(false);
+                var resetIndex = adapter.InterfaceIndexV4 > 0
+                    ? adapter.InterfaceIndexV4
+                    : adapter.InterfaceIndexV6;
+                restored &= resetIndex > 0
+                    && await ResetServersAsync(resetIndex, cancellationToken).ConfigureAwait(false);
             }
 
             if (adapter.OriginalV4.Length > 0)
             {
-                await SetServersAsync(adapter.InterfaceIndexV4, adapter.OriginalV4, cancellationToken).ConfigureAwait(false);
+                restored &= adapter.InterfaceIndexV4 > 0
+                    && await SetServersAsync(adapter.InterfaceIndexV4, adapter.OriginalV4, cancellationToken).ConfigureAwait(false);
             }
 
-            if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length > 0)
+            if (adapter.OriginalV6.Length > 0)
             {
-                await SetServersAsync(adapter.InterfaceIndexV6, adapter.OriginalV6, cancellationToken).ConfigureAwait(false);
+                restored &= adapter.InterfaceIndexV6 > 0
+                    && await SetServersAsync(adapter.InterfaceIndexV6, adapter.OriginalV6, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!restored)
+            {
+                remaining.Add(adapter);
             }
         }
 
         await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+
+        if (remaining.Count > 0)
+        {
+            // Never discard the only recovery data merely because one adapter or one
+            // PowerShell invocation failed. Successful rows are removed so a missing
+            // old USB/VPN adapter cannot make every future restore repeat changes on
+            // adapters that are already healthy.
+            PersistSnapshot(remaining);
+            throw new InvalidOperationException(
+                $"DNS ayarları {remaining.Count} bağdaştırıcıda geri yüklenemedi; kurtarma bilgisi korundu.");
+        }
+
         DeleteSnapshot();
         CurrentMode = DnsMode.SystemDefault;
         _log?.Invoke("Original DNS configuration restored.");
     }
+
+    /// <summary>
+    /// Combines the durable originals with the adapters visible in this run.
+    /// Existing originals are never overwritten by the loopback values a previous
+    /// run installed; only their current interface indexes are refreshed.
+    /// </summary>
+    internal static IReadOnlyList<AdapterDnsSnapshot> MergeSnapshots(
+        IReadOnlyList<AdapterDnsSnapshot> saved,
+        IReadOnlyList<AdapterDnsSnapshot> current)
+    {
+        var merged = new Dictionary<string, AdapterDnsSnapshot>(StringComparer.OrdinalIgnoreCase);
+        foreach (var snapshot in saved)
+        {
+            // Old builds did not normalise duplicate rows. Keeping the first one is
+            // important: it is the earliest, and therefore the most likely to contain
+            // the real pre-redirect DNS values.
+            merged.TryAdd(SnapshotKey(snapshot), snapshot);
+        }
+
+        foreach (var adapter in current)
+        {
+            var key = SnapshotKey(adapter);
+            if (merged.TryGetValue(key, out var original))
+            {
+                merged[key] = original with
+                {
+                    Name = adapter.Name,
+                    InterfaceIndexV4 = adapter.InterfaceIndexV4,
+                    InterfaceIndexV6 = adapter.InterfaceIndexV6,
+                };
+            }
+            else
+            {
+                merged[key] = adapter;
+            }
+        }
+
+        return [.. merged.Values];
+    }
+
+    private static string SnapshotKey(AdapterDnsSnapshot snapshot)
+        => !string.IsNullOrWhiteSpace(snapshot.Id) ? $"id:{snapshot.Id}" : $"name:{snapshot.Name}";
 
     /// <summary>Every adapter that currently carries traffic, with both address family indexes.</summary>
     public async Task<IReadOnlyList<AdapterDnsSnapshot>> EnumerateAsync(CancellationToken cancellationToken = default)
@@ -326,7 +437,7 @@ public sealed class DnsConfigurator
 
     private static async Task<bool> ResetServersAsync(int interfaceIndex, CancellationToken cancellationToken)
     {
-        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ResetServerAddresses -ErrorAction SilentlyContinue";
+        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ResetServerAddresses -ErrorAction Stop";
         var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
         return result.Success;
     }
@@ -334,16 +445,38 @@ public sealed class DnsConfigurator
     public static Task FlushCacheAsync(CancellationToken cancellationToken = default)
         => ProcessRunner.PowerShellAsync("Clear-DnsClientCache -ErrorAction SilentlyContinue", TimeSpan.FromSeconds(15), cancellationToken);
 
-    private void SaveSnapshot(IReadOnlyList<AdapterDnsSnapshot> adapters)
+    /// <summary>
+    /// Atomically persists and reads back the recovery data before DNS is changed.
+    /// Failure is fatal to the apply operation: running without a verified snapshot
+    /// would make a process crash capable of taking name resolution down with it.
+    /// </summary>
+    private void PersistSnapshot(IReadOnlyList<AdapterDnsSnapshot> adapters)
     {
+        var temporary = _snapshotPath + ".tmp";
+
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_snapshotPath)!);
-            File.WriteAllText(_snapshotPath, JsonSerializer.Serialize(adapters, JsonOptions));
+            File.WriteAllText(temporary, JsonSerializer.Serialize(adapters, JsonOptions));
+
+            // Verify the exact bytes that will become the recovery source. A full disk,
+            // an interrupted write or an unexpected serializer result is discovered
+            // while the system still has its original DNS settings.
+            var verification = DeserializeSnapshot(File.ReadAllText(temporary));
+            if (verification is null || verification.Count != adapters.Count)
+            {
+                throw new IOException("DNS snapshot verification failed.");
+            }
+
+            File.Move(temporary, _snapshotPath, overwrite: true);
         }
-        catch (IOException ex)
+        catch (Exception ex)
         {
             _log?.Invoke($"Could not persist DNS snapshot: {ex.Message}");
+            TryDelete(temporary);
+            throw new IOException(
+                "DNS kurtarma bilgisi güvenli biçimde kaydedilemedi; sistem DNS ayarları değiştirilmedi.",
+                ex);
         }
     }
 
@@ -356,7 +489,7 @@ public sealed class DnsConfigurator
 
         try
         {
-            return JsonSerializer.Deserialize<List<AdapterDnsSnapshot>>(File.ReadAllText(_snapshotPath));
+            return DeserializeSnapshot(File.ReadAllText(_snapshotPath));
         }
         catch (Exception)
         {
@@ -364,18 +497,98 @@ public sealed class DnsConfigurator
         }
     }
 
-    private void DeleteSnapshot()
+    private static IReadOnlyList<AdapterDnsSnapshot>? DeserializeSnapshot(string json)
+    {
+        var snapshots = JsonSerializer.Deserialize<List<AdapterDnsSnapshot?>>(json);
+        if (snapshots is null || snapshots.Any(snapshot => snapshot is null))
+        {
+            return null;
+        }
+
+        var normalised = new List<AdapterDnsSnapshot>(snapshots.Count);
+        foreach (var snapshot in snapshots)
+        {
+            if (snapshot is null
+                || (snapshot.InterfaceIndexV4 <= 0 && snapshot.InterfaceIndexV6 <= 0)
+                || (string.IsNullOrWhiteSpace(snapshot.Id) && string.IsNullOrWhiteSpace(snapshot.Name)))
+            {
+                return null;
+            }
+
+            normalised.Add(snapshot with
+            {
+                Id = snapshot.Id ?? string.Empty,
+                Name = snapshot.Name ?? string.Empty,
+                OriginalV4 = FilterOurOwn(snapshot.OriginalV4),
+                OriginalV6 = FilterOurOwn(snapshot.OriginalV6),
+            });
+        }
+
+        return normalised;
+    }
+
+    /// <summary>
+    /// Last-resort recovery for an unreadable snapshot. Only adapters whose configured
+    /// servers consist entirely of this application's loopback addresses are reset;
+    /// a legitimate local resolver accompanied by any other server is left alone.
+    /// </summary>
+    private static async Task<bool> RecoverOrphanedLoopbackAsync(CancellationToken cancellationToken)
+    {
+        const string script = """
+            $rows = @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue)
+            $indexes = @($rows | ForEach-Object { $_.InterfaceIndex } | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+            foreach ($index in $indexes) {
+              $servers = @($rows |
+                Where-Object { $_.InterfaceIndex -eq $index } |
+                ForEach-Object { @($_.ServerAddresses) } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+              $foreign = @($servers | Where-Object { $_ -ne '127.0.0.1' -and $_ -ne '::1' })
+              if ($servers.Count -gt 0 -and $foreign.Count -eq 0) {
+                Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction Stop
+              }
+            }
+            """;
+
+        var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(30), cancellationToken)
+            .ConfigureAwait(false);
+        return result.Success;
+    }
+
+    private void PreserveUnreadableSnapshot()
     {
         try
         {
             if (File.Exists(_snapshotPath))
             {
-                File.Delete(_snapshotPath);
+                File.Move(_snapshotPath, _snapshotPath + ".bad", overwrite: true);
             }
         }
-        catch (IOException)
+        catch (Exception)
         {
-            // Left behind; the next restore will simply be a no-op.
+            // If it cannot be moved, deleting only the marker is still safer than
+            // treating the same unreadable recovery source as valid on every launch.
+            TryDelete(_snapshotPath);
+        }
+    }
+
+    private void DeleteSnapshot()
+    {
+        TryDelete(_snapshotPath);
+        TryDelete(_snapshotPath + ".tmp");
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception)
+        {
+            // Left behind; the next recovery will retry it.
         }
     }
 

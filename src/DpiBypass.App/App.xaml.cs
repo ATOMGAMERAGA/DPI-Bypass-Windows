@@ -40,6 +40,7 @@ public partial class App : Application
     private StartupPlan _plan = new(StartupVisibility.ShowWindow, "başlatılıyor");
     private bool _shuttingDown;
     private bool _windowEverShown;
+    private bool _dnsWatchdogStarted;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -507,7 +508,19 @@ public partial class App : Application
         // Handing the user the "look in the notification area" message would be a lie:
         // there is nothing there to click, and every later launch would say the same.
         AppLog.Warning("Çalışan kopya yanıt vermedi; bu kopya devralıyor.");
-        return _instance.TryTakeOver(AppLog.InfoSink);
+        if (_instance.TryTakeOver(AppLog.InfoSink))
+        {
+            return true;
+        }
+
+        MessageBox.Show(
+            $"{AppPaths.ProductName} uygulamasının yanıt vermeyen bir kopyası kapatılamadı.\n\n"
+                + "İkinci bir ağ motoru başlatılmadı. Görev Yöneticisi'nden DPI Bypass işlemini "
+                + "sonlandırıp uygulamayı yeniden açın.",
+            AppPaths.ProductName,
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+        return false;
     }
 
     /// <summary>
@@ -580,17 +593,20 @@ public partial class App : Application
 
     private async Task RunHeadlessAsync(string[] args)
     {
+        var exitCode = 0;
         try
         {
             await CommandLineTasks.TryRunAsync(args).ConfigureAwait(true);
+            exitCode = Environment.ExitCode;
         }
         catch (Exception ex)
         {
             AppLog.Error("Komut çalıştırılamadı", ex);
+            exitCode = 1;
         }
         finally
         {
-            Shutdown();
+            Shutdown(exitCode);
         }
     }
 
@@ -603,6 +619,20 @@ public partial class App : Application
 
         try
         {
+            if (_service.Settings.DnsMode != DnsMode.SystemDefault && !_dnsWatchdogStarted)
+            {
+                // System DNS is about to be changed. Do not make a process-local DNS
+                // proxy a single point of failure unless a separately named recovery
+                // process is already watching this owner.
+                if (!CommandLineTasks.TryStartDnsWatchdog())
+                {
+                    throw new InvalidOperationException(
+                        "DNS çökme koruması başlatılamadı; internet ayarları güvenlik için değiştirilmedi.");
+                }
+
+                _dnsWatchdogStarted = true;
+            }
+
             await _service.StartAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
@@ -703,6 +733,12 @@ public partial class App : Application
     private static void ReportFatal(Exception exception)
     {
         var detail = exception.ToString();
+
+        // A failure before the service was constructed cannot go through its normal
+        // teardown. Recover a snapshot left by the previous run while this elevated
+        // process is still alive; the external watchdog remains the fallback for a
+        // fail-fast/native termination that never reaches this method.
+        TryRestorePendingDnsAfterFatal();
 
         try
         {
@@ -839,5 +875,30 @@ public partial class App : Application
         }
 
         StopServiceSynchronously();
+        TryRestorePendingDnsAfterFatal();
+    }
+
+    private static void TryRestorePendingDnsAfterFatal()
+    {
+        try
+        {
+            var configurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
+            if (configurator.HasPendingRestore)
+            {
+                Task.Run(() => configurator.RestoreAsync(CancellationToken.None))
+                    .Wait(TimeSpan.FromSeconds(30));
+            }
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                AppLog.Error("Kritik hata sonrası DNS geri yüklenemedi", ex);
+            }
+            catch (Exception)
+            {
+                // The watchdog process will make the same attempt after this exits.
+            }
+        }
     }
 }

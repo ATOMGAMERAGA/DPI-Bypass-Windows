@@ -43,4 +43,13 @@
     </Content>
   </ItemGroup>
 
+  <!-- The same self-contained apphost under a different process name is the DNS
+       crash watchdog. Keeping it separate means ending/crashing DpiBypass.exe does
+       not also remove the process whose only job is to put system DNS back. -->
+  <Target Name="CreateDnsRecoveryHost" AfterTargets="Publish">
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).exe"
+          DestinationFiles="$(PublishDir)DpiBypass.Recovery.exe"
+          Condition="Exists('$(PublishDir)$(AssemblyName).exe')" />
+  </Target>
+
 </Project>

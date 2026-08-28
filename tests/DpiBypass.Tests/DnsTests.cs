@@ -332,6 +332,41 @@ public class DnsConfiguratorTests
             Directory.Delete(directory, recursive: true);
         }
     }
+
+    [Fact]
+    public void ANewAdapterIsAddedWithoutOverwritingDurableOriginals()
+    {
+        var saved = new AdapterDnsSnapshot(
+            "wifi-id", "Wi-Fi", 4, 4, ["192.168.1.1"], ["fe80::1"]);
+        var redirectedNow = new AdapterDnsSnapshot(
+            "wifi-id", "Wi-Fi 2", 17, 17, [], []);
+        var newEthernet = new AdapterDnsSnapshot(
+            "ethernet-id", "Ethernet", 21, 21, ["10.0.0.1"], []);
+
+        var merged = DnsConfigurator.MergeSnapshots([saved], [redirectedNow, newEthernet]);
+
+        Assert.Equal(2, merged.Count);
+        var wifi = Assert.Single(merged, row => row.Id == "wifi-id");
+        Assert.Equal(17, wifi.InterfaceIndexV4);
+        Assert.Equal("Wi-Fi 2", wifi.Name);
+        Assert.Equal(["192.168.1.1"], wifi.OriginalV4);
+        Assert.Equal(["fe80::1"], wifi.OriginalV6);
+
+        var ethernet = Assert.Single(merged, row => row.Id == "ethernet-id");
+        Assert.Equal(["10.0.0.1"], ethernet.OriginalV4);
+    }
+
+    [Fact]
+    public void DuplicateLegacyRowsKeepTheEarliestRecoveryValues()
+    {
+        var first = new AdapterDnsSnapshot("same", "Wi-Fi", 1, 1, ["192.168.1.1"], []);
+        var duplicate = new AdapterDnsSnapshot("same", "Wi-Fi", 2, 2, ["127.0.0.1"], []);
+
+        var merged = DnsConfigurator.MergeSnapshots([first, duplicate], []);
+
+        var only = Assert.Single(merged);
+        Assert.Equal(["192.168.1.1"], only.OriginalV4);
+    }
 }
 
 public class FakePayloadTests

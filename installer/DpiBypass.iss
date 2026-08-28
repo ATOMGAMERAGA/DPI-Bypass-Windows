@@ -126,9 +126,34 @@ procedure StopRunningInstance();
 var
   ResultCode: Integer;
 begin
+  { Never kill the owner while Windows still points at its process-local DNS proxy.
+    A forced termination cannot run the application's normal finally/Dispose path;
+    restoring first is what keeps an upgrade or uninstall from taking the machine's
+    internet connection down if the replacement then fails to launch. Both commands
+    are separate helper instances and therefore still run when the UI copy is hung. }
+  if FileExists(ExpandConstant('{app}\{#AppExeName}')) then
+  begin
+    Exec(ExpandConstant('{app}\{#AppExeName}'), '--restore-dns',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{app}\{#AppExeName}'), 'latency restore',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+
   { The app holds the driver handle open, so it has to go before files are replaced. }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#AppExeName} /F', '', SW_HIDE,
     ewWaitUntilTerminated, ResultCode);
+
+  { A separately named watchdog normally exits as soon as its owner does. Run the
+    recovery command once more after that hand-off, then remove any orphan before
+    Setup replaces the shared runtime files. }
+  if FileExists(ExpandConstant('{app}\DpiBypass.Recovery.exe')) then
+  begin
+    Exec(ExpandConstant('{app}\DpiBypass.Recovery.exe'), '--restore-dns',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM DpiBypass.Recovery.exe /F', '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode);
+  end;
+
   { And the pre-rename build, which holds the same driver handle under its old name. }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM AtomDpiBypass.exe /F', '', SW_HIDE,
     ewWaitUntilTerminated, ResultCode);

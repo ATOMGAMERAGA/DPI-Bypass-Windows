@@ -158,6 +158,33 @@ public sealed class SingleInstance : IDisposable
     }
 
     /// <summary>
+    /// Installer/readiness probe which asks the primary copy to put a real window on
+    /// screen without ever acquiring the mutex itself. Acquiring here creates a race
+    /// where the probe can become primary a millisecond before the application it is
+    /// checking and make that application exit as the "second" copy.
+    /// </summary>
+    public static bool RequestVisibleWindow(TimeSpan timeout)
+    {
+        using var activate = OpenEvent(ActivateEventName, create: false);
+        using var acknowledge = OpenEvent(AcknowledgeEventName, create: false);
+        if (activate is null || acknowledge is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            acknowledge.Reset();
+            WindowActivation.AllowForegroundHandover();
+            return activate.Set() && acknowledge.WaitOne(timeout);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Promotes this process to the primary instance after the copy holding the lock
     /// failed to answer.
     /// </summary>
@@ -199,11 +226,12 @@ public sealed class SingleInstance : IDisposable
 
         if (!IsPrimary)
         {
-            // Something still holds the lock and still will not talk to us. Putting a
-            // usable window in front of the user beats honouring a lock whose owner
-            // has already failed to answer twice.
-            log?.Invoke("Tek örnek kilidi bırakılmadı; pencere yine de açılıyor.");
-            IsPrimary = true;
+            // Starting a second engine without the lock is not a visibility fix: two
+            // WinDivert owners and two DNS proxies race over the whole machine. Leave
+            // the caller to report the stuck copy instead of manufacturing a second
+            // one that can take the connection down.
+            log?.Invoke("Tek örnek kilidi bırakılamadı; ikinci motor başlatılmadı.");
+            return false;
         }
 
         _activate ??= OpenEvent(ActivateEventName, create: true);
@@ -340,14 +368,6 @@ public sealed class SingleInstance : IDisposable
         {
             try
             {
-                // A copy that started moments ago is a sibling still finding its feet -
-                // a command line verb, or the elevated relaunch of another shortcut -
-                // not the wedged instance this is recovering from.
-                if (DateTime.Now - process.StartTime < TimeSpan.FromSeconds(10))
-                {
-                    continue;
-                }
-
                 // Another user's copy may be perfectly healthy and serving them.
                 if (process.SessionId != mine)
                 {

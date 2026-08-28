@@ -208,6 +208,46 @@ Test-Case 'uninstall restores latency before DNS and the driver are removed' {
     }
 }
 
+Test-Case 'setup restores DNS before force-killing a running app' {
+    $installer = Get-Content -Path $installerPath -Raw
+    $stopFunction = [regex]::Match(
+        $installer,
+        'procedure StopRunningInstance\(\);(?<body>[\s\S]*?)function InitializeSetup',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+
+    if (-not $stopFunction.Success) { throw 'StopRunningInstance was not found' }
+
+    $body = $stopFunction.Groups['body'].Value
+    $restore = $body.IndexOf("'--restore-dns'", [StringComparison]::Ordinal)
+    $kill = $body.IndexOf("'/IM {#AppExeName} /F'", [StringComparison]::Ordinal)
+
+    if ($restore -lt 0) { throw 'pre-kill DNS restore is missing' }
+    if ($kill -lt 0) { throw 'application taskkill is missing' }
+    if ($restore -ge $kill) { throw 'the app is killed before DNS is restored' }
+}
+
+Test-Case 'the install command verifies a visible window before reporting success' {
+    $script = Get-Content -Path $scriptPath -Raw
+    $health = $script.IndexOf("ArgumentList     = @('--health-check')", [StringComparison]::Ordinal)
+    $success = $script.IndexOf("Write-Ok 'Uygulama açıldı ve pencere doğrulandı.'", [StringComparison]::Ordinal)
+
+    if ($health -lt 0) { throw 'the post-install health check is missing' }
+    if ($success -lt 0) { throw 'the verified startup message is missing' }
+    if ($health -ge $success) { throw 'startup is reported before the health check' }
+}
+
+Test-Case 'a failed post-install health check restores DNS before stopping the app' {
+    $script = Get-Content -Path $scriptPath -Raw
+    $failure = $script.IndexOf("if (-not `$healthy)", [StringComparison]::Ordinal)
+    $restore = $script.IndexOf("ArgumentList     = @('--restore-dns')", $failure, [StringComparison]::Ordinal)
+    $stop = $script.IndexOf('Stop-Process -Id $appProcess.Id', $failure, [StringComparison]::Ordinal)
+
+    if ($failure -lt 0) { throw 'startup failure branch is missing' }
+    if ($restore -lt 0) { throw 'DNS restore is missing from the startup failure branch' }
+    if ($stop -lt 0) { throw 'failed application cleanup is missing' }
+    if ($restore -ge $stop) { throw 'the failed app is stopped before DNS is restored' }
+}
+
 Write-Host ''
 
 if ($failures.Count -gt 0) {

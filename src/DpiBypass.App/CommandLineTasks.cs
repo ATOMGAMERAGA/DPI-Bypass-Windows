@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using DpiBypass.App.Infrastructure;
 using DpiBypass.Core;
 using DpiBypass.Core.Config;
 using DpiBypass.Core.Dns;
@@ -36,7 +38,7 @@ internal static class CommandLineTasks
     /// </summary>
     private static readonly HashSet<string> HeadlessVerbs = new(StringComparer.OrdinalIgnoreCase)
     {
-        "install-autostart", "uninstall-autostart", "restore-dns",
+        "install-autostart", "uninstall-autostart", "restore-dns", "dns-watchdog", "health-check",
         "strategies", "isps", "version", "v", "help", "h", "?",
         "status", "test", "search", "domains", "enable", "disable", "vodafone", "latency",
     };
@@ -79,6 +81,14 @@ internal static class CommandLineTasks
 
             case "restore-dns":
                 await RestoreDnsAsync().ConfigureAwait(false);
+                return true;
+
+            case "dns-watchdog":
+                await RunDnsWatchdogAsync(argument).ConfigureAwait(false);
+                return true;
+
+            case "health-check":
+                Environment.ExitCode = SingleInstance.RequestVisibleWindow(TimeSpan.FromSeconds(12)) ? 0 : 1;
                 return true;
 
             // --- catalogue listings, which need no running instance ---------------
@@ -354,5 +364,101 @@ internal static class CommandLineTasks
         }
 
         await configurator.RestoreAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Launches a differently named copy which survives a crash/end-task of the UI
+    /// process and restores DNS as soon as its owner disappears unexpectedly.
+    /// </summary>
+    public static bool TryStartDnsWatchdog()
+    {
+        var recoveryExecutable = Path.Combine(AppContext.BaseDirectory, "DpiBypass.Recovery.exe");
+        if (!File.Exists(recoveryExecutable))
+        {
+            // Developer builds may not have run the publish target yet. The installed
+            // payload always carries the separately named copy.
+            recoveryExecutable = Environment.ProcessPath ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(recoveryExecutable) || !File.Exists(recoveryExecutable))
+        {
+            AppLog.Warning("DNS crash watchdog could not start: executable not found.");
+            return false;
+        }
+
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = recoveryExecutable,
+                WorkingDirectory = AppContext.BaseDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            startInfo.ArgumentList.Add("--dns-watchdog");
+            startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
+
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return false;
+            }
+
+            AppLog.Info($"DNS crash watchdog started (PID {process.Id}).");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("DNS crash watchdog could not start", ex);
+            return false;
+        }
+    }
+
+    private static async Task RunDnsWatchdogAsync(string? parentPidText)
+    {
+        if (!int.TryParse(parentPidText, out var parentPid) || parentPid <= 0)
+        {
+            Environment.ExitCode = 2;
+            return;
+        }
+
+        try
+        {
+            using var parent = Process.GetProcessById(parentPid);
+            await parent.WaitForExitAsync().ConfigureAwait(false);
+        }
+        catch (ArgumentException)
+        {
+            // It exited between Process.Start and this copy opening the handle.
+        }
+        catch (InvalidOperationException)
+        {
+            // Already gone; recovery below is still the right operation.
+        }
+
+        // A normal shutdown restores and removes the snapshot before the process exits.
+        // A crash leaves it behind. Give filesystem buffers a moment to settle, then
+        // retry transient adapter/PowerShell failures without ever deleting the source.
+        await Task.Delay(500).ConfigureAwait(false);
+
+        var configurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
+        for (var attempt = 1; attempt <= 3 && configurator.HasPendingRestore; attempt++)
+        {
+            try
+            {
+                AppLog.Warning($"Owner process ended with DNS redirected; recovery attempt {attempt}.");
+                await configurator.RestoreAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error($"DNS crash recovery attempt {attempt} failed", ex);
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(attempt * 2)).ConfigureAwait(false);
+                }
+            }
+        }
+
+        Environment.ExitCode = configurator.HasPendingRestore ? 1 : 0;
     }
 }

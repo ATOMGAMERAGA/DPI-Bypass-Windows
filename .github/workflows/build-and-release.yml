@@ -100,7 +100,7 @@ jobs:
       - name: Check the payload is complete
         shell: pwsh
         run: |
-          $required = @('DpiBypass.exe', 'DpiBypass.Core.dll', 'WinDivert.dll', 'WinDivert64.sys')
+          $required = @('DpiBypass.exe', 'DpiBypass.Recovery.exe', 'DpiBypass.Core.dll', 'WinDivert.dll', 'WinDivert64.sys')
           $missing = @()
           foreach ($name in $required) {
             if (-not (Test-Path "artifacts/publish/$name")) { $missing += $name }

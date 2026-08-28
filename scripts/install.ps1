@@ -403,8 +403,77 @@ try {
         # directory has been removed cannot launch a child of its own - which is how
         # the very first run after an install ends up unable to register its logon
         # task or configure DNS, reporting a path error about neither.
-        Start-Process -FilePath $appExe -ArgumentList '--show' `
-            -WorkingDirectory $now.InstallLocation | Out-Null
+        $appProcess = Start-Process -FilePath $appExe -ArgumentList '--show' `
+            -WorkingDirectory $now.InstallLocation -PassThru
+
+        # Starting a process only proves CreateProcess accepted the file. It does not
+        # prove WPF built a window, the dispatcher is alive, or a tray icon exists. The
+        # internal health check asks the running instance to show a real window and only
+        # returns zero after that instance acknowledges it. Do not print a success-shaped
+        # message while the app is dead or stuck behind an unresponsive old copy.
+        Write-Step 'Pencere ve başlangıç durumu doğrulanıyor...'
+        $healthy = $false
+        $healthExitCode = $null
+
+        for ($attempt = 1; $attempt -le 4 -and -not $healthy; $attempt++) {
+            $appProcess.Refresh()
+            if ($appProcess.HasExited) { break }
+
+            Start-Sleep -Milliseconds 750
+
+            $healthStart = @{
+                FilePath         = $appExe
+                ArgumentList     = @('--health-check')
+                WorkingDirectory = $now.InstallLocation
+                Wait             = $true
+                PassThru         = $true
+                WindowStyle      = 'Hidden'
+            }
+
+            try {
+                $health = Start-Process @healthStart
+                $healthExitCode = $health.ExitCode
+                $healthy = $healthExitCode -eq 0
+            }
+            catch {
+                $healthExitCode = -1
+            }
+        }
+
+        if (-not $healthy) {
+            Write-Warn 'Uygulama işlemi pencere açtığını doğrulamadı; DNS güvenli biçimde geri alınıyor.'
+
+            # The failed copy may have redirected DNS before it became unreachable.
+            # Restore from a separate helper before ending it, then let the external
+            # watchdog make the same idempotent check when the owner disappears.
+            try {
+                $restoreStart = @{
+                    FilePath         = $appExe
+                    ArgumentList     = @('--restore-dns')
+                    WorkingDirectory = $now.InstallLocation
+                    Wait             = $true
+                    WindowStyle      = 'Hidden'
+                }
+                Start-Process @restoreStart | Out-Null
+            }
+            catch {
+                Write-Warn "DNS kurtarma yardımcısı çalıştırılamadı: $($_.Exception.Message)"
+            }
+
+            $appProcess.Refresh()
+            if (-not $appProcess.HasExited) {
+                Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+            }
+
+            $logPath = Join-Path $env:ProgramData 'DPI Bypass\logs\dpibypass.log'
+            throw "DPI Bypass kuruldu ancak görünür bir pencere başlatamadı (sağlık kodu: $healthExitCode). " +
+                "İnternet ayarları geri alma işlemine alındı. Ayrıntılar: $logPath"
+        }
+
+        Write-Ok 'Uygulama açıldı ve pencere doğrulandı.'
+    }
+    else {
+        throw 'Kurulum tamamlandı ancak DpiBypass.exe kurulum klasöründe bulunamadı.'
     }
 
     Write-Host ''
