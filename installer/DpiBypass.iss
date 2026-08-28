@@ -14,7 +14,12 @@
 #define AppName "DPI Bypass"
 #define AppPublisher "Atom Gamer Arda A.G.A"
 #define AppExeName "DpiBypass.exe"
-#define AppId "{{9F4C1C3E-7B21-4C0A-9E52-6A2D5B71C4A8}"
+#define RecoveryExeName "DpiBypass.Recovery.exe"
+; One GUID, written once. [Setup] needs the leading brace doubled, because Inno
+; unescapes "{{" to "{" there; the [Code] section is never constant-expanded, so the
+; uninstall key path in it is built from the plain form.
+#define AppIdGuid "{9F4C1C3E-7B21-4C0A-9E52-6A2D5B71C4A8}"
+#define AppId "{" + AppIdGuid
 
 [Setup]
 AppId={#AppId}
@@ -122,7 +127,87 @@ Type: filesandordirs; Name: "{commonappdata}\{#AppName}\logs"
 Type: filesandordirs; Name: "{commonappdata}\Atom DPI Bypass"
 
 [Code]
-procedure StopRunningInstance();
+var
+  { The folder the sweep has already covered. The sweep is asked for twice on purpose
+    - once before the wizard, once when the directory is finally known - and repeating
+    it for the same folder would only make the install slower. }
+  SweptDir: String;
+  SweptDirKnown: Boolean;
+
+{ The uninstall key Windows writes for this AppId. It is the one place Setup can read
+  where an existing installation put its files without knowing anything about where
+  this installation is going. }
+function UninstallKeyPath(): String;
+begin
+  Result := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdGuid}_is1';
+end;
+
+function ReadInstallLocation(const RootKey: Integer; var Dir: String): Boolean;
+var
+  Value: String;
+begin
+  Result := False;
+
+  try
+    if RegQueryStringValue(RootKey, UninstallKeyPath(), 'InstallLocation', Value) and (Value <> '') then
+    begin
+      Value := RemoveBackslashUnlessRoot(Value);
+      if DirExists(Value) then
+      begin
+        Dir := Value;
+        Result := True;
+      end;
+    end;
+  except
+    { An unreadable registry view is not a reason to refuse to install. }
+    Log('Could not read the previous install location: ' + GetExceptionMessage);
+  end;
+end;
+
+{ Where the copy already on this machine lives, or an empty string when there is none.
+
+  This function exists because the "app" constant does not yet: it is set when the
+  wizard settles on a directory, and Setup ends with an internal error the moment
+  anything running before that asks for it - InitializeSetup included. With
+  /SUPPRESSMSGBOXES, which the one line installer passes, that error is never printed
+  and the whole failure reaches the user as nothing but "exit code 1", before a single
+  file has been written. The uninstall key the previous install wrote answers the same
+  question and is readable from the first line of the script. }
+function PreviousInstallDir(): String;
+begin
+  Result := '';
+
+  { The install runs in 64-bit mode, so that is where its uninstall key is. The other
+    two views are read as well, for a machine carrying an older 32-bit installation
+    or one registered per user. }
+  if IsWin64 then
+    if ReadInstallLocation(HKLM64, Result) then
+      Exit;
+
+  if ReadInstallLocation(HKLM32, Result) then
+    Exit;
+
+  if ReadInstallLocation(HKCU, Result) then
+    Exit;
+end;
+
+{ The install folder once it is known, and an empty string while it is not - so that
+  asking too early degrades into doing less rather than into ending the installation. }
+function AppDirIfKnown(): String;
+begin
+  try
+    Result := ExpandConstant('{app}');
+  except
+    Result := '';
+  end;
+end;
+
+{ Ends the copies of the app that hold the packet driver open and own the files Setup
+  is about to replace, after asking them to put the machine's network settings back.
+
+  AppDir may be empty: the steps that need the installed executable are skipped then,
+  and the process sweep still runs. }
+procedure StopRunningInstance(const AppDir: String);
 var
   ResultCode: Integer;
 begin
@@ -131,12 +216,10 @@ begin
     restoring first is what keeps an upgrade or uninstall from taking the machine's
     internet connection down if the replacement then fails to launch. Both commands
     are separate helper instances and therefore still run when the UI copy is hung. }
-  if FileExists(ExpandConstant('{app}\{#AppExeName}')) then
+  if (AppDir <> '') and FileExists(AppDir + '\{#AppExeName}') then
   begin
-    Exec(ExpandConstant('{app}\{#AppExeName}'), '--restore-dns',
-      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(ExpandConstant('{app}\{#AppExeName}'), 'latency restore',
-      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(AppDir + '\{#AppExeName}', '--restore-dns', AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(AppDir + '\{#AppExeName}', 'latency restore', AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 
   { The app holds the driver handle open, so it has to go before files are replaced. }
@@ -146,11 +229,10 @@ begin
   { A separately named watchdog normally exits as soon as its owner does. Run the
     recovery command once more after that hand-off, then remove any orphan before
     Setup replaces the shared runtime files. }
-  if FileExists(ExpandConstant('{app}\DpiBypass.Recovery.exe')) then
+  if (AppDir <> '') and FileExists(AppDir + '\{#RecoveryExeName}') then
   begin
-    Exec(ExpandConstant('{app}\DpiBypass.Recovery.exe'), '--restore-dns',
-      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM DpiBypass.Recovery.exe /F', '', SW_HIDE,
+    Exec(AppDir + '\{#RecoveryExeName}', '--restore-dns', AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#RecoveryExeName} /F', '', SW_HIDE,
       ewWaitUntilTerminated, ResultCode);
   end;
 
@@ -162,14 +244,46 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+procedure SweepRunningInstance(const AppDir: String);
+begin
+  if SweptDirKnown and (CompareText(SweptDir, AppDir) = 0) then
+    Exit;
+
+  SweptDir := AppDir;
+  SweptDirKnown := True;
+
+  { Housekeeping for an upgrade over a running copy is never allowed to decide whether
+    there is an installation at all: an exception leaving an event function is fatal to
+    Setup, and a machine where this fails still has an installer to run. }
+  try
+    StopRunningInstance(AppDir);
+  except
+    Log('StopRunningInstance failed: ' + GetExceptionMessage);
+  end;
+end;
+
 function InitializeSetup(): Boolean;
 begin
-  StopRunningInstance();
+  { Before Setup opens anything the running copy owns. Where that copy lives comes
+    from its uninstall key, because the directory this install will use has not been
+    decided yet - see PreviousInstallDir. }
+  SweepRunningInstance(PreviousInstallDir());
   Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  { And again against the folder actually chosen, which is knowable by now and covers
+    a directory typed into the wizard that no uninstall key pointed at. ssInstall is
+    the last step before the first file is written. }
+  if CurStep = ssInstall then
+    SweepRunningInstance(AppDirIfKnown());
 end;
 
 function InitializeUninstall(): Boolean;
 begin
-  StopRunningInstance();
+  { The uninstaller reads the install folder out of its own log, so it has known the
+    answer since it started. }
+  SweepRunningInstance(AppDirIfKnown());
   Result := True;
 end;

@@ -174,6 +174,28 @@ function Get-UpdateDecision {
     }
 }
 
+<#
+    What an Inno Setup exit code means, in a sentence the person who ran the one liner
+    can do something with.
+
+    The installer is run with /SUPPRESSMSGBOXES, which is what makes it silent - and
+    also what stops it from ever printing why it stopped. Without this the whole of a
+    failed installation is a number.
+#>
+function Get-SetupExitReason([int]$ExitCode) {
+    switch ($ExitCode) {
+        1 { 'Kurulum başlatılamadı (geçersiz parametre ya da kurulum betiği hatası).' }
+        2 { 'Kurulum, dosyalar kopyalanmadan önce iptal edildi.' }
+        3 { 'Kuruluma hazırlanırken önemli bir hata oluştu.' }
+        4 { 'Dosyalar kurulurken önemli bir hata oluştu.' }
+        5 { 'Kurulum, dosyalar kopyalanırken iptal edildi.' }
+        6 { 'Kurulum işlemi dışarıdan sonlandırıldı.' }
+        7 { 'Hazırlık aşaması kurulumun sürdürülemeyeceğine karar verdi.' }
+        8 { 'Hazırlık aşaması bilgisayarın yeniden başlatılmasını istiyor.' }
+        default { "Kurulum bilinmeyen bir hatayla ($ExitCode) sonlandı." }
+    }
+}
+
 if ($PSVersionTable.PSVersion.Major -lt 5) {
     throw 'Windows PowerShell 5.1 veya daha yenisi gerekiyor.'
 }
@@ -292,6 +314,12 @@ $work = Join-Path $env:TEMP ("dpibypass-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $setupPath = Join-Path $work $setupAsset.name
 
+# Windows PowerShell redraws a progress bar for every chunk Invoke-WebRequest reads,
+# and that redrawing is where most of the time in a 50 MB download goes. It is turned
+# off for the transfers and put back exactly as it was found.
+$previousProgress = $ProgressPreference
+$ProgressPreference = 'SilentlyContinue'
+
 try {
     Write-Step "Kurulum dosyası indiriliyor ($([math]::Round($setupAsset.size / 1MB, 1)) MB)..."
     Invoke-WebRequest -Uri $setupAsset.browser_download_url -OutFile $setupPath -Headers $headers -UseBasicParsing
@@ -370,14 +398,35 @@ try {
     }
 
     Write-Step 'Kurulum çalıştırılıyor...'
-    $arguments = @('/SILENT', '/NORESTART', '/SUPPRESSMSGBOXES')
-    if ($Quiet) { $arguments = @('/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES') }
+
+    # Kept outside the temporary folder deliberately: that folder is deleted on the way
+    # out of this script, and when the installation fails this file is the only account
+    # of what it was doing when it stopped.
+    $setupLog = Join-Path $env:TEMP ('dpibypass-setup-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
+
+    # Quoted here, not by Start-Process: it joins ArgumentList with spaces and adds
+    # nothing of its own, so an unquoted path through "C:\Users\Ad Soyad\..." would
+    # reach the installer as a truncated switch followed by junk it never asked for.
+    $mode = if ($Quiet) { '/VERYSILENT' } else { '/SILENT' }
+    $arguments = @($mode, '/NORESTART', '/SUPPRESSMSGBOXES', "`"/LOG=$setupLog`"")
 
     $setupStart = @{ FilePath = $setupPath; ArgumentList = $arguments; Wait = $true; PassThru = $true }
     if ($SafeWorkingDirectory) { $setupStart['WorkingDirectory'] = $SafeWorkingDirectory }
 
     $process = Start-Process @setupStart
     if ($process.ExitCode -ne 0) {
+        Write-Host ''
+        Write-Warn (Get-SetupExitReason $process.ExitCode)
+
+        if (Test-Path $setupLog) {
+            Write-Note "Kurulum günlüğü: $setupLog"
+            Write-Note 'Günlüğün son satırları:'
+            foreach ($line in @(Get-Content -Path $setupLog -Tail 12 -ErrorAction SilentlyContinue)) {
+                Write-Note "  $line"
+            }
+        }
+
+        Write-Host ''
         throw "Kurulum $($process.ExitCode) kodu ile sonlandı."
     }
 
@@ -411,14 +460,18 @@ try {
         # internal health check asks the running instance to show a real window and only
         # returns zero after that instance acknowledges it. Do not print a success-shaped
         # message while the app is dead or stuck behind an unresponsive old copy.
+        #
+        # Whether the process started just above is still running says nothing about
+        # that. The installer's own last step already launched the app, so this one
+        # normally finds an instance holding the single instance lock, hands its request
+        # to it and exits within a second - by design, and long before a slow first
+        # launch has a window up. Only the health check is allowed to answer the
+        # question, and it is asked on every attempt.
         Write-Step 'Pencere ve başlangıç durumu doğrulanıyor...'
         $healthy = $false
         $healthExitCode = $null
 
         for ($attempt = 1; $attempt -le 4 -and -not $healthy; $attempt++) {
-            $appProcess.Refresh()
-            if ($appProcess.HasExited) { break }
-
             Start-Sleep -Milliseconds 750
 
             $healthStart = @{
@@ -484,5 +537,6 @@ try {
     Write-Note 'doğrulayabilirsiniz.'
 }
 finally {
+    $ProgressPreference = $previousProgress
     Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
 }
