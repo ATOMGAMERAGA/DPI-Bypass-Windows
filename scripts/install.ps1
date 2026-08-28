@@ -438,22 +438,25 @@ try {
         Write-Ok 'DPI Bypass kuruldu.'
     }
 
-    # A silent install never runs the installer's "launch now" checkbox, and the
-    # logon task does not fire until the next sign-in. Without this the command
-    # finishes having put nothing on screen, which is indistinguishable from a
-    # failed installation.
+    # The installer's own last step already launched the app: a silent install runs
+    # the WizardSilent entry in [Run], which is there because a silent install never
+    # reaches the "launch now" checkbox and the logon task does not fire until the
+    # next sign-in.
+    #
+    # So this does NOT launch it again. It used to, and that second launch was the
+    # bug: the copy the installer started was still loading its runtime, had no
+    # window and no control channel to answer with, and the second copy read that
+    # silence as a dead instance and killed it. What the user saw was the window
+    # appearing and vanishing again the moment the installation finished. The health
+    # check below asks the copy that is already there to show itself - it never takes
+    # the single instance lock, so it cannot be mistaken for a rival - and only if
+    # nothing is running at all does this start one.
     $appExe = $null
     if ($now -and $now.InstallLocation) { $appExe = Join-Path $now.InstallLocation 'DpiBypass.exe' }
     if ($appExe -and (Test-Path $appExe)) {
         Write-Step 'Uygulama başlatılıyor...'
 
-        # Started in its own folder, not in this script's temporary one: that folder
-        # is deleted in the finally block below, and a running process whose working
-        # directory has been removed cannot launch a child of its own - which is how
-        # the very first run after an install ends up unable to register its logon
-        # task or configure DNS, reporting a path error about neither.
-        $appProcess = Start-Process -FilePath $appExe -ArgumentList '--show' `
-            -WorkingDirectory $now.InstallLocation -PassThru
+        $appProcess = $null
 
         # Starting a process only proves CreateProcess accepted the file. It does not
         # prove WPF built a window, the dispatcher is alive, or a tray icon exists. The
@@ -461,22 +464,23 @@ try {
         # returns zero after that instance acknowledges it. Do not print a success-shaped
         # message while the app is dead or stuck behind an unresponsive old copy.
         #
-        # Whether the process started just above is still running says nothing about
-        # that. The installer's own last step already launched the app, so this one
-        # normally finds an instance holding the single instance lock, hands its request
-        # to it and exits within a second - by design, and long before a slow first
-        # launch has a window up. Only the health check is allowed to answer the
-        # question, and it is asked on every attempt.
+        # It waits out a copy that answers "still starting", so a slow first launch on a
+        # machine still busy with the installation is waited for rather than written off.
         Write-Step 'Pencere ve başlangıç durumu doğrulanıyor...'
         $healthy = $false
         $healthExitCode = $null
 
-        for ($attempt = 1; $attempt -le 4 -and -not $healthy; $attempt++) {
+        # Two turns is exactly what this needs. The first asks whether anything is
+        # already serving - answered instantly when nothing is, because the named
+        # objects a running copy owns simply are not there - and the second waits out
+        # the copy that is starting, whether the installer launched it or this script
+        # did. Each turn waits for a window rather than polling for one.
+        for ($attempt = 1; $attempt -le 2 -and -not $healthy; $attempt++) {
             Start-Sleep -Milliseconds 750
 
             $healthStart = @{
                 FilePath         = $appExe
-                ArgumentList     = @('--health-check')
+                ArgumentList     = @('--health-check', '45')
                 WorkingDirectory = $now.InstallLocation
                 Wait             = $true
                 PassThru         = $true
@@ -490,6 +494,22 @@ try {
             }
             catch {
                 $healthExitCode = -1
+            }
+
+            # A non-zero code on the first attempt means nothing answered at all - the
+            # named objects a running copy owns do not exist, which the check reports
+            # immediately rather than waiting out its timeout. That is the one case
+            # where this script has to launch the app itself: an installer that did not
+            # run the launch entry, or a copy that has already exited.
+            #
+            # Started in its own folder, not in this script's temporary one: that folder
+            # is deleted in the finally block below, and a running process whose working
+            # directory has been removed cannot launch a child of its own - which is how
+            # the very first run after an install ends up unable to register its logon
+            # task or configure DNS, reporting a path error about neither.
+            if (-not $healthy -and -not $appProcess) {
+                $appProcess = Start-Process -FilePath $appExe -ArgumentList '--show' `
+                    -WorkingDirectory $now.InstallLocation -PassThru
             }
         }
 
@@ -513,12 +533,18 @@ try {
                 Write-Warn "DNS kurtarma yardımcısı çalıştırılamadı: $($_.Exception.Message)"
             }
 
-            $appProcess.Refresh()
-            if (-not $appProcess.HasExited) {
-                Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+            # Only a copy this script started. The one the installer launched is not
+            # ours to end: it may be a healthy instance that is simply slower than the
+            # budget above, and killing it would leave the machine with the DNS
+            # redirect and none of the protection.
+            if ($appProcess) {
+                $appProcess.Refresh()
+                if (-not $appProcess.HasExited) {
+                    Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+                }
             }
 
-            $logPath = Join-Path $env:ProgramData 'DPI Bypass\logs\dpibypass.log'
+            $logPath = Join-Path $env:ProgramData 'DPI Bypass\logs'
             throw "DPI Bypass kuruldu ancak görünür bir pencere başlatamadı (sağlık kodu: $healthExitCode). " +
                 "İnternet ayarları geri alma işlemine alındı. Ayrıntılar: $logPath"
         }
