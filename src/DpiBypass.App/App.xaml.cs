@@ -26,8 +26,34 @@ public partial class App : Application
     /// </summary>
     private static readonly TimeSpan BusyHandover = TimeSpan.FromSeconds(8);
 
+    /// <summary>
+    /// The whole budget given to a copy that keeps saying it is still starting.
+    /// </summary>
+    /// <remarks>
+    /// Generous on purpose. This is the wait that covers the first run after an
+    /// installation, where the copy being waited for is loading a self-contained
+    /// runtime, reading its settings and opening the packet driver on a machine that
+    /// is still busy with the installer that started it. Every second spent here is a
+    /// second not spent killing a healthy instance, which is the failure this is for.
+    /// </remarks>
+    private static readonly TimeSpan StartingHandover = TimeSpan.FromSeconds(90);
+
     /// <summary>How long the running copy gets to answer its control channel.</summary>
     private static readonly TimeSpan LivenessProbe = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>
+    /// The budget a dying process gets for putting the machine's DNS back before it
+    /// stops being able to say anything at all.
+    /// </summary>
+    /// <remarks>
+    /// Small, and that is the fix. The recovery used to be given thirty seconds ahead
+    /// of the crash report, so a failure to start showed the user nothing for the best
+    /// part of a minute and then vanished - "it hung and then it crashed" is precisely
+    /// what that looks like from outside. The separately named watchdog process does
+    /// the same work without a deadline and outlives this one, so blocking here buys
+    /// very little and costs the only account of what went wrong.
+    /// </remarks>
+    private static readonly TimeSpan FatalRecoveryBudget = TimeSpan.FromSeconds(5);
 
     private SingleInstance? _instance;
     private ControlServer? _control;
@@ -41,6 +67,13 @@ public partial class App : Application
     private bool _shuttingDown;
     private bool _windowEverShown;
     private bool _dnsWatchdogStarted;
+
+    /// <summary>
+    /// Whether start-up has finished and the dispatcher loop is running, so an
+    /// activation request can be answered for real instead of with "still starting".
+    /// Read from the activation listener thread, written once and never cleared.
+    /// </summary>
+    private volatile bool _startupComplete;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -150,6 +183,20 @@ public partial class App : Application
             return;
         }
 
+        // Before anything that takes time, and that is the whole point. Everything
+        // below - the elevation check, the service, the palette, the window - happens
+        // in the seconds during which a second launch is deciding whether anyone is
+        // home, and until this thread is running the honest answer to that question
+        // never gets sent. A launch that hears nothing takes over and ends this
+        // process, which is a window appearing and vanishing again during an install.
+        // Listening from here means the answer is "on its way" from the first moment.
+        Guarded("Etkinleştirme dinleyicisi", () =>
+        {
+            // A second launch (Start menu, desktop shortcut) arrives here.
+            _instance!.ActivationRequested += OnActivationRequested;
+            _instance.BeginListening();
+        });
+
         // The packet driver is unopenable without elevation. The manifest asks for it,
         // so reaching this branch means the manifest was bypassed somehow; ask once and
         // hand over rather than starting up half working.
@@ -205,17 +252,6 @@ public partial class App : Application
                 warning: true);
         }
 
-        // Listening starts here rather than with the rest of the background work: the
-        // window it answers with now exists, and until this is up a second launch
-        // gets no answer at all - which is the one situation that ends with a healthy
-        // instance being taken over and killed. It costs one thread.
-        Guarded("Etkinleştirme dinleyicisi", () =>
-        {
-            // A second launch (Start menu, desktop shortcut) arrives here.
-            _instance!.ActivationRequested += OnActivationRequested;
-            _instance.BeginListening();
-        });
-
         _plan = StartupPlan.Decide(
             e.Args,
             _service.Settings.StartMinimised,
@@ -234,6 +270,14 @@ public partial class App : Application
         // The watchdog is the last line of defence for the failure this app has been
         // bitten by more than once - a live process the user cannot get to.
         StartVisibilityWatchdog();
+
+        // Answering activation requests for real starts here, and not one line sooner.
+        // Until OnStartup returns, the dispatcher is not pumping messages, so a request
+        // answered by hopping onto it would wait out its whole timeout and report this
+        // perfectly healthy process as one that cannot produce a window. Queued at Send
+        // so it is the first thing the loop does once it is running; up to that moment
+        // the listener keeps saying "still starting", which is the truth.
+        Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => _startupComplete = true));
 
         // --- phase two: everything the window does not depend on --------------------
         // Queued behind the first frame rather than run in front of it, and each part
@@ -449,15 +493,24 @@ public partial class App : Application
     /// instance took the request and this launch is finished.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The hard case is the copy that is running, healthy, and busy. A start-up sweep
     /// measures strategies over real handshakes, and while it is doing that the
     /// dispatcher can be slow to answer. Treating "slow" as "dead" is expensive in a
     /// way nothing on screen explains: the running copy owns the driver handles and
     /// has pointed the machine's resolvers at its own DNS proxy, so ending it takes
-    /// the connection with it and the replacement has to build all of it again. So
-    /// liveness is established over the control channel - which is served from the
-    /// thread pool and answers whatever the UI thread is doing - before this launch
-    /// is allowed to conclude that nobody is home.
+    /// the connection with it and the replacement has to build all of it again.
+    /// </para>
+    /// <para>
+    /// The harder case, and the one this got wrong, is the copy that has been running
+    /// for two seconds. An installation starts the app, and something else - the
+    /// installer's own launch, a shortcut, the script that drove the install - starts
+    /// it again immediately afterwards. The first copy is still loading its runtime,
+    /// so it had no window, no control channel and nothing to say, and the second
+    /// copy read that silence as death and killed it. That is a window appearing and
+    /// disappearing again seconds after an install finishes. A starting copy now says
+    /// so from the moment it takes the lock, and a launch that hears it waits.
+    /// </para>
     /// </remarks>
     private bool TryContinueAsPrimary()
     {
@@ -488,17 +541,37 @@ public partial class App : Application
         // is looking at, which reads as the shortcut having done nothing at all.
         WindowActivation.AllowForegroundHandover();
 
-        if (_instance.SignalExistingInstance(FirstHandover))
+        var handover = _instance.SignalExistingInstance(FirstHandover);
+
+        switch (InstanceHandover.Decide(handover, startupBudgetSpent: false))
         {
-            AppLog.Info("Uygulama zaten çalışıyor; pencereyi öne getirmesi istendi.");
-            return false;
+            case LaunchAction.Exit:
+                AppLog.Info("Uygulama zaten çalışıyor; pencereyi öne getirmesi istendi.");
+                return false;
+
+            case LaunchAction.WaitForStartup:
+                AppLog.Info("Çalışan kopya henüz açılıyor; penceresini açması bekleniyor.");
+
+                handover = _instance.AwaitWindow(StartingHandover);
+                if (InstanceHandover.Decide(handover, startupBudgetSpent: true) == LaunchAction.Exit)
+                {
+                    return false;
+                }
+
+                // Either it stopped answering, or it is still saying "starting" a minute
+                // and a half later, which is no longer a start-up. Both fall through to
+                // the checks below: a copy that is genuinely wedged before it ever gets a
+                // window still has to be recoverable, or every later launch says the same
+                // thing and the user never gets the app at all.
+                AppLog.Warning("Çalışan kopya beklendi ama pencere açılmadı; devralma denetimlerine geçiliyor.");
+                break;
         }
 
         if (RunningInstanceAnswers())
         {
             AppLog.Info("Çalışan kopya meşgul ama ayakta; pencereyi açması için daha uzun bekleniyor.");
 
-            if (_instance.SignalExistingInstance(BusyHandover))
+            if (_instance.SignalExistingInstance(BusyHandover) == HandoverReply.WindowShown)
             {
                 return false;
             }
@@ -549,8 +622,28 @@ public partial class App : Application
     /// Answers another launch that asked for the window. Runs on the activation
     /// listener thread.
     /// </summary>
-    private bool OnActivationRequested()
+    /// <remarks>
+    /// Three answers, because the launch on the other side does three different things
+    /// with them. This listener is running from the moment the lock is taken, which is
+    /// well before there is a window or a dispatcher loop to ask, so the common answer
+    /// during the first seconds is "still starting" - and it has to be given without
+    /// touching the dispatcher, which is not pumping yet and would simply time out.
+    /// </remarks>
+    private HandoverReply OnActivationRequested()
     {
+        if (_shuttingDown)
+        {
+            return HandoverReply.NoAnswer;
+        }
+
+        if (!_startupComplete)
+        {
+            // Still building the window, or the dispatcher loop has not started yet.
+            // Either way the launch on the other side should wait rather than conclude
+            // that this process is not serving anyone.
+            return HandoverReply.Starting;
+        }
+
         // Waiting for the UI thread to finish is the whole point: what this returns is
         // what the waiting launch is told, so a stuck dispatcher has to report failure
         // rather than let the request disappear into a queue that is not being drained.
@@ -562,8 +655,14 @@ public partial class App : Application
 
         // Longer than the first wait on the other side and matched to the second one,
         // so a busy dispatcher gets to finish rather than being written off while the
-        // launch that asked is still waiting for it.
-        return operation.Wait(BusyHandover) == DispatcherOperationStatus.Completed && shown;
+        // launch that asked is still waiting for it. A dispatcher that still did not
+        // finish is reported as no answer rather than as "starting": start-up is over,
+        // so this is a copy that is stuck rather than one that is on its way, and the
+        // launch on the other side has its own second chance for a merely busy
+        // instance before it acts on the answer.
+        var completed = operation.Wait(BusyHandover) == DispatcherOperationStatus.Completed;
+
+        return completed && shown ? HandoverReply.WindowShown : HandoverReply.NoAnswer;
     }
 
     private bool TryCreateTrayIcon()
@@ -735,10 +834,11 @@ public partial class App : Application
         var detail = exception.ToString();
 
         // A failure before the service was constructed cannot go through its normal
-        // teardown. Recover a snapshot left by the previous run while this elevated
-        // process is still alive; the external watchdog remains the fallback for a
-        // fail-fast/native termination that never reaches this method.
-        TryRestorePendingDnsAfterFatal();
+        // teardown, so a snapshot left by a previous run has to be recovered - but not
+        // in front of the report. Handed to the separately named recovery process,
+        // which is not on its way down and has no deadline, so this one can get on
+        // with the only thing it can still do: say what happened, promptly.
+        var recovering = StartExternalDnsRecovery();
 
         try
         {
@@ -781,6 +881,14 @@ public partial class App : Application
         {
             // A headless session cannot show a dialog; the file is still written.
         }
+
+        if (!recovering)
+        {
+            // The helper could not be started - a payload missing its recovery copy,
+            // or a machine that will not launch it. Doing it here is the fallback, and
+            // it happens after the report rather than in front of it.
+            TryRestorePendingDnsAfterFatal(FatalRecoveryBudget);
+        }
     }
 
     private void OnSessionEnding(object sender, SessionEndingCancelEventArgs e)
@@ -800,7 +908,7 @@ public partial class App : Application
     /// gives it a scheduler that is free to make progress, and the timeout keeps a
     /// wedged stop from holding up the logoff Windows is going to force anyway.
     /// </remarks>
-    private void StopServiceSynchronously()
+    private void StopServiceSynchronously(TimeSpan? budget = null)
     {
         var service = _service;
         if (service is null)
@@ -810,7 +918,7 @@ public partial class App : Application
 
         try
         {
-            Task.Run(() => service.StopAsync()).Wait(TimeSpan.FromSeconds(8));
+            Task.Run(() => service.StopAsync()).Wait(budget ?? TimeSpan.FromSeconds(8));
         }
         catch (Exception ex)
         {
@@ -867,6 +975,19 @@ public partial class App : Application
         e.Handled = true;
     }
 
+    /// <summary>
+    /// Last rites for a process the CLR is about to end anyway.
+    /// </summary>
+    /// <remarks>
+    /// Everything here is on a short leash on purpose. This used to stop the service
+    /// for up to eight seconds and then block for up to thirty more putting DNS back,
+    /// which is most of a minute during which the app is on screen, frozen, and then
+    /// gone - "it said it was starting and forty seconds later it crashed" is the
+    /// shape of that, and none of it helped the user. The recovery is handed to the
+    /// separately named process that exists for it, which is not dying and has no
+    /// deadline, and the in-process attempt keeps only enough of a budget to win the
+    /// race when it can.
+    /// </remarks>
     private void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
         if (e.ExceptionObject is Exception exception)
@@ -874,19 +995,54 @@ public partial class App : Application
             AppLog.Error("Beklenmeyen hata", exception);
         }
 
-        StopServiceSynchronously();
-        TryRestorePendingDnsAfterFatal();
+        StartExternalDnsRecovery();
+        StopServiceSynchronously(FatalRecoveryBudget);
+        TryRestorePendingDnsAfterFatal(FatalRecoveryBudget);
     }
 
-    private static void TryRestorePendingDnsAfterFatal()
+    /// <summary>
+    /// Hands the DNS restore to a process that is not the one going down.
+    /// </summary>
+    /// <remarks>
+    /// The recovery executable is a copy of this one under a different name, so it is
+    /// unaffected by whatever is ending this process - and it does the restore with no
+    /// timeout at all, which is what makes it safe to keep the deadlines here small.
+    /// The engine's normal watchdog is already doing this for a crash that happens
+    /// once protection is running; this covers the failures that happen before it.
+    /// </remarks>
+    /// <returns>
+    /// False when there is nothing to hand over, or nothing to hand it to. The caller
+    /// falls back to doing it here, on a short budget.
+    /// </returns>
+    private static bool StartExternalDnsRecovery()
+    {
+        try
+        {
+            var configurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
+            if (!configurator.HasPendingRestore)
+            {
+                // Nothing was redirected, so there is nothing for either path to undo.
+                return true;
+            }
+
+            return CommandLineTasks.TryStartDnsRecovery();
+        }
+        catch (Exception)
+        {
+            // The in-process attempt is the fallback, and the logon task's next launch
+            // reconciles a snapshot that outlives both.
+            return false;
+        }
+    }
+
+    private static void TryRestorePendingDnsAfterFatal(TimeSpan budget)
     {
         try
         {
             var configurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
             if (configurator.HasPendingRestore)
             {
-                Task.Run(() => configurator.RestoreAsync(CancellationToken.None))
-                    .Wait(TimeSpan.FromSeconds(30));
+                Task.Run(() => configurator.RestoreAsync(CancellationToken.None)).Wait(budget);
             }
         }
         catch (Exception ex)

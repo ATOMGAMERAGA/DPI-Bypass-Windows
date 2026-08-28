@@ -88,7 +88,13 @@ internal static class CommandLineTasks
                 return true;
 
             case "health-check":
-                Environment.ExitCode = SingleInstance.RequestVisibleWindow(TimeSpan.FromSeconds(12)) ? 0 : 1;
+                // Long, because the answer it is waiting for is worth waiting for. A
+                // running copy that has not finished starting keeps saying so, and this
+                // returns the moment its window is up; a machine with nothing running
+                // is answered immediately, without spending any of the budget. The
+                // short timeout this used to have expired against a first launch that
+                // was still loading and reported a working installation as broken.
+                Environment.ExitCode = SingleInstance.RequestVisibleWindow(HealthCheckTimeout(argument)) ? 0 : 1;
                 return true;
 
             // --- catalogue listings, which need no running instance ---------------
@@ -141,6 +147,15 @@ internal static class CommandLineTasks
                 return false;
         }
     }
+
+    /// <summary>
+    /// How long <c>--health-check</c> waits for a window, optionally given in seconds
+    /// on the command line so a caller can choose its own budget.
+    /// </summary>
+    private static TimeSpan HealthCheckTimeout(string? argument)
+        => int.TryParse(argument, out var seconds) && seconds is > 0 and <= 600
+            ? TimeSpan.FromSeconds(seconds)
+            : TimeSpan.FromSeconds(60);
 
     private static string ResolveVodafoneCommand(string? argument) => argument?.Trim().ToLowerInvariant() switch
     {
@@ -253,6 +268,8 @@ internal static class CommandLineTasks
 
           DpiBypass.exe --show              pencereyi her koşulda aç
           DpiBypass.exe --minimized         tepside başlat (oturum açma görevi bunu kullanır)
+          DpiBypass.exe --health-check [sn] çalışan kopyanın penceresini açmasını bekle
+                                            (0 = pencere açıldı, 1 = açılmadı)
 
         Durum ve denetim komutları çalışan uygulamaya bağlanır; uygulama kapalıysa
         bunu söyler. Argümansız çalıştırmak pencereyi açar.
@@ -371,6 +388,26 @@ internal static class CommandLineTasks
     /// process and restores DNS as soon as its owner disappears unexpectedly.
     /// </summary>
     public static bool TryStartDnsWatchdog()
+        => TryStartRecoveryProcess(
+            ["--dns-watchdog", Environment.ProcessId.ToString()],
+            "DNS crash watchdog");
+
+    /// <summary>
+    /// Launches the same separately named copy to put DNS back right now, rather than
+    /// when this process exits.
+    /// </summary>
+    /// <remarks>
+    /// Used by the fatal paths. A process that is already going down is the worst
+    /// possible place to spend thirty seconds shelling out to PowerShell: the wait is
+    /// what the user experiences as the application hanging before it disappears, and
+    /// it delays the crash log and the error dialog that are the only account of what
+    /// happened. Handing the job to a process that is not dying costs nothing and is
+    /// more likely to finish it.
+    /// </remarks>
+    public static bool TryStartDnsRecovery()
+        => TryStartRecoveryProcess(["--restore-dns"], "DNS recovery helper");
+
+    private static bool TryStartRecoveryProcess(string[] arguments, string what)
     {
         var recoveryExecutable = Path.Combine(AppContext.BaseDirectory, "DpiBypass.Recovery.exe");
         if (!File.Exists(recoveryExecutable))
@@ -382,7 +419,7 @@ internal static class CommandLineTasks
 
         if (string.IsNullOrWhiteSpace(recoveryExecutable) || !File.Exists(recoveryExecutable))
         {
-            AppLog.Warning("DNS crash watchdog could not start: executable not found.");
+            AppLog.Warning($"{what} could not start: executable not found.");
             return false;
         }
 
@@ -395,8 +432,11 @@ internal static class CommandLineTasks
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            startInfo.ArgumentList.Add("--dns-watchdog");
-            startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
+
+            foreach (var argument in arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
 
             using var process = Process.Start(startInfo);
             if (process is null)
@@ -404,12 +444,12 @@ internal static class CommandLineTasks
                 return false;
             }
 
-            AppLog.Info($"DNS crash watchdog started (PID {process.Id}).");
+            AppLog.Info($"{what} started (PID {process.Id}).");
             return true;
         }
         catch (Exception ex)
         {
-            AppLog.Error("DNS crash watchdog could not start", ex);
+            AppLog.Error($"{what} could not start", ex);
             return false;
         }
     }

@@ -330,7 +330,7 @@ Test-Case 'a previous installation is found through its uninstall key' {
 
 Test-Case 'the install command verifies a visible window before reporting success' {
     $script = Get-Content -Path $scriptPath -Raw
-    $health = $script.IndexOf("ArgumentList     = @('--health-check')", [StringComparison]::Ordinal)
+    $health = $script.IndexOf("ArgumentList     = @('--health-check'", [StringComparison]::Ordinal)
     $success = $script.IndexOf("Write-Ok 'Uygulama açıldı ve pencere doğrulandı.'", [StringComparison]::Ordinal)
 
     if ($health -lt 0) { throw 'the post-install health check is missing' }
@@ -378,8 +378,8 @@ Test-Case 'the post-install check does not treat a hand-off as a failure' {
     # normally hands its request over and exits within a second. Reading that exit as
     # "the app did not start" reported a healthy installation as broken.
     $script = Get-Content -Path $scriptPath -Raw
-    $loop = $script.IndexOf('for ($attempt = 1; $attempt -le 4', [StringComparison]::Ordinal)
-    $failure = $script.IndexOf('if (-not $healthy)', [StringComparison]::Ordinal)
+    $loop = $script.IndexOf('for ($attempt = 1; $attempt -le', [StringComparison]::Ordinal)
+    $failure = $script.IndexOf('if (-not $healthy) {', [StringComparison]::Ordinal)
 
     if ($loop -lt 0) { throw 'the health check loop is missing' }
     if ($failure -lt 0) { throw 'the health check failure branch is missing' }
@@ -388,6 +388,50 @@ Test-Case 'the post-install check does not treat a hand-off as a failure' {
     if ($body -match 'HasExited') {
         throw 'the health check loop gives up when the launched process exits'
     }
+}
+
+Test-Case 'the install command does not launch a second copy over the installer' {
+    <#
+        This is the failure the whole handover exists to prevent, seen from the
+        script's side. The installer's [Run] section starts the app on a silent
+        install; this script starting it again a moment later produced two copies,
+        and the second one - finding a first copy that was still loading its runtime
+        and could not answer for a window yet - killed it. From the user's chair the
+        window appeared and vanished again the instant the install finished.
+
+        So the launch has to be conditional on the health check having found nothing,
+        and it has to come after the check rather than before it.
+    #>
+    $script = Get-Content -Path $scriptPath -Raw
+
+    $check = $script.IndexOf("ArgumentList     = @('--health-check'", [StringComparison]::Ordinal)
+    if ($check -lt 0) { throw 'the health check is missing' }
+
+    $launches = [regex]::Matches($script, "ArgumentList '--show'")
+    if ($launches.Count -ne 1) {
+        throw "expected exactly one --show launch but found $($launches.Count)"
+    }
+
+    if ($launches[0].Index -lt $check) {
+        throw 'the app is launched before the health check has looked for a running copy'
+    }
+
+    # The guard itself: without it the launch is unconditional again.
+    $guard = $script.IndexOf('if (-not $healthy -and -not $appProcess) {', [StringComparison]::Ordinal)
+    if ($guard -lt 0) { throw 'the --show launch is no longer guarded by the health check result' }
+    if ($guard -gt $launches[0].Index) { throw 'the guard does not cover the launch' }
+}
+
+Test-Case 'a failed check never stops a copy this script did not start' {
+    # The instance the installer launched may simply be slower than the budget above.
+    # Ending it would leave the machine carrying the DNS redirect with none of the
+    # protection that justifies it, so only a copy started here is ever stopped.
+    $script = Get-Content -Path $scriptPath -Raw
+    $stop = $script.IndexOf('Stop-Process -Id $appProcess.Id', [StringComparison]::Ordinal)
+    if ($stop -lt 0) { throw 'the failure path no longer stops the app it started' }
+
+    $guard = $script.LastIndexOf('if ($appProcess) {', $stop, [StringComparison]::Ordinal)
+    if ($guard -lt 0) { throw 'the stop is not guarded by this script having started a copy' }
 }
 
 Write-Host ''
