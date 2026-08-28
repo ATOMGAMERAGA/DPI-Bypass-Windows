@@ -9,3 +9,4 @@ TestResults/
 *.binlog
 installer/output/
 third-party/
+.zcode/

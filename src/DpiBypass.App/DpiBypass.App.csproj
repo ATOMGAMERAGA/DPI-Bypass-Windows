@@ -11,6 +11,11 @@
     <ApplicationIcon>Assets\dpibypass.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- Directory.Build.props sets InvariantGlobalization=true for the whole repo,
+         but WPF's font cache resolves font fallback cultures through CultureInfo and
+         throws "Cannot find non-neutral culture related to 'en-us'" at startup under
+         invariant mode (dotnet/wpf#9097). The app must keep ICU culture data. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
     <!-- WPF0001: the Fluent ThemeMode API is still marked experimental.
          WFO0003: a Windows Forms warning about DPI settings in the manifest. This is
          a WPF app that happens to reference Windows Forms for the tray icon, and WPF
