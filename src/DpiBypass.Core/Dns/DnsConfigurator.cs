@@ -175,9 +175,27 @@ public sealed class DnsConfigurator
         }
 
         var remaining = new List<AdapterDnsSnapshot>();
+        var present = CurrentInterfaceIndexes();
+        var unrepaired = 0;
 
         foreach (var adapter in snapshot)
         {
+            // Hardware that is not here cannot be repaired and does not need to be: an
+            // interface Windows no longer has is not resolving through anything, least
+            // of all through our loopback proxy. Its row is kept, because the dongle
+            // may be plugged back in, but it is not counted as a failure - a snapshot
+            // naming one absent adapter would otherwise fail every restore for as long
+            // as it stayed absent, and a failed restore is what stops the engine from
+            // starting at all.
+            if (present.Count > 0
+                && !present.Contains(adapter.InterfaceIndexV4)
+                && !present.Contains(adapter.InterfaceIndexV6))
+            {
+                _log?.Invoke($"Adapter '{adapter.Name}' is not on this machine; its recovery data is kept for later.");
+                remaining.Add(adapter);
+                continue;
+            }
+
             // The interface index is per adapter rather than per family and
             // -ResetServerAddresses takes no family, so a reset clears both families at
             // once. Every reset therefore has to happen before the explicit servers go
@@ -207,6 +225,7 @@ public sealed class DnsConfigurator
             if (!restored)
             {
                 remaining.Add(adapter);
+                unrepaired++;
             }
         }
 
@@ -219,8 +238,20 @@ public sealed class DnsConfigurator
             // old USB/VPN adapter cannot make every future restore repeat changes on
             // adapters that are already healthy.
             PersistSnapshot(remaining);
-            throw new InvalidOperationException(
-                $"DNS ayarları {remaining.Count} bağdaştırıcıda geri yüklenemedi; kurtarma bilgisi korundu.");
+
+            if (unrepaired > 0)
+            {
+                throw new InvalidOperationException(
+                    $"DNS ayarları {unrepaired} bağdaştırıcıda geri yüklenemedi; kurtarma bilgisi korundu.");
+            }
+
+            // Everything this machine actually has is back on its own servers. What is
+            // left belongs to adapters that are not here, so the caller is told the
+            // resolvers are the system's again - the alternative is refusing to start
+            // protection over a repair nobody can perform.
+            _log?.Invoke($"Original DNS configuration restored; {remaining.Count} absent adapter(s) still recorded.");
+            CurrentMode = DnsMode.SystemDefault;
+            return;
         }
 
         DeleteSnapshot();
@@ -269,6 +300,64 @@ public sealed class DnsConfigurator
 
     private static string SnapshotKey(AdapterDnsSnapshot snapshot)
         => !string.IsNullOrWhiteSpace(snapshot.Id) ? $"id:{snapshot.Id}" : $"name:{snapshot.Name}";
+
+    /// <summary>
+    /// Every interface index Windows currently knows about, in either family, including
+    /// the adapters that are down.
+    /// </summary>
+    /// <remarks>
+    /// Used to tell "this restore failed" apart from "there is nothing here to restore".
+    /// Down adapters are deliberately included: one that is disabled still exists and
+    /// still carries whatever DNS servers were last written to it.
+    /// </remarks>
+    private static HashSet<int> CurrentInterfaceIndexes()
+    {
+        var indexes = new HashSet<int>();
+
+        try
+        {
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                // Per adapter, so one interface that will not describe itself costs
+                // only its own row rather than the whole answer.
+                try
+                {
+                    var properties = nic.GetIPProperties();
+
+                    try
+                    {
+                        indexes.Add(properties.GetIPv4Properties().Index);
+                    }
+                    catch (Exception)
+                    {
+                        // No IPv4 on this interface.
+                    }
+
+                    try
+                    {
+                        indexes.Add(properties.GetIPv6Properties().Index);
+                    }
+                    catch (Exception)
+                    {
+                        // No IPv6 on this interface.
+                    }
+                }
+                catch (Exception)
+                {
+                    // Nothing readable about this one; the others still count.
+                }
+            }
+        }
+        catch (NetworkInformationException)
+        {
+            // "We could not ask" must not read as "none of them are here", or every
+            // adapter would be written off as absent. An empty set is the caller's
+            // signal to treat every row as present, which is what it did before.
+            return [];
+        }
+
+        return indexes;
+    }
 
     /// <summary>Every adapter that currently carries traffic, with both address family indexes.</summary>
     public async Task<IReadOnlyList<AdapterDnsSnapshot>> EnumerateAsync(CancellationToken cancellationToken = default)

@@ -37,7 +37,7 @@ if ($errors -and $errors.Count -gt 0) {
     throw 'install.ps1 does not parse.'
 }
 
-foreach ($name in @('ConvertTo-ComparableVersion', 'Get-UpdateDecision', 'Get-InstalledRelease', 'Get-SafeWorkingDirectory')) {
+foreach ($name in @('ConvertTo-ComparableVersion', 'Get-UpdateDecision', 'Get-InstalledRelease', 'Get-SafeWorkingDirectory', 'Get-SetupExitReason')) {
     $definition = $ast.Find(
         [Func[System.Management.Automation.Language.Ast, bool]] {
             param($node)
@@ -71,6 +71,60 @@ function Assert-Equal($Expected, $Actual, [string]$Because) {
     if ("$Expected" -ne "$Actual") {
         throw "expected '$Expected' but got '$Actual'$(if ($Because) { " - $Because" })"
     }
+}
+
+<#
+    The [Code] section of the Inno Setup script, split into one entry per routine.
+
+    Two of the tests below are about which code runs when, and the difference between
+    something Setup calls before the wizard exists and something it calls afterwards
+    is invisible to a flat search of the file.
+#>
+function Get-InstallerRoutines([string]$Path) {
+    if (-not (Test-Path $Path)) {
+        throw "installer script not found at $Path"
+    }
+
+    $text = Get-Content -Path $Path -Raw
+    $section = $text.IndexOf("`n[Code]", [StringComparison]::Ordinal)
+    if ($section -lt 0) { throw 'the installer script has no [Code] section' }
+
+    $code = $text.Substring($section)
+    $declarations = [regex]::Matches($code, '(?m)^(?:procedure|function)\s+(?<name>\w+)')
+    if ($declarations.Count -eq 0) { throw 'no routines were found in the [Code] section' }
+
+    $routines = @{}
+    for ($index = 0; $index -lt $declarations.Count; $index++) {
+        $from = $declarations[$index].Index
+        $to = if ($index + 1 -lt $declarations.Count) { $declarations[$index + 1].Index } else { $code.Length }
+        $routines[$declarations[$index].Groups['name'].Value] = $code.Substring($from, $to - $from)
+    }
+
+    return $routines
+}
+
+<#
+    Every routine Setup can reach from InitializeSetup, including the ones it only
+    reaches through another routine.
+#>
+function Get-ReachableRoutines([hashtable]$Routines, [string]$Entry) {
+    $reachable = New-Object System.Collections.Generic.HashSet[string]
+    $pending = New-Object System.Collections.Generic.Queue[string]
+    [void]$pending.Enqueue($Entry)
+
+    while ($pending.Count -gt 0) {
+        $name = $pending.Dequeue()
+        if (-not $Routines.ContainsKey($name)) { continue }
+        if (-not $reachable.Add($name)) { continue }
+
+        foreach ($candidate in $Routines.Keys) {
+            if ($candidate -ne $name -and $Routines[$name] -match "\b$candidate\b") {
+                [void]$pending.Enqueue($candidate)
+            }
+        }
+    }
+
+    return $reachable
 }
 
 Write-Host 'install.ps1' -ForegroundColor Cyan
@@ -209,21 +263,69 @@ Test-Case 'uninstall restores latency before DNS and the driver are removed' {
 }
 
 Test-Case 'setup restores DNS before force-killing a running app' {
-    $installer = Get-Content -Path $installerPath -Raw
-    $stopFunction = [regex]::Match(
-        $installer,
-        'procedure StopRunningInstance\(\);(?<body>[\s\S]*?)function InitializeSetup',
-        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    $routines = Get-InstallerRoutines $installerPath
+    if (-not $routines.ContainsKey('StopRunningInstance')) { throw 'StopRunningInstance was not found' }
 
-    if (-not $stopFunction.Success) { throw 'StopRunningInstance was not found' }
-
-    $body = $stopFunction.Groups['body'].Value
+    $body = $routines['StopRunningInstance']
     $restore = $body.IndexOf("'--restore-dns'", [StringComparison]::Ordinal)
     $kill = $body.IndexOf("'/IM {#AppExeName} /F'", [StringComparison]::Ordinal)
 
     if ($restore -lt 0) { throw 'pre-kill DNS restore is missing' }
     if ($kill -lt 0) { throw 'application taskkill is missing' }
     if ($restore -ge $kill) { throw 'the app is killed before DNS is restored' }
+}
+
+Test-Case 'nothing InitializeSetup reaches expands a constant Setup has not set yet' {
+    # This is the whole reason the install folder is read out of the registry there.
+    # {app} exists only once the wizard has settled on a directory: asking for it
+    # before that is an internal error which ends Setup during initialisation, before
+    # a single file is written. With /SUPPRESSMSGBOXES - which the one line installer
+    # passes - the error is never printed either, so the entire failed installation
+    # reaches the user as nothing but "exit code 1".
+    $routines = Get-InstallerRoutines $installerPath
+    if (-not $routines.ContainsKey('InitializeSetup')) { throw 'InitializeSetup is missing' }
+
+    $reachable = @(Get-ReachableRoutines $routines 'InitializeSetup')
+    if ($reachable.Count -lt 2) { throw 'InitializeSetup appears to call nothing at all' }
+
+    foreach ($name in $reachable) {
+        foreach ($constant in @('app', 'group')) {
+            if ($routines[$name] -match "ExpandConstant\(\s*'\{$constant\}") {
+                throw "$name expands {$constant}, which Setup has not set when InitializeSetup runs"
+            }
+        }
+    }
+}
+
+Test-Case 'the running instance is swept again once the install folder is known' {
+    # InitializeSetup can only work from the previous installation's uninstall key. A
+    # folder typed into the wizard, or one no uninstall key points at, is covered by
+    # the second sweep - which is also the last thing to run before the first file is
+    # replaced.
+    $routines = Get-InstallerRoutines $installerPath
+    if (-not $routines.ContainsKey('CurStepChanged')) { throw 'CurStepChanged is missing' }
+
+    $body = $routines['CurStepChanged']
+    if ($body -notmatch 'ssInstall') { throw 'the second sweep is not tied to the install step' }
+    if ($body -notmatch 'SweepRunningInstance') { throw 'the install step does not stop the running app' }
+}
+
+Test-Case 'a previous installation is found through its uninstall key' {
+    $routines = Get-InstallerRoutines $installerPath
+    if (-not $routines.ContainsKey('PreviousInstallDir')) { throw 'PreviousInstallDir is missing' }
+
+    $body = $routines['PreviousInstallDir'] + $routines['UninstallKeyPath']
+    foreach ($needle in @('HKLM64', 'HKLM32', 'HKCU')) {
+        if ($body -notmatch $needle) { throw "the $needle registry view is not consulted" }
+    }
+
+    # The same AppId the [Setup] section registers, or the key read here belongs to
+    # some other product.
+    $installer = Get-Content -Path $installerPath -Raw
+    if ($installer -notmatch '#define AppIdGuid') { throw 'the AppId is no longer defined once' }
+    if ($routines['UninstallKeyPath'] -notmatch '\{#AppIdGuid\}_is1') {
+        throw 'the uninstall key is not built from the AppId'
+    }
 }
 
 Test-Case 'the install command verifies a visible window before reporting success' {
@@ -246,6 +348,46 @@ Test-Case 'a failed post-install health check restores DNS before stopping the a
     if ($restore -lt 0) { throw 'DNS restore is missing from the startup failure branch' }
     if ($stop -lt 0) { throw 'failed application cleanup is missing' }
     if ($restore -ge $stop) { throw 'the failed app is stopped before DNS is restored' }
+}
+
+Test-Case 'a failed installation says what the exit code meant' {
+    # The installer is silent and its message boxes are suppressed, so unless this
+    # script explains the code, a failure is a bare number and a stack trace.
+    $reason = Get-SetupExitReason 1
+    if (-not $reason) { throw 'exit code 1 has no explanation' }
+    if ($reason -notmatch 'başlatılamadı') { throw "exit code 1 is explained as '$reason'" }
+
+    $unknown = Get-SetupExitReason 99
+    if ($unknown -notmatch '99') { throw 'an unknown exit code loses the code itself' }
+}
+
+Test-Case 'the installer is asked for a log the failure path can quote' {
+    $script = Get-Content -Path $scriptPath -Raw
+    if ($script -notmatch '/LOG=\$setupLog') { throw 'the installer is run without a log file' }
+
+    $explain = $script.IndexOf('Get-SetupExitReason $process.ExitCode', [StringComparison]::Ordinal)
+    $fail = $script.IndexOf('throw "Kurulum $($process.ExitCode) kodu ile sonlandı."', [StringComparison]::Ordinal)
+
+    if ($explain -lt 0) { throw 'a failed install does not explain the exit code' }
+    if ($fail -lt 0) { throw 'the failure is no longer reported' }
+    if ($explain -ge $fail) { throw 'the explanation is printed after the script has thrown' }
+}
+
+Test-Case 'the post-install check does not treat a hand-off as a failure' {
+    # The installer's own last step launches the app, so the copy this script starts
+    # normally hands its request over and exits within a second. Reading that exit as
+    # "the app did not start" reported a healthy installation as broken.
+    $script = Get-Content -Path $scriptPath -Raw
+    $loop = $script.IndexOf('for ($attempt = 1; $attempt -le 4', [StringComparison]::Ordinal)
+    $failure = $script.IndexOf('if (-not $healthy)', [StringComparison]::Ordinal)
+
+    if ($loop -lt 0) { throw 'the health check loop is missing' }
+    if ($failure -lt 0) { throw 'the health check failure branch is missing' }
+
+    $body = $script.Substring($loop, $failure - $loop)
+    if ($body -match 'HasExited') {
+        throw 'the health check loop gives up when the launched process exits'
+    }
 }
 
 Write-Host ''

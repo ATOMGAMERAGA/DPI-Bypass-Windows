@@ -172,6 +172,23 @@ public sealed class ControlServer : IAsyncDisposable
 /// <summary>The command line side of <see cref="ControlServer"/>.</summary>
 public static class ControlClient
 {
+    /// <summary>
+    /// The longest this waits for the pipe itself, however long the command is
+    /// allowed to take.
+    /// </summary>
+    /// <remarks>
+    /// Connecting is never the slow part: a running instance keeps a server instance
+    /// waiting, so it accepts in milliseconds. The command timeout is about how long
+    /// the answer may take - a re-tune runs real handshakes - and spending it on the
+    /// connection as well means every command sent when nothing is listening blocks
+    /// for the whole of it. That is not a hypothetical: the uninstaller restores the
+    /// NIC settings through this channel after the app has already been stopped, so
+    /// each removal, and therefore each update, sat for the best part of a minute
+    /// waiting for a process that had been asked to exit. Bounding the connection on
+    /// its own keeps "nobody is home" quick without shortening any command.
+    /// </remarks>
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(3);
+
     /// <summary>Sends one command. Returns null when no instance is running.</summary>
     public static async Task<ControlResponse?> SendAsync(
         ControlRequest request,
@@ -181,12 +198,13 @@ public static class ControlClient
         try
         {
             var requestTimeout = timeout ?? TimeSpan.FromSeconds(3);
+            var connectTimeout = requestTimeout < ConnectTimeout ? requestTimeout : ConnectTimeout;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(requestTimeout);
             var token = deadline.Token;
 
             await using var pipe = new NamedPipeClientStream(".", ControlProtocol.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await pipe.ConnectAsync((int)requestTimeout.TotalMilliseconds, token).ConfigureAwait(false);
+            await pipe.ConnectAsync((int)connectTimeout.TotalMilliseconds, token).ConfigureAwait(false);
 
             await using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
             using var reader = new StreamReader(pipe, leaveOpen: true);
