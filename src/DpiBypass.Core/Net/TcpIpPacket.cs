@@ -46,62 +46,16 @@ public readonly struct TcpIpPacket
 
     public static TcpIpPacket Parse(ReadOnlySpan<byte> packet)
     {
-        if (packet.Length < 20)
+        if (!TryLocateTransport(packet, ProtocolTcp, out var isIPv6, out var tcpOffset, out var usable))
         {
             return default;
         }
 
-        var version = packet[0] >> 4;
-        int ipHeaderLength;
-        bool isIPv6;
-        byte protocol;
-        byte ttl;
-        int declaredTotal;
-
-        if (version == 4)
-        {
-            isIPv6 = false;
-            ipHeaderLength = (packet[0] & 0x0F) * 4;
-            if (ipHeaderLength < 20 || packet.Length < ipHeaderLength)
-            {
-                return default;
-            }
-
-            declaredTotal = BinaryPrimitives.ReadUInt16BigEndian(packet[2..]);
-            ttl = packet[8];
-            protocol = packet[9];
-        }
-        else if (version == 6)
-        {
-            isIPv6 = true;
-            ipHeaderLength = 40;
-            if (packet.Length < 40)
-            {
-                return default;
-            }
-
-            declaredTotal = BinaryPrimitives.ReadUInt16BigEndian(packet[4..]) + 40;
-            protocol = packet[6];
-            ttl = packet[7];
-        }
-        else
+        if (usable < tcpOffset + 20)
         {
             return default;
         }
 
-        if (protocol != ProtocolTcp)
-        {
-            return default;
-        }
-
-        // Trust the shorter of "what the header claims" and "what we actually got".
-        var usable = declaredTotal > 0 && declaredTotal <= packet.Length ? declaredTotal : packet.Length;
-        if (usable < ipHeaderLength + 20)
-        {
-            return default;
-        }
-
-        var tcpOffset = ipHeaderLength;
         var tcpHeaderLength = (packet[tcpOffset + 12] >> 4) * 4;
         if (tcpHeaderLength < 20 || tcpOffset + tcpHeaderLength > usable)
         {
@@ -114,7 +68,7 @@ public readonly struct TcpIpPacket
         {
             IsValid = true,
             IsIPv6 = isIPv6,
-            IpHeaderLength = ipHeaderLength,
+            IpHeaderLength = tcpOffset,
             TcpHeaderOffset = tcpOffset,
             TcpHeaderLength = tcpHeaderLength,
             PayloadOffset = payloadOffset,
@@ -123,8 +77,104 @@ public readonly struct TcpIpPacket
             DestinationPort = BinaryPrimitives.ReadUInt16BigEndian(packet[(tcpOffset + 2)..]),
             SequenceNumber = BinaryPrimitives.ReadUInt32BigEndian(packet[(tcpOffset + 4)..]),
             Flags = (TcpFlags)packet[tcpOffset + 13],
-            TimeToLive = ttl,
+            TimeToLive = packet[isIPv6 ? 7 : 8],
         };
+    }
+
+    internal static bool TryLocateTransport(
+        ReadOnlySpan<byte> packet,
+        byte expectedProtocol,
+        out bool isIPv6,
+        out int transportOffset,
+        out int usableLength)
+    {
+        isIPv6 = false;
+        transportOffset = 0;
+        usableLength = 0;
+
+        if (packet.Length < 20)
+        {
+            return false;
+        }
+
+        var version = packet[0] >> 4;
+        if (version == 4)
+        {
+            var headerLength = (packet[0] & 0x0F) * 4;
+            var declaredLength = BinaryPrimitives.ReadUInt16BigEndian(packet[2..]);
+            if (headerLength < 20 || declaredLength < headerLength || declaredLength > packet.Length)
+            {
+                return false;
+            }
+
+            // Reassembly is deliberately out of scope. Parsing a later fragment as
+            // a TCP/UDP header could rewrite or drop unrelated payload bytes.
+            var fragment = BinaryPrimitives.ReadUInt16BigEndian(packet[6..]);
+            if ((fragment & 0x3FFF) != 0 || packet[9] != expectedProtocol)
+            {
+                return false;
+            }
+
+            transportOffset = headerLength;
+            usableLength = declaredLength;
+            return true;
+        }
+
+        if (version != 6 || packet.Length < 40)
+        {
+            return false;
+        }
+
+        isIPv6 = true;
+        var payloadLength = BinaryPrimitives.ReadUInt16BigEndian(packet[4..]);
+        var declaredTotal = 40 + payloadLength;
+        if (payloadLength == 0 || declaredTotal > packet.Length)
+        {
+            // IPv6 jumbograms require the Jumbo Payload option, which this parser
+            // intentionally does not implement.
+            return false;
+        }
+
+        var nextHeader = packet[6];
+        var offset = 40;
+        for (var extensionCount = 0; nextHeader != expectedProtocol; extensionCount++)
+        {
+            if (extensionCount >= 16 || offset + 2 > declaredTotal)
+            {
+                return false;
+            }
+
+            int extensionLength;
+            switch (nextHeader)
+            {
+                case 0:   // Hop-by-Hop Options
+                case 43:  // Routing
+                case 60:  // Destination Options
+                case 135: // Mobility
+                    extensionLength = (packet[offset + 1] + 1) * 8;
+                    break;
+                case 51: // Authentication Header
+                    extensionLength = (packet[offset + 1] + 2) * 4;
+                    break;
+                case 44: // Fragment
+                case 50: // ESP
+                case 59: // No Next Header
+                default:
+                    return false;
+            }
+
+            if (extensionLength < 8 || offset + extensionLength > declaredTotal)
+            {
+                return false;
+            }
+
+            nextHeader = packet[offset];
+            offset += extensionLength;
+        }
+
+        transportOffset = offset;
+        usableLength = declaredTotal;
+        return true;
     }
 
     public ReadOnlySpan<byte> Payload(ReadOnlySpan<byte> packet) => packet.Slice(PayloadOffset, PayloadLength);

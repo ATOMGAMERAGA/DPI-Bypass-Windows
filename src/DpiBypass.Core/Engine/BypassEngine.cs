@@ -24,14 +24,25 @@ namespace DpiBypass.Core.Engine;
 public sealed class BypassEngine : IDisposable
 {
     /// <summary>
-    /// The kernel side filter. Narrow on purpose - the driver drops everything else
-    /// before it ever reaches user mode.
+    /// The preferred kernel filter. It mirrors the user-mode handshake checks so
+    /// established HTTP/HTTPS payload does not cross the user-mode packet path.
     /// </summary>
+    private const string HandshakeFilter =
+        "outbound and tcp and ("
+        + "(tcp.DstPort == 443 and tcp.PayloadLength >= 6 and tcp.Payload[0] == 0x16 and tcp.Payload[5] == 0x01)"
+        + " or (tcp.DstPort == 80 and tcp.PayloadLength >= 5 and ("
+        + "tcp.Payload[0] == 0x47 or tcp.Payload[0] == 0x50 or tcp.Payload[0] == 0x48 or tcp.Payload[0] == 0x44"
+        + " or tcp.Payload[0] == 0x4F or tcp.Payload[0] == 0x54 or tcp.Payload[0] == 0x43))"
+        + ")";
+
+    /// <summary>Fallbacks for WinDivert builds that reject payload indexing.</summary>
     private const string TcpFilter =
         "outbound and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
     private const string TcpFilterV6 =
         "outbound and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+
+    internal static IReadOnlyList<string> TcpFilterLadder => [HandshakeFilter, TcpFilter, TcpFilterV6];
 
     /// <summary>
     /// Only QUIC long header packets with an Initial type reach user mode. Filtering
@@ -41,7 +52,8 @@ public sealed class BypassEngine : IDisposable
     /// </summary>
     private const string QuicFilter =
         "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32 "
-        + "and udp.Payload[0] >= 0xC0 and udp.Payload[0] <= 0xCF";
+        + "and ((udp.Payload[0] >= 0xC0 and udp.Payload[0] <= 0xCF) "
+        + "or (udp.Payload[0] >= 0xD0 and udp.Payload[0] <= 0xDF))";
 
     /// <summary>Used if the driver rejects payload indexing in a filter.</summary>
     private const string QuicFilterFallback = "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
@@ -167,14 +179,45 @@ public sealed class BypassEngine : IDisposable
 
     private WinDivertHandle OpenWithFallback()
     {
+        WinDivertException? last = null;
+
+        foreach (var filter in TcpFilterLadder)
+        {
+            if (!Compiles(filter))
+            {
+                _log?.Invoke("Filter rejected by the WinDivert parser; trying a simpler fallback.");
+                continue;
+            }
+
+            try
+            {
+                var handle = WinDivertHandle.Open(filter, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+                _log?.Invoke(filter == HandshakeFilter
+                    ? "Kernel filter: handshakes only."
+                    : "Kernel filter fallback: all HTTP/HTTPS payload packets.");
+                return handle;
+            }
+            catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+            {
+                last = ex;
+                _log?.Invoke("Packet filter rejected; trying a simpler fallback.");
+            }
+        }
+
+        throw last ?? new WinDivertException(87, "No TCP packet filter was accepted by WinDivert.");
+    }
+
+    private static bool Compiles(string filter)
+    {
         try
         {
-            return WinDivertHandle.Open(TcpFilter, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+            return WinDivertHandle.TryCompileFilter(filter, WinDivertLayer.Network, out _);
         }
-        catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+        catch (Exception)
         {
-            _log?.Invoke("Primary filter rejected; retrying without the IPv4 clause.");
-            return WinDivertHandle.Open(TcpFilterV6, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+            // Older or incomplete DLL payloads may not expose the helper. Let Open
+            // produce the authoritative failure instead of blocking startup here.
+            return true;
         }
     }
 
@@ -266,14 +309,18 @@ public sealed class BypassEngine : IDisposable
                 {
                     if (!TryRewrite(handle, packet, scratch, ref address))
                     {
-                        handle.Send(packet, ref address);
+                        if (!TryForward(handle, packet, ref address))
+                        {
+                            return;
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     Stats.AddError();
-                    _log?.Invoke($"Packet rewrite failed, forwarding unchanged: {ex.Message}");
-                    handle.Send(packet, ref address);
+                    _log?.Invoke($"Packet rewrite failed; stopping the filter to avoid an unsafe replay: {ex.Message}");
+                    handle.Shutdown();
+                    return;
                 }
             }
         }
@@ -282,6 +329,19 @@ public sealed class BypassEngine : IDisposable
             ArrayPool<byte>.Shared.Return(buffer);
             ArrayPool<byte>.Shared.Return(scratch);
         }
+    }
+
+    private bool TryForward(WinDivertHandle handle, ReadOnlySpan<byte> packet, ref WinDivertAddress address)
+    {
+        if (handle.Send(packet, ref address))
+        {
+            return true;
+        }
+
+        Stats.AddError();
+        _log?.Invoke("WinDivert could not re-inject a pass-through packet; stopping the filter.");
+        handle.Shutdown();
+        return false;
     }
 
     /// <summary>Returns true when the packet was replaced (and must not be forwarded as-is).</summary>
@@ -351,6 +411,8 @@ public sealed class BypassEngine : IDisposable
         var headerLength = parsed.PayloadOffset;
         var sent = 0;
         var decoys = 0;
+        var sentRealSegments = 0;
+        var injectionFailed = false;
 
         foreach (var segment in plan.Segments)
         {
@@ -407,7 +469,12 @@ public sealed class BypassEngine : IDisposable
             // Zero the checksum fields so the helper recomputes rather than adjusts.
             TcpIpPacket.SetChecksum(view, parsed.TcpHeaderOffset, 0);
             var outgoing = address;
-            WinDivertHandle.CalculateChecksums(view, ref outgoing);
+            if (!WinDivertHandle.CalculateChecksums(view, ref outgoing))
+            {
+                Stats.AddError();
+                injectionFailed = true;
+                break;
+            }
 
             if (segment.CorruptChecksum)
             {
@@ -423,15 +490,46 @@ public sealed class BypassEngine : IDisposable
                 {
                     decoys++;
                 }
+                else
+                {
+                    sentRealSegments++;
+                }
+            }
+            else
+            {
+                Stats.AddError();
+                injectionFailed = true;
+                if (!segment.IsDecoy)
+                {
+                    break;
+                }
             }
         }
 
-        if (sent == 0)
+        var requiredRealSegments = plan.Segments.Count(segment => !segment.IsDecoy && segment.Length > 0);
+        if (sentRealSegments == 0)
         {
             // Nothing made it out - let the original through so the user is never
             // worse off than with the app uninstalled.
-            Stats.AddError();
+            if (!injectionFailed)
+            {
+                Stats.AddError();
+            }
+
             return false;
+        }
+
+        if (sentRealSegments < requiredRealSegments)
+        {
+            // Some sequence-space bytes were already injected. Re-sending the whole
+            // original here would create overlap/duplicates, so contain the damage to
+            // this connection and keep the rest of the engine alive.
+            if (!injectionFailed)
+            {
+                Stats.AddError();
+            }
+
+            return true;
         }
 
         Stats.AddRewritten();
@@ -441,7 +539,15 @@ public sealed class BypassEngine : IDisposable
         if (hostName is not null && Stats.LastHost != hostName)
         {
             Stats.LastHost = hostName;
-            HostRewritten?.Invoke(hostName, strategy.Id);
+            try
+            {
+                HostRewritten?.Invoke(hostName, strategy.Id);
+            }
+            catch (Exception ex)
+            {
+                Stats.AddError();
+                _log?.Invoke($"Host rewrite observer failed: {ex.Message}");
+            }
         }
 
         return true;
@@ -470,7 +576,11 @@ public sealed class BypassEngine : IDisposable
 
                 if (address.Impostor || !ShouldDropQuic(packet))
                 {
-                    handle.Send(packet, ref address);
+                    if (!TryForward(handle, packet, ref address))
+                    {
+                        return;
+                    }
+
                     continue;
                 }
 
@@ -491,42 +601,30 @@ public sealed class BypassEngine : IDisposable
             return false;
         }
 
-        var version = packet[0] >> 4;
-        var ipHeaderLength = version == 4 ? (packet[0] & 0x0F) * 4 : 40;
-        if (version == 4)
-        {
-            if (packet.Length < ipHeaderLength + 8 || packet[9] != TcpIpPacket.ProtocolUdp)
-            {
-                return false;
-            }
-        }
-        else if (version == 6)
-        {
-            if (packet.Length < 48 || packet[6] != TcpIpPacket.ProtocolUdp)
-            {
-                return false;
-            }
-        }
-        else
+        if (!TcpIpPacket.TryLocateTransport(
+                packet,
+                TcpIpPacket.ProtocolUdp,
+                out _,
+                out var udpOffset,
+                out var usableLength)
+            || udpOffset + 8 > usableLength)
         {
             return false;
         }
 
-        var udpPayloadOffset = ipHeaderLength + 8;
-        if (packet.Length <= udpPayloadOffset)
+        var udpLength = (packet[udpOffset + 4] << 8) | packet[udpOffset + 5];
+        if (udpLength < 8 || udpOffset + udpLength > usableLength)
         {
             return false;
         }
 
-        // QUIC long header, Initial packet: 0b11xx_xxxx with type bits 00.
-        var first = packet[udpPayloadOffset];
-        var isInitial = (first & 0xF0) == 0xC0;
-        if (!isInitial)
+        var udpPayload = packet.Slice(udpOffset + 8, udpLength - 8);
+        if (!QuicPacket.IsInitial(udpPayload))
         {
             return false;
         }
 
-        var sourcePort = (ushort)((packet[ipHeaderLength] << 8) | packet[ipHeaderLength + 1]);
+        var sourcePort = (ushort)((packet[udpOffset] << 8) | packet[udpOffset + 1]);
         var imagePath = _portMap?.GetImagePath(sourcePort);
 
         // The hostname is inside the encrypted handshake, so the decision can only be

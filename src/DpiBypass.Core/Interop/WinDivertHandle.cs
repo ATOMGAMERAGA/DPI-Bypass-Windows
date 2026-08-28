@@ -94,10 +94,15 @@ public sealed class WinDivertHandle : IDisposable
         }
 
         var buffer = MemoryMarshal.CreateSpan(ref MemoryMarshal.GetReference(packet), packet.Length);
-        return WinDivertNative.Send(_handle, ref MemoryMarshal.GetReference(buffer), (uint)packet.Length, out _, ref addr);
+        if (!WinDivertNative.Send(_handle, ref MemoryMarshal.GetReference(buffer), (uint)packet.Length, out var sent, ref addr))
+        {
+            return false;
+        }
+
+        return sent == packet.Length;
     }
 
-    public static void CalculateChecksums(Span<byte> packet, ref WinDivertAddress addr)
+    public static bool CalculateChecksums(Span<byte> packet, ref WinDivertAddress addr)
         => WinDivertNative.CalcChecksums(ref MemoryMarshal.GetReference(packet), (uint)packet.Length, ref addr, 0);
 
     public void Shutdown()

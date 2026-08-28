@@ -22,6 +22,8 @@ public sealed record DohEndpoint(string Provider, string Url, IPAddress PlainAdd
 /// </remarks>
 public sealed class DohResolver : IDisposable
 {
+    private const int MaxDnsMessageBytes = 65535;
+
     public static readonly DohEndpoint Cloudflare = new("Cloudflare", "https://1.1.1.1/dns-query", IPAddress.Parse("1.1.1.1"));
     public static readonly DohEndpoint CloudflareSecondary = new("Cloudflare", "https://1.0.0.1/dns-query", IPAddress.Parse("1.0.0.1"));
     public static readonly DohEndpoint Google = new("Google", "https://8.8.8.8/dns-query", IPAddress.Parse("8.8.8.8"));
@@ -40,13 +42,18 @@ public sealed class DohResolver : IDisposable
     private readonly HttpClient _http;
     private readonly IReadOnlyList<DohEndpoint> _chain;
     private readonly TimeSpan _perEndpointTimeout;
+    private readonly TimeSpan _overallTimeout;
     private readonly Dictionary<string, long> _latency = new();
     private readonly Lock _latencyGate = new();
 
-    public DohResolver(IReadOnlyList<DohEndpoint>? chain = null, TimeSpan? perEndpointTimeout = null)
+    public DohResolver(
+        IReadOnlyList<DohEndpoint>? chain = null,
+        TimeSpan? perEndpointTimeout = null,
+        TimeSpan? overallTimeout = null)
     {
         _chain = chain is { Count: > 0 } ? chain : DefaultChain;
         _perEndpointTimeout = perEndpointTimeout ?? TimeSpan.FromSeconds(4);
+        _overallTimeout = overallTimeout ?? TimeSpan.FromSeconds(10);
 
         var handler = new SocketsHttpHandler
         {
@@ -82,12 +89,15 @@ public sealed class DohResolver : IDisposable
     /// <summary>Sends a raw wire-format query through the chain and returns the first good answer.</summary>
     public async Task<byte[]?> QueryAsync(byte[] query, CancellationToken cancellationToken)
     {
+        using var overall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        overall.CancelAfter(_overallTimeout);
+
         foreach (var endpoint in OrderedChain())
         {
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(overall.Token);
                 linked.CancelAfter(_perEndpointTimeout);
 
                 using var content = new ByteArrayContent(query);
@@ -103,8 +113,19 @@ public sealed class DohResolver : IDisposable
                     continue;
                 }
 
+                if (!string.Equals(
+                        response.Content.Headers.ContentType?.MediaType,
+                        "application/dns-message",
+                        StringComparison.OrdinalIgnoreCase)
+                    || response.Content.Headers.ContentLength > MaxDnsMessageBytes)
+                {
+                    RecordLatency(endpoint, TimeSpan.FromSeconds(30));
+                    continue;
+                }
+
+                await response.Content.LoadIntoBufferAsync(MaxDnsMessageBytes, linked.Token).ConfigureAwait(false);
                 var payload = await response.Content.ReadAsByteArrayAsync(linked.Token).ConfigureAwait(false);
-                if (payload.Length < DnsMessage.HeaderLength)
+                if (payload.Length < DnsMessage.HeaderLength || !DnsMessage.IsResponseForQuery(query, payload))
                 {
                     continue;
                 }
@@ -116,6 +137,10 @@ public sealed class DohResolver : IDisposable
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
+            }
+            catch (OperationCanceledException) when (overall.IsCancellationRequested)
+            {
+                return null;
             }
             catch (Exception)
             {

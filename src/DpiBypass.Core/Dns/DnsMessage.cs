@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Net;
 using System.Text;
 
@@ -85,6 +86,99 @@ public static class DnsMessage
             BinaryPrimitives.ReadUInt16BigEndian(message[pos..]),
             BinaryPrimitives.ReadUInt16BigEndian(message[(pos + 2)..]));
         return true;
+    }
+
+    public static bool TryBuildCacheKey(ReadOnlySpan<byte> query, out string key)
+    {
+        key = string.Empty;
+        if (!TryReadQuestion(query, out _))
+        {
+            return false;
+        }
+
+        var normalized = query.ToArray();
+        SetId(normalized, 0);
+        key = Convert.ToBase64String(normalized);
+        return true;
+    }
+
+    public static bool IsResponseForQuery(ReadOnlySpan<byte> query, ReadOnlySpan<byte> response)
+    {
+        if (query.Length < HeaderLength || response.Length < HeaderLength)
+        {
+            return false;
+        }
+
+        var queryFlags = BinaryPrimitives.ReadUInt16BigEndian(query[2..]);
+        var responseFlags = BinaryPrimitives.ReadUInt16BigEndian(response[2..]);
+        if ((queryFlags & 0x8000) != 0
+            || (responseFlags & 0x8000) == 0
+            || (queryFlags & 0x7800) != (responseFlags & 0x7800)
+            || GetId(query) != GetId(response))
+        {
+            return false;
+        }
+
+        if (!TryReadQuestion(query, out var expected) || !TryReadQuestion(response, out var actual))
+        {
+            return false;
+        }
+
+        return string.Equals(expected.Name, actual.Name, StringComparison.OrdinalIgnoreCase)
+            && expected.Type == actual.Type
+            && expected.Class == actual.Class
+            && BinaryPrimitives.ReadUInt16BigEndian(query[4..]) == 1
+            && BinaryPrimitives.ReadUInt16BigEndian(response[4..]) == 1;
+    }
+
+    public static byte[] AgeResponseTtls(ReadOnlySpan<byte> response, TimeSpan age)
+    {
+        var aged = response.ToArray();
+        var elapsed = age <= TimeSpan.Zero ? 0u : (uint)Math.Min(uint.MaxValue, age.TotalSeconds);
+        if (elapsed == 0 || aged.Length < HeaderLength)
+        {
+            return aged;
+        }
+
+        var questionCount = BinaryPrimitives.ReadUInt16BigEndian(aged.AsSpan(4));
+        var answerCount = BinaryPrimitives.ReadUInt16BigEndian(aged.AsSpan(6));
+        var authorityCount = BinaryPrimitives.ReadUInt16BigEndian(aged.AsSpan(8));
+        var additionalCount = BinaryPrimitives.ReadUInt16BigEndian(aged.AsSpan(10));
+        var pos = HeaderLength;
+
+        for (var i = 0; i < questionCount; i++)
+        {
+            if (!TryReadName(aged, ref pos, out _) || pos + 4 > aged.Length)
+            {
+                return aged;
+            }
+
+            pos += 4;
+        }
+
+        var recordCount = answerCount + authorityCount + additionalCount;
+        for (var i = 0; i < recordCount; i++)
+        {
+            if (!TryReadName(aged, ref pos, out _) || pos + 10 > aged.Length)
+            {
+                return aged;
+            }
+
+            var ttlOffset = pos + 4;
+            var ttl = BinaryPrimitives.ReadUInt32BigEndian(aged.AsSpan(ttlOffset));
+            BinaryPrimitives.WriteUInt32BigEndian(aged.AsSpan(ttlOffset), ttl > elapsed ? ttl - elapsed : 0);
+            var dataLength = BinaryPrimitives.ReadUInt16BigEndian(aged.AsSpan(pos + 8));
+            pos += 10;
+
+            if (pos + dataLength > aged.Length)
+            {
+                return aged;
+            }
+
+            pos += dataLength;
+        }
+
+        return aged;
     }
 
     public static IReadOnlyList<DnsResourceRecord> ReadAnswers(ReadOnlySpan<byte> message)
@@ -229,7 +323,7 @@ public static class DnsMessage
 
     public static byte[] EncodeName(string name)
     {
-        var trimmed = name.TrimEnd('.');
+        var trimmed = CanonicalizeName(name);
         if (trimmed.Length == 0)
         {
             return [0];
@@ -239,6 +333,11 @@ public static class DnsMessage
         var length = 1;
         foreach (var label in labels)
         {
+            if (label.Length == 0)
+            {
+                throw new ArgumentException("DNS name contains an empty label.", nameof(name));
+            }
+
             length += 1 + Encoding.ASCII.GetByteCount(label);
         }
 
@@ -258,6 +357,33 @@ public static class DnsMessage
 
         buffer[pos] = 0;
         return buffer;
+    }
+
+    private static string CanonicalizeName(string name)
+    {
+        var trimmed = name.Trim().TrimEnd('.');
+        if (trimmed.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (trimmed.Any(char.IsControl))
+        {
+            throw new ArgumentException("DNS name contains a control character.", nameof(name));
+        }
+
+        if (Uri.TryCreate(trimmed, UriKind.Absolute, out _))
+        {
+            throw new ArgumentException("Expected a hostname, not a URL.", nameof(name));
+        }
+
+        var ascii = new IdnMapping().GetAscii(trimmed).ToLowerInvariant();
+        if (ascii.Length > 253)
+        {
+            throw new ArgumentException("DNS name is too long.", nameof(name));
+        }
+
+        return ascii;
     }
 
     /// <summary>Reads a (possibly compressed) name and advances <paramref name="pos"/> past it.</summary>
@@ -306,6 +432,11 @@ public static class DnsMessage
 
                 cursor = target;
                 continue;
+            }
+
+            if ((length & 0xC0) != 0)
+            {
+                return false;
             }
 
             if (cursor + 1 + length > message.Length)

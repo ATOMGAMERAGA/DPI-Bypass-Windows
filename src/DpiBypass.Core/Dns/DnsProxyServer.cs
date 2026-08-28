@@ -17,12 +17,20 @@ namespace DpiBypass.Core.Dns;
 public sealed class DnsProxyServer : IAsyncDisposable
 {
     private const int MaxUdpResponse = 4096;
+    private const int MaxCacheEntries = 4096;
+    private const int MaxConcurrentQueries = 128;
+    private static readonly TimeSpan MaxStale = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan TcpClientTimeout = TimeSpan.FromSeconds(5);
 
     private readonly DohResolver _resolver;
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
+    private readonly Lock _cacheGate = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly List<Task> _workers = [];
+    private readonly SemaphoreSlim _capacity = new(MaxConcurrentQueries, MaxConcurrentQueries);
+    private readonly ConcurrentDictionary<long, Task> _requests = new();
     private readonly Action<string>? _log;
+    private long _nextRequestId;
 
     private Socket? _udp4;
     private Socket? _udp6;
@@ -57,6 +65,11 @@ public sealed class DnsProxyServer : IAsyncDisposable
     /// <summary>Binds the loopback listeners. Returns false when port 53 is already taken.</summary>
     public bool TryStart(int port = 53)
     {
+        if (IsRunning)
+        {
+            return true;
+        }
+
         Port = port;
         HasIPv6 = false;
 
@@ -142,26 +155,52 @@ public sealed class DnsProxyServer : IAsyncDisposable
             var query = buffer[..received.ReceivedBytes];
             var sender = received.RemoteEndPoint;
 
-            // Do not let one slow upstream lookup stall the whole listener. The whole
-            // body is guarded: a lookup cancelled mid-flight by shutdown would otherwise
-            // fault a task nobody awaits, once per query still in flight.
-            _ = Task.Run(async () =>
+            // Acquire capacity before creating work so a burst cannot build an
+            // unbounded queue of tasks behind the resolver semaphore.
+            if (!_capacity.Wait(0))
             {
                 try
                 {
-                    var answer = await ResolveAsync(query, cancellationToken).ConfigureAwait(false);
-                    if (answer is null)
-                    {
-                        return;
-                    }
-
-                    await socket.SendToAsync(answer, SocketFlags.None, sender, cancellationToken).ConfigureAwait(false);
+                    var failure = BuildServerFailure(query);
+                    await socket.SendToAsync(failure, SocketFlags.None, sender, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
-                    // Shutting down, or the client vanished before we answered.
+                    // Shutting down, or the datagram sender vanished.
                 }
-            }, cancellationToken);
+
+                continue;
+            }
+
+            TrackRequest(HandleUdpQueryAsync(socket, query, sender, cancellationToken));
+        }
+    }
+
+    private async Task HandleUdpQueryAsync(
+        Socket socket,
+        byte[] query,
+        EndPoint sender,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var answer = await ResolveAsync(query, cancellationToken).ConfigureAwait(false);
+            if (answer is not null)
+            {
+                await socket.SendToAsync(answer, SocketFlags.None, sender, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown.
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // A malformed query or abandoned sender affects only this datagram.
+        }
+        finally
+        {
+            _capacity.Release();
         }
     }
 
@@ -189,47 +228,67 @@ public sealed class DnsProxyServer : IAsyncDisposable
                 continue;
             }
 
-            _ = Task.Run(async () =>
+            if (!_capacity.Wait(0))
             {
-                using (client)
+                client.Dispose();
+                continue;
+            }
+
+            TrackRequest(HandleTcpClientAsync(client, cancellationToken));
+        }
+    }
+
+    private async Task HandleTcpClientAsync(Socket client, CancellationToken cancellationToken)
+    {
+        using (client)
+        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            deadline.CancelAfter(TcpClientTimeout);
+            var token = deadline.Token;
+
+            try
+            {
+                var lengthPrefix = new byte[2];
+                if (!await ReadExactAsync(client, lengthPrefix, token).ConfigureAwait(false))
                 {
-                    try
-                    {
-                        var lengthPrefix = new byte[2];
-                        if (!await ReadExactAsync(client, lengthPrefix, cancellationToken).ConfigureAwait(false))
-                        {
-                            return;
-                        }
-
-                        var length = BinaryPrimitives.ReadUInt16BigEndian(lengthPrefix);
-                        if (length is 0 or > MaxUdpResponse)
-                        {
-                            return;
-                        }
-
-                        var query = new byte[length];
-                        if (!await ReadExactAsync(client, query, cancellationToken).ConfigureAwait(false))
-                        {
-                            return;
-                        }
-
-                        var answer = await ResolveAsync(query, cancellationToken).ConfigureAwait(false);
-                        if (answer is null)
-                        {
-                            return;
-                        }
-
-                        var framed = new byte[answer.Length + 2];
-                        BinaryPrimitives.WriteUInt16BigEndian(framed, (ushort)answer.Length);
-                        answer.CopyTo(framed, 2);
-                        await client.SendAsync(framed, SocketFlags.None, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                        // Malformed or abandoned TCP query; drop it.
-                    }
+                    return;
                 }
-            }, cancellationToken);
+
+                var length = BinaryPrimitives.ReadUInt16BigEndian(lengthPrefix);
+                if (length is 0 or > MaxUdpResponse)
+                {
+                    return;
+                }
+
+                var query = new byte[length];
+                if (!await ReadExactAsync(client, query, token).ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                var answer = await ResolveAsync(query, token).ConfigureAwait(false);
+                if (answer is null)
+                {
+                    return;
+                }
+
+                var framed = new byte[answer.Length + 2];
+                BinaryPrimitives.WriteUInt16BigEndian(framed, (ushort)answer.Length);
+                answer.CopyTo(framed, 2);
+                await client.SendAsync(framed, SocketFlags.None, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Client deadline or normal shutdown.
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Malformed, stalled or abandoned TCP query; drop it.
+            }
+            finally
+            {
+                _capacity.Release();
+            }
         }
     }
 
@@ -250,6 +309,20 @@ public sealed class DnsProxyServer : IAsyncDisposable
         return true;
     }
 
+    private void TrackRequest(Task task)
+    {
+        var id = Interlocked.Increment(ref _nextRequestId);
+        _requests[id] = task;
+        _ = task.ContinueWith(
+            _task =>
+            {
+                _requests.TryRemove(id, out _);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
     private async Task<byte[]?> ResolveAsync(byte[] query, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _served);
@@ -260,7 +333,10 @@ public sealed class DnsProxyServer : IAsyncDisposable
         }
 
         var id = DnsMessage.GetId(query);
-        var key = question.CacheKey;
+        if (!DnsMessage.TryBuildCacheKey(query, out var key))
+        {
+            return null;
+        }
 
         // Address lookups only: a PTR or TXT query says nothing about a site the user
         // is trying to reach, and our own ASN lookups run over TXT.
@@ -276,10 +352,12 @@ public sealed class DnsProxyServer : IAsyncDisposable
             }
         }
 
-        if (_cache.TryGetValue(key, out var cached) && cached.Expires > DateTimeOffset.UtcNow)
+        var hasCached = _cache.TryGetValue(key, out var cached);
+        if (hasCached && cached!.Expires > DateTimeOffset.UtcNow)
         {
             Interlocked.Increment(ref _cacheHits);
-            var reply = (byte[])cached.Response.Clone();
+            cached!.Touch();
+            var reply = DnsMessage.AgeResponseTtls(cached.Response, DateTimeOffset.UtcNow - cached.StoredAt);
             DnsMessage.SetId(reply, id);
             return reply;
         }
@@ -289,9 +367,10 @@ public sealed class DnsProxyServer : IAsyncDisposable
         {
             // Serve a stale answer rather than nothing - a slightly old IP beats a
             // dead name lookup while the operator is throttling us.
-            if (cached.Response is not null)
+            if (hasCached && DateTimeOffset.UtcNow - cached!.Expires <= MaxStale)
             {
-                var stale = (byte[])cached.Response.Clone();
+                cached!.Touch();
+                var stale = DnsMessage.AgeResponseTtls(cached.Response, DateTimeOffset.UtcNow - cached.StoredAt);
                 DnsMessage.SetId(stale, id);
                 return stale;
             }
@@ -299,11 +378,20 @@ public sealed class DnsProxyServer : IAsyncDisposable
             return BuildServerFailure(query);
         }
 
+        if (!DnsMessage.IsResponseForQuery(query, response))
+        {
+            return BuildServerFailure(query);
+        }
+
         if (DnsMessage.GetResponseCode(response) == 0)
         {
             var ttl = DnsMessage.GetMinimumTtl(response);
-            _cache[key] = new CacheEntry(response, DateTimeOffset.UtcNow.AddSeconds(ttl));
-            PruneIfLarge();
+            var now = DateTimeOffset.UtcNow;
+            lock (_cacheGate)
+            {
+                _cache[key] = new CacheEntry(response.ToArray(), now.AddSeconds(ttl), now);
+                PruneIfLarge();
+            }
         }
 
         DnsMessage.SetId(response, id);
@@ -325,7 +413,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
     private void PruneIfLarge()
     {
-        if (_cache.Count < 4096)
+        if (_cache.Count < MaxCacheEntries)
         {
             return;
         }
@@ -338,9 +426,29 @@ public sealed class DnsProxyServer : IAsyncDisposable
                 _cache.TryRemove(key, out _);
             }
         }
+
+        if (_cache.Count < MaxCacheEntries)
+        {
+            return;
+        }
+
+        foreach (var key in _cache
+            .OrderBy(pair => pair.Value.LastAccess)
+            .Take(Math.Max(1, _cache.Count - MaxCacheEntries + 1))
+            .Select(pair => pair.Key)
+            .ToList())
+        {
+            _cache.TryRemove(key, out _);
+        }
     }
 
-    public void ClearCache() => _cache.Clear();
+    public void ClearCache()
+    {
+        lock (_cacheGate)
+        {
+            _cache.Clear();
+        }
+    }
 
     private void Cleanup()
     {
@@ -366,8 +474,34 @@ public sealed class DnsProxyServer : IAsyncDisposable
             // Workers are aborted along with their sockets; nothing to report.
         }
 
+        try
+        {
+            await Task.WhenAll(_requests.Values).WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Request handlers share the same cancellation token and closed sockets.
+        }
+
         _stopping.Dispose();
+        if (_requests.IsEmpty)
+        {
+            _capacity.Dispose();
+        }
     }
 
-    private readonly record struct CacheEntry(byte[] Response, DateTimeOffset Expires);
+    private sealed class CacheEntry(byte[] response, DateTimeOffset expires, DateTimeOffset storedAt)
+    {
+        private long _lastAccess = storedAt.UtcTicks;
+
+        public byte[] Response { get; } = response;
+
+        public DateTimeOffset Expires { get; } = expires;
+
+        public DateTimeOffset StoredAt { get; } = storedAt;
+
+        public DateTimeOffset LastAccess => new(Interlocked.Read(ref _lastAccess), TimeSpan.Zero);
+
+        public void Touch() => Interlocked.Exchange(ref _lastAccess, DateTimeOffset.UtcNow.UtcTicks);
+    }
 }
