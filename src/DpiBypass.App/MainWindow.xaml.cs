@@ -218,13 +218,13 @@ public partial class MainWindow : Window
         return viewer.VerticalOffset + viewer.ViewportHeight >= viewer.ExtentHeight - 12;
     }
 
-    private static ScrollViewer? FindDescendantScrollViewer(DependencyObject root)
+    private static System.Windows.Controls.ScrollViewer? FindDescendantScrollViewer(DependencyObject root)
     {
         var count = VisualTreeHelper.GetChildrenCount(root);
         for (var i = 0; i < count; i++)
         {
             var child = VisualTreeHelper.GetChild(root, i);
-            if (child is ScrollViewer viewer)
+            if (child is System.Windows.Controls.ScrollViewer viewer)
             {
                 return viewer;
             }
