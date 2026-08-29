@@ -24,6 +24,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
     private readonly DohResolver _resolver;
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
+    private readonly Lock _cacheGate = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly List<Task> _workers = [];
     private readonly SemaphoreSlim _capacity = new(MaxConcurrentQueries, MaxConcurrentQueries);
@@ -386,8 +387,11 @@ public sealed class DnsProxyServer : IAsyncDisposable
         {
             var ttl = DnsMessage.GetMinimumTtl(response);
             var now = DateTimeOffset.UtcNow;
-            _cache[key] = new CacheEntry(response.ToArray(), now.AddSeconds(ttl), now);
-            PruneIfLarge();
+            lock (_cacheGate)
+            {
+                _cache[key] = new CacheEntry(response.ToArray(), now.AddSeconds(ttl), now);
+                PruneIfLarge();
+            }
         }
 
         DnsMessage.SetId(response, id);
@@ -438,7 +442,13 @@ public sealed class DnsProxyServer : IAsyncDisposable
         }
     }
 
-    public void ClearCache() => _cache.Clear();
+    public void ClearCache()
+    {
+        lock (_cacheGate)
+        {
+            _cache.Clear();
+        }
+    }
 
     private void Cleanup()
     {

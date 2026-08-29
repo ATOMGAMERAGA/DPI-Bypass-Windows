@@ -24,14 +24,25 @@ namespace DpiBypass.Core.Engine;
 public sealed class BypassEngine : IDisposable
 {
     /// <summary>
-    /// The kernel side filter. Narrow on purpose - the driver drops everything else
-    /// before it ever reaches user mode.
+    /// The preferred kernel filter. It mirrors the user-mode handshake checks so
+    /// established HTTP/HTTPS payload does not cross the user-mode packet path.
     /// </summary>
+    private const string HandshakeFilter =
+        "outbound and tcp and ("
+        + "(tcp.DstPort == 443 and tcp.PayloadLength >= 6 and tcp.Payload[0] == 0x16 and tcp.Payload[5] == 0x01)"
+        + " or (tcp.DstPort == 80 and tcp.PayloadLength >= 5 and ("
+        + "tcp.Payload[0] == 0x47 or tcp.Payload[0] == 0x50 or tcp.Payload[0] == 0x48 or tcp.Payload[0] == 0x44"
+        + " or tcp.Payload[0] == 0x4F or tcp.Payload[0] == 0x54 or tcp.Payload[0] == 0x43))"
+        + ")";
+
+    /// <summary>Fallbacks for WinDivert builds that reject payload indexing.</summary>
     private const string TcpFilter =
         "outbound and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
     private const string TcpFilterV6 =
         "outbound and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+
+    internal static IReadOnlyList<string> TcpFilterLadder => [HandshakeFilter, TcpFilter, TcpFilterV6];
 
     /// <summary>
     /// Only QUIC long header packets with an Initial type reach user mode. Filtering
@@ -168,14 +179,45 @@ public sealed class BypassEngine : IDisposable
 
     private WinDivertHandle OpenWithFallback()
     {
+        WinDivertException? last = null;
+
+        foreach (var filter in TcpFilterLadder)
+        {
+            if (!Compiles(filter))
+            {
+                _log?.Invoke("Filter rejected by the WinDivert parser; trying a simpler fallback.");
+                continue;
+            }
+
+            try
+            {
+                var handle = WinDivertHandle.Open(filter, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+                _log?.Invoke(filter == HandshakeFilter
+                    ? "Kernel filter: handshakes only."
+                    : "Kernel filter fallback: all HTTP/HTTPS payload packets.");
+                return handle;
+            }
+            catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+            {
+                last = ex;
+                _log?.Invoke("Packet filter rejected; trying a simpler fallback.");
+            }
+        }
+
+        throw last ?? new WinDivertException(87, "No TCP packet filter was accepted by WinDivert.");
+    }
+
+    private static bool Compiles(string filter)
+    {
         try
         {
-            return WinDivertHandle.Open(TcpFilter, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+            return WinDivertHandle.TryCompileFilter(filter, WinDivertLayer.Network, out _);
         }
-        catch (WinDivertException ex) when (ex.NativeErrorCode == 87)
+        catch (Exception)
         {
-            _log?.Invoke("Primary filter rejected; retrying without the IPv4 clause.");
-            return WinDivertHandle.Open(TcpFilterV6, WinDivertLayer.Network, 1000, WinDivertFlags.None);
+            // Older or incomplete DLL payloads may not expose the helper. Let Open
+            // produce the authoritative failure instead of blocking startup here.
+            return true;
         }
     }
 
