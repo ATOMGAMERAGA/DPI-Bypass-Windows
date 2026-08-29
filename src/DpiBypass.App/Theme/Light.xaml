@@ -2,23 +2,44 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- Own palette rather than the theme's internal keys, so the app looks the same
-         on every Windows build and nothing depends on private resource names. -->
+         on every Windows build and nothing depends on private resource names.
+         Dark.xaml has to define the exact same key set; the XAML resource test
+         enforces that. -->
+
+    <!-- Surfaces -->
     <SolidColorBrush x:Key="AppWindowBackgroundBrush" Color="#F3F4F7" />
+    <SolidColorBrush x:Key="AppElevatedBackgroundBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="AppCardBackgroundBrush" Color="#FBFBFD" />
     <SolidColorBrush x:Key="AppCardBorderBrush" Color="#E1E3E9" />
     <SolidColorBrush x:Key="AppCardHoverBorderBrush" Color="#C7CBD5" />
     <SolidColorBrush x:Key="AppHeroBackgroundBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="AppHeroBorderBrush" Color="#D8DFEB" />
     <SolidColorBrush x:Key="AppSubtleBackgroundBrush" Color="#EDEEF3" />
+    <SolidColorBrush x:Key="AppCodeBackgroundBrush" Color="#F0F1F5" />
+    <SolidColorBrush x:Key="AppDividerBrush" Color="#E4E6EC" />
+
+    <!-- Text -->
     <SolidColorBrush x:Key="AppTextPrimaryBrush" Color="#111C2E" />
     <SolidColorBrush x:Key="AppTextSecondaryBrush" Color="#5A6273" />
+    <SolidColorBrush x:Key="AppTextTertiaryBrush" Color="#6C7383" />
+
+    <!-- Accent -->
     <SolidColorBrush x:Key="AppAccentBrush" Color="#2F7EF0" />
+    <SolidColorBrush x:Key="AppAccentHoverBrush" Color="#4A8CF2" />
+    <SolidColorBrush x:Key="AppAccentPressedBrush" Color="#2768C8" />
     <SolidColorBrush x:Key="AppAccentSoftBrush" Color="#E4EEFE" />
+    <SolidColorBrush x:Key="AppFocusStrokeBrush" Color="#2F7EF0" />
+
+    <!-- Status -->
     <SolidColorBrush x:Key="AppSuccessBrush" Color="#12894A" />
+    <SolidColorBrush x:Key="AppSuccessSoftBrush" Color="#E2F4E8" />
     <SolidColorBrush x:Key="AppWarningBrush" Color="#B4690E" />
+    <SolidColorBrush x:Key="AppWarningSoftBrush" Color="#FBF0DC" />
     <SolidColorBrush x:Key="AppDangerBrush" Color="#C0392E" />
+    <SolidColorBrush x:Key="AppDangerSoftBrush" Color="#FBE9E7" />
     <SolidColorBrush x:Key="AppNeutralBrush" Color="#9AA1AF" />
-    <SolidColorBrush x:Key="AppCodeBackgroundBrush" Color="#F0F1F5" />
+
+    <!-- Controls -->
     <SolidColorBrush x:Key="AppToggleOffBrush" Color="#D4D7DE" />
     <SolidColorBrush x:Key="AppToggleThumbBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="AppOnAccentTextBrush" Color="#FFFFFF" />

@@ -1,8 +1,55 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
+    <!--
+      Design system for the main window. Everything visual key belongs here or to
+      the palettes; controls never embed a colour or metric of their own. Brushes
+      are reached through DynamicResource so a live palette swap repaints the whole
+      window without rebuilding it.
+    -->
+
+    <!-- ======== Geometry: small stroke icons, drawn on a 24x24 grid. ========
+         Kept as vector resources rather than a font dependency, so they render
+         identically on Windows 10 (no Segoe Fluent Icons) and Windows 11. -->
+    <Geometry x:Key="IconShieldGeometry">M 12,3 L 19,5.5 L 19,11 C 19,15.8 16,19.6 12,21 C 8,19.6 5,15.8 5,11 L 5,5.5 Z</Geometry>
+    <Geometry x:Key="IconLayersGeometry">M 12,3 L 21,8 L 12,13 L 3,8 Z M 3,12 L 12,17 L 21,12 M 3,16 L 12,21 L 21,16</Geometry>
+    <Geometry x:Key="IconGlobeGeometry">M 12,3 A 9,9 0 1 0 12,21 A 9,9 0 1 0 12,3 M 3,12 L 21,12 M 12,3 C 8.5,6.5 8.5,17.5 12,21 C 15.5,17.5 15.5,6.5 12,3</Geometry>
+    <Geometry x:Key="IconSignalGeometry">M 4,9.5 A 12,12 0 0 1 20,9.5 M 7,13 A 8,8 0 0 1 17,13 M 10,16.5 A 4,4 0 0 1 14,16.5 M 11.2,19.5 A 0.8,0.8 0 1 0 12.8,19.5 A 0.8,0.8 0 1 0 11.2,19.5</Geometry>
+    <Geometry x:Key="IconSlidersGeometry">M 4,7 L 12,7 M 16,7 L 20,7 M 16,4.5 L 16,9.5 M 4,17 L 8,17 M 12,17 L 20,17 M 12,14.5 L 12,19.5</Geometry>
+    <Geometry x:Key="IconLogGeometry">M 6,3 L 14,3 L 18,7 L 18,21 L 6,21 Z M 14,3 L 14,7 L 18,7 M 9,12 L 15,12 M 9,16 L 15,16</Geometry>
+    <Geometry x:Key="IconChevronDownGeometry">M 6,9 L 12,15 L 18,9</Geometry>
+    <Geometry x:Key="IconCheckGeometry">M 5,12.5 L 10,17.5 L 19,7</Geometry>
+    <Geometry x:Key="IconWarningGeometry">M 12,4 L 21,19 L 3,19 Z M 12,10 L 12,14.5 M 11.3,17 A 0.7,0.7 0 1 0 12.7,17 A 0.7,0.7 0 1 0 11.3,17</Geometry>
+    <Geometry x:Key="IconSearchGeometry">M 10.5,4 A 6.5,6.5 0 1 0 10.51,4 Z M 15.3,15.3 L 20,20</Geometry>
+    <Geometry x:Key="IconCloseGeometry">M 6,6 L 18,18 M 18,6 L 6,18</Geometry>
+
+    <!-- Stroke icon defaults: uniform scale, round joins, theme-driven colour. -->
+    <Style x:Key="StrokeIconStyle" TargetType="Path">
+        <Setter Property="Width" Value="18" />
+        <Setter Property="Height" Value="18" />
+        <Setter Property="Stretch" Value="Uniform" />
+        <Setter Property="Stroke" Value="{DynamicResource AppTextSecondaryBrush}" />
+        <Setter Property="StrokeThickness" Value="1.6" />
+        <Setter Property="StrokeStartLineCap" Value="Round" />
+        <Setter Property="StrokeEndLineCap" Value="Round" />
+        <Setter Property="StrokeLineJoin" Value="Round" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!-- Navigation rail icon; lights up in the accent colour for the selected page. -->
+    <Style x:Key="NavIconStyle" TargetType="Path" BasedOn="{StaticResource StrokeIconStyle}">
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=TabItem}}" Value="True">
+                <Setter Property="Stroke" Value="{DynamicResource AppAccentBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
     <CornerRadius x:Key="CardCornerRadius">12</CornerRadius>
+    <CornerRadius x:Key="TileCornerRadius">8</CornerRadius>
     <CornerRadius x:Key="PillCornerRadius">14</CornerRadius>
+
+    <!-- ======== Cards and panels ======== -->
 
     <Style x:Key="CardStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppCardBackgroundBrush}" />
@@ -21,39 +68,109 @@
     <Style x:Key="HeroCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
         <Setter Property="Background" Value="{DynamicResource AppHeroBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppHeroBorderBrush}" />
-        <Setter Property="Padding" Value="18,14" />
+        <Setter Property="Padding" Value="20,18" />
     </Style>
 
-    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer">
-        <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
-        <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
-        <Setter Property="Padding" Value="0,0,6,0" />
-        <Setter Property="Opacity" Value="1" />
-        <Setter Property="RenderTransform">
-            <Setter.Value>
-                <TranslateTransform Y="0" />
-            </Setter.Value>
-        </Setter>
+    <!-- A quiet stat tile: one label and one value, used in rows of the status page. -->
+    <Style x:Key="InfoTileStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+        <Setter Property="CornerRadius" Value="{StaticResource TileCornerRadius}" />
+        <Setter Property="Padding" Value="14,10" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+    </Style>
+
+    <!-- Monospace read-out panel for machine output (probe results, counters). -->
+    <Style x:Key="MonoPanelStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource AppCodeBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="{StaticResource TileCornerRadius}" />
+        <Setter Property="Padding" Value="14,11" />
+    </Style>
+
+    <!-- The compact top bar and the footer strip. Both stay transparent so Mica
+         shows through; the surrounding hairline separates them from the body. -->
+    <Style x:Key="ChromeBorderStyle" TargetType="Border">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppDividerBrush}" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+    </Style>
+
+    <!-- Severity-reactive status pill for the top bar. Severity is "ok", "warn" or
+         "off"; the shape and the colour both change so state is never colour-only. -->
+    <Style x:Key="StatusPillBorderStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppDividerBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="{StaticResource PillCornerRadius}" />
+        <Setter Property="Padding" Value="12,6" />
         <Style.Triggers>
-            <EventTrigger RoutedEvent="Loaded">
-                <BeginStoryboard>
-                    <Storyboard>
-                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                         From="0.82" To="1" Duration="0:0:0.18" />
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(TranslateTransform.Y)"
-                                         From="6" To="0" Duration="0:0:0.18">
-                            <DoubleAnimation.EasingFunction>
-                                <CubicEase EasingMode="EaseOut" />
-                            </DoubleAnimation.EasingFunction>
-                        </DoubleAnimation>
-                    </Storyboard>
-                </BeginStoryboard>
-            </EventTrigger>
+            <DataTrigger Binding="{Binding StatusSeverity}" Value="ok">
+                <Setter Property="Background" Value="{DynamicResource AppSuccessSoftBrush}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding StatusSeverity}" Value="warn">
+                <Setter Property="Background" Value="{DynamicResource AppWarningSoftBrush}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource AppWarningBrush}" />
+            </DataTrigger>
         </Style.Triggers>
     </Style>
 
+    <!-- The pill's marker glyph: shield while off, check when ok, warning when warn. -->
+    <Style x:Key="StatusPillIconStyle" TargetType="Path" BasedOn="{StaticResource StrokeIconStyle}">
+        <Setter Property="Width" Value="14" />
+        <Setter Property="Height" Value="14" />
+        <Setter Property="Data" Value="{StaticResource IconShieldGeometry}" />
+        <Setter Property="Stroke" Value="{DynamicResource AppNeutralBrush}" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding StatusSeverity}" Value="ok">
+                <Setter Property="Data" Value="{StaticResource IconCheckGeometry}" />
+                <Setter Property="Stroke" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding StatusSeverity}" Value="warn">
+                <Setter Property="Data" Value="{StaticResource IconWarningGeometry}" />
+                <Setter Property="Stroke" Value="{DynamicResource AppWarningBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- The hero status marker on the status page: a tinted disc plus glyph. -->
+    <Style x:Key="StatusHeroDiscStyle" TargetType="Border">
+        <Setter Property="Width" Value="44" />
+        <Setter Property="Height" Value="44" />
+        <Setter Property="CornerRadius" Value="22" />
+        <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding StatusSeverity}" Value="ok">
+                <Setter Property="Background" Value="{DynamicResource AppSuccessSoftBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding StatusSeverity}" Value="warn">
+                <Setter Property="Background" Value="{DynamicResource AppWarningSoftBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="StatusHeroIconStyle" TargetType="Path" BasedOn="{StaticResource StatusPillIconStyle}">
+        <Setter Property="Width" Value="22" />
+        <Setter Property="Height" Value="22" />
+    </Style>
+
+    <!-- A card that reads as a caution rather than a plain panel: used for the
+         settings that change how packets leave the machine system-wide. -->
+    <Style x:Key="NoticeCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
+        <Setter Property="Background" Value="{DynamicResource AppWarningSoftBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppWarningBrush}" />
+        <Setter Property="Padding" Value="14" />
+    </Style>
+
+    <Style x:Key="NoticeTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
+    </Style>
+
+    <!-- ======== Typography ======== -->
+
     <Style x:Key="PageTitleStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="22" />
+        <Setter Property="FontSize" Value="21" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
         <Setter Property="Margin" Value="0,0,0,4" />
@@ -79,6 +196,11 @@
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
     </Style>
 
+    <Style x:Key="HintStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="FontSize" Value="11.5" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextTertiaryBrush}" />
+    </Style>
+
     <Style x:Key="MonospaceStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyStyle}">
         <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New" />
         <Setter Property="FontSize" Value="12" />
@@ -89,63 +211,245 @@
         <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
 
-    <!-- Left hand navigation. The Fluent theme styles the control chrome; this only
-         changes the layout from tabs across the top to a vertical rail. -->
+    <Style x:Key="InfoTileLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource HintStyle}">
+        <Setter Property="Margin" Value="0" />
+    </Style>
+
+    <Style x:Key="InfoTileValueStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Margin" Value="0,3,0,0" />
+    </Style>
+
+    <!-- A transient one-line result ("added", "removed"). Takes no space until it
+         has something to say, so the layout does not jump around. The severity key
+         on the view model ("ok" / "error" / "") picks the colour; the wording
+         carries the meaning either way. -->
+    <Style x:Key="StatusLineStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppAccentBrush}" />
+        <Style.Triggers>
+            <Trigger Property="Text" Value="">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+            <DataTrigger Binding="{Binding DomainStatusSeverity}" Value="ok">
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding DomainStatusSeverity}" Value="error">
+                <Setter Property="Foreground" Value="{DynamicResource AppDangerBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- ======== Navigation rail ======== -->
+
     <Style x:Key="NavTabControlStyle" TargetType="TabControl">
         <Setter Property="TabStripPlacement" Value="Left" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="Padding" Value="20,0,0,0" />
+        <!-- Padding becomes the content area's margin around the pages. -->
+        <Setter Property="Padding" Value="18,14,20,14" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabControl">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.Column="0"
+                                Width="212"
+                                Background="Transparent"
+                                SnapsToDevicePixels="True">
+                            <TabPanel IsItemsHost="True" Margin="12,6,10,12" />
+                        </Border>
+                        <Border Grid.Column="1"
+                                Width="1"
+                                Margin="0,10"
+                                Background="{DynamicResource AppDividerBrush}" />
+                        <ContentPresenter Grid.Column="2"
+                                          ContentSource="SelectedContent"
+                                          Margin="{TemplateBinding Padding}"
+                                          SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="NavTabItemStyle" TargetType="TabItem">
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
         <Setter Property="FontSize" Value="13" />
-        <Setter Property="Padding" Value="14,11" />
-        <Setter Property="Margin" Value="0,0,0,4" />
-        <Setter Property="HorizontalContentAlignment" Value="Left" />
+        <Setter Property="Margin" Value="0,0,0,2" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
-                    <Grid>
-                        <Border x:Name="Chrome"
-                                Background="Transparent"
-                                CornerRadius="6"
-                                Padding="{TemplateBinding Padding}"
-                                MinWidth="160">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="3" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Border x:Name="Marker"
-                                        Grid.Column="0"
-                                        Width="3"
-                                        CornerRadius="2"
-                                        Background="Transparent"
-                                        VerticalAlignment="Stretch" />
-                                <ContentPresenter Grid.Column="1"
-                                                  Margin="10,0,0,0"
-                                                  VerticalAlignment="Center"
-                                                  ContentSource="Header"
-                                                  TextBlock.FontSize="13" />
-                            </Grid>
-                        </Border>
-                    </Grid>
+                    <Border x:Name="Chrome"
+                            Background="Transparent"
+                            BorderBrush="Transparent"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            MinHeight="38"
+                            Padding="10,8"
+                            SnapsToDevicePixels="True">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <!-- Selection pill. It keeps its width when off so the
+                                 labels of every item line up. -->
+                            <Border x:Name="Pill"
+                                    Grid.Column="0"
+                                    Width="3"
+                                    Height="16"
+                                    Margin="0,0,11,0"
+                                    CornerRadius="2"
+                                    Background="Transparent"
+                                    VerticalAlignment="Center" />
+                            <ContentPresenter Grid.Column="1"
+                                              VerticalAlignment="Center"
+                                              ContentSource="Header"
+                                              RecognizesAccessKey="True"
+                                              TextBlock.FontSize="13" />
+                        </Grid>
+                    </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
                         </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+                            <Setter Property="Opacity" Value="0.85" />
+                        </Trigger>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
-                            <Setter TargetName="Marker" Property="Background" Value="{DynamicResource AppAccentBrush}" />
+                            <Setter TargetName="Pill" Property="Background" Value="{DynamicResource AppAccentBrush}" />
                             <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
                             <Setter Property="FontWeight" Value="SemiBold" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.45" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- ======== Buttons ======== -->
+
+    <Style x:Key="PrimaryActionButtonStyle" TargetType="Button">
+        <Setter Property="Foreground" Value="{DynamicResource AppOnAccentTextBrush}" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Padding" Value="22,10" />
+        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Chrome"
+                            Background="{DynamicResource AppAccentBrush}"
+                            BorderBrush="Transparent"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="{TemplateBinding Padding}"
+                            SnapsToDevicePixels="True">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentHoverBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentPressedBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppNeutralBrush}" />
+                            <Setter TargetName="Chrome" Property="Opacity" Value="0.55" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="SecondaryActionButtonStyle" TargetType="Button">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Padding" Value="16,8" />
+        <Setter Property="MinHeight" Value="34" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Chrome"
+                            Background="{DynamicResource AppCardBackgroundBrush}"
+                            BorderBrush="{DynamicResource AppCardBorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="{TemplateBinding Padding}"
+                            SnapsToDevicePixels="True">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppCardHoverBorderBrush}" />
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Chrome" Property="Opacity" Value="0.5" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Small square button for a single glyph. Its whole job is one icon, so the
+         caller must set ToolTip and AutomationProperties.Name - there is no text
+         to fall back on. -->
+    <Style x:Key="GhostIconButtonStyle" TargetType="Button" BasedOn="{StaticResource SecondaryActionButtonStyle}">
+        <Setter Property="Width" Value="32" />
+        <Setter Property="Height" Value="32" />
+        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+    </Style>
+
+    <!-- ======== Lists ======== -->
+
+    <Style x:Key="PlainListStyle" TargetType="ListBox">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+        <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
+        <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
+        <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
+    </Style>
+
+    <Style x:Key="MonospaceListStyle" TargetType="ListBox" BasedOn="{StaticResource PlainListStyle}">
+        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New" />
+        <Setter Property="FontSize" Value="12" />
     </Style>
 
     <!-- A list whose items are selectable cards, which is how Windows 11 settings
@@ -156,12 +460,16 @@
         <Setter Property="Padding" Value="0" />
         <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
+        <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Standard" />
+        <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
     </Style>
 
     <Style x:Key="ChoiceCardStyle" TargetType="ListBoxItem">
         <Setter Property="Margin" Value="0,0,0,8" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ListBoxItem">
@@ -169,7 +477,7 @@
                             Background="{DynamicResource AppCardBackgroundBrush}"
                             BorderBrush="{DynamicResource AppCardBorderBrush}"
                             BorderThickness="1"
-                            CornerRadius="6"
+                            CornerRadius="{StaticResource TileCornerRadius}"
                             Padding="14,12"
                             SnapsToDevicePixels="True">
                         <Grid>
@@ -201,58 +509,29 @@
                             <Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource AppAccentBrush}" />
                             <Setter TargetName="Dot" Property="Visibility" Value="Visible" />
                         </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5" />
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
     </Style>
 
-    <!-- A transient one-line result ("added", "removed"). Takes no space until it
-         has something to say, so the layout does not jump around. -->
-    <Style x:Key="StatusLineStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
-        <Setter Property="Foreground" Value="{DynamicResource AppAccentBrush}" />
-        <Style.Triggers>
-            <Trigger Property="Text" Value="">
-                <Setter Property="Visibility" Value="Collapsed" />
-            </Trigger>
-        </Style.Triggers>
-    </Style>
-
-    <!-- A card that reads as a caution rather than a plain panel: used for the
-         settings that change how packets leave the machine system-wide. -->
-    <Style x:Key="NoticeCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
-        <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource AppWarningBrush}" />
-        <Setter Property="Padding" Value="14" />
-    </Style>
-
-    <Style x:Key="NoticeTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
-        <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
-    </Style>
-
-    <!-- Plain rows on the window background; the surrounding card supplies the frame. -->
-    <Style x:Key="PlainListStyle" TargetType="ListBox">
-        <Setter Property="Background" Value="Transparent" />
-        <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="Padding" Value="0" />
-        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
-        <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
-    </Style>
-
-    <Style x:Key="MonospaceListStyle" TargetType="ListBox" BasedOn="{StaticResource PlainListStyle}">
-        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New" />
-        <Setter Property="FontSize" Value="12" />
-    </Style>
-
     <Style x:Key="DomainRowStyle" TargetType="ListBoxItem">
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="Padding" Value="10,7" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ListBoxItem">
                     <Border x:Name="Chrome"
                             Background="Transparent"
+                            BorderBrush="Transparent"
+                            BorderThickness="1"
                             CornerRadius="5"
                             Padding="{TemplateBinding Padding}"
                             SnapsToDevicePixels="True">
@@ -264,6 +543,9 @@
                         </Trigger>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -281,6 +563,23 @@
     <Style x:Key="TagTextStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="11" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+    </Style>
+
+    <!-- Recommended marker on a choice card. Calm by design: a hairline outline,
+         accent text, and never larger than the title beside it. -->
+    <Style x:Key="RecommendedTagBorderStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="9" />
+        <Setter Property="Padding" Value="8,2" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="RecommendedTagTextStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppAccentBrush}" />
     </Style>
 
     <Style x:Key="BetaBadgeStyle" TargetType="Border">
@@ -302,15 +601,18 @@
         <Setter Property="Background" Value="{DynamicResource AppCodeBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="CornerRadius" Value="{StaticResource TileCornerRadius}" />
         <Setter Property="Padding" Value="14,11" />
     </Style>
+
+    <!-- ======== Switch ======== -->
 
     <!-- A Windows 11-style switch with a full clickable label and keyboard focus. -->
     <Style x:Key="SwitchStyle" TargetType="CheckBox">
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
         <Setter Property="FontSize" Value="13" />
         <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
@@ -350,7 +652,7 @@
                             <Setter TargetName="Track" Property="Opacity" Value="0.86" />
                         </Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="Track" Property="BorderBrush" Value="{DynamicResource AppTextPrimaryBrush}" />
+                            <Setter TargetName="Track" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
                             <Setter TargetName="Track" Property="BorderThickness" Value="2" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
@@ -363,33 +665,87 @@
         </Setter>
     </Style>
 
-    <Style x:Key="PrimaryActionButtonStyle" TargetType="Button">
-        <Setter Property="Foreground" Value="{DynamicResource AppOnAccentTextBrush}" />
-        <Setter Property="FontSize" Value="14" />
-        <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Padding" Value="22,11" />
-        <Setter Property="Cursor" Value="Hand" />
+    <!-- ======== Expander for the advanced/risky settings group ======== -->
+
+    <Style x:Key="AdvancedExpanderStyle" TargetType="Expander">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Setter Property="ExpandDirection" Value="Down" />
         <Setter Property="Template">
             <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Border x:Name="Chrome"
-                            Background="{DynamicResource AppAccentBrush}"
-                            CornerRadius="6"
-                            Padding="{TemplateBinding Padding}"
-                            SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
+                <ControlTemplate TargetType="Expander">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <ToggleButton Grid.Row="0"
+                                      IsChecked="{Binding IsExpanded, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                      Content="{TemplateBinding Header}"
+                                      HorizontalContentAlignment="Stretch"
+                                      HorizontalAlignment="Stretch"
+                                      Cursor="Hand">
+                            <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                    <Border x:Name="Chrome"
+                                            Background="Transparent"
+                                            BorderBrush="Transparent"
+                                            BorderThickness="1"
+                                            CornerRadius="6"
+                                            Padding="2,4"
+                                            SnapsToDevicePixels="True">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <ContentPresenter Grid.Column="0" VerticalAlignment="Center" ContentSource="Content" RecognizesAccessKey="True" />
+                                            <Path x:Name="Chevron"
+                                                  Grid.Column="1"
+                                                  Data="{StaticResource IconChevronDownGeometry}"
+                                                  Width="14"
+                                                  Height="14"
+                                                  Stretch="Uniform"
+                                                  Stroke="{DynamicResource AppTextSecondaryBrush}"
+                                                  StrokeThickness="1.8"
+                                                  StrokeStartLineCap="Round"
+                                                  StrokeEndLineCap="Round"
+                                                  StrokeLineJoin="Round"
+                                                  Margin="10,0,2,0"
+                                                  VerticalAlignment="Center"
+                                                  RenderTransformOrigin="0.5,0.5">
+                                                <Path.RenderTransform>
+                                                    <RotateTransform Angle="0" />
+                                                </Path.RenderTransform>
+                                            </Path>
+                                        </Grid>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsChecked" Value="True">
+                                            <Setter TargetName="Chevron" Property="RenderTransform">
+                                                <Setter.Value>
+                                                    <RotateTransform Angle="180" />
+                                                </Setter.Value>
+                                            </Setter>
+                                        </Trigger>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+                                        </Trigger>
+                                        <Trigger Property="IsKeyboardFocused" Value="True">
+                                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </ToggleButton.Template>
+                        </ToggleButton>
+                        <ContentPresenter x:Name="ContentSite"
+                                          Grid.Row="1"
+                                          ContentSource="Content"
+                                          Visibility="Collapsed"
+                                          Margin="0,14,0,0" />
+                    </Grid>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Chrome" Property="Opacity" Value="0.88" />
-                        </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Chrome" Property="Opacity" Value="0.70" />
-                            <Setter Property="Padding" Value="22,12,22,10" />
-                        </Trigger>
-                        <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppNeutralBrush}" />
-                            <Setter TargetName="Chrome" Property="Opacity" Value="0.6" />
+                        <Trigger Property="IsExpanded" Value="True">
+                            <Setter TargetName="ContentSite" Property="Visibility" Value="Visible" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -397,38 +753,37 @@
         </Setter>
     </Style>
 
-    <Style x:Key="SecondaryActionButtonStyle" TargetType="Button">
-        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
-        <Setter Property="FontSize" Value="13" />
-        <Setter Property="Padding" Value="16,9" />
-        <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="Template">
+    <!-- ======== Page transitions ======== -->
+
+    <!-- Page entrance: a short fade with a small rise. Purely directional; the
+         window turns it off when Windows reports that client area animation is
+         disabled (MainWindow removes the triggers on start-up). -->
+    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer">
+        <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+        <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
+        <Setter Property="Padding" Value="0,0,6,0" />
+        <Setter Property="Opacity" Value="1" />
+        <Setter Property="RenderTransform">
             <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Border x:Name="Chrome"
-                            Background="{DynamicResource AppCardBackgroundBrush}"
-                            BorderBrush="{DynamicResource AppCardBorderBrush}"
-                            BorderThickness="1"
-                            CornerRadius="6"
-                            Padding="{TemplateBinding Padding}"
-                            SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
-                    <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Chrome" Property="Opacity" Value="0.72" />
-                        </Trigger>
-                        <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="Chrome" Property="Opacity" Value="0.5" />
-                        </Trigger>
-                    </ControlTemplate.Triggers>
-                </ControlTemplate>
+                <TranslateTransform Y="0" />
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <EventTrigger RoutedEvent="Loaded">
+                <BeginStoryboard>
+                    <Storyboard>
+                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                         From="0.82" To="1" Duration="0:0:0.18" />
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(TranslateTransform.Y)"
+                                         From="6" To="0" Duration="0:0:0.18">
+                            <DoubleAnimation.EasingFunction>
+                                <CubicEase EasingMode="EaseOut" />
+                            </DoubleAnimation.EasingFunction>
+                        </DoubleAnimation>
+                    </Storyboard>
+                </BeginStoryboard>
+            </EventTrigger>
+        </Style.Triggers>
     </Style>
 
 </ResourceDictionary>

@@ -31,6 +31,20 @@ public partial class MainWindow : Window
         ThemeMode = ThemeMode.System;
 #pragma warning restore WPF0001
 
+        if (!SystemParameters.ClientAreaAnimation)
+        {
+            // The page entrance is decorative; the system-wide animation switch wins.
+            try
+            {
+                ((Style)Application.Current.Resources["PageSurfaceStyle"]).Triggers.Clear();
+            }
+            catch (Exception ex)
+            {
+                // Losing this only keeps a 180ms fade; say so and carry on.
+                AppLog.Error("Sayfa geçiş animasyonu kapatılamadı", ex);
+            }
+        }
+
         if (_theme is not null)
         {
             _theme.ThemeChanged += OnThemeChanged;
@@ -136,8 +150,9 @@ public partial class MainWindow : Window
     private void OnPersonalisationChanged() => EnsureBackgroundIsPainted();
 
     /// <summary>
-    /// Keeps the tail of the log in view, the way a console would - once per batch of
-    /// new lines rather than once per line.
+    /// Keeps the tail of the log in view the way a console would - once per batch of
+    /// new lines rather than once per line, and only while the user is actually
+    /// reading the tail.
     /// </summary>
     /// <remarks>
     /// <see cref="System.Windows.Controls.ListBox.ScrollIntoView"/> forces a layout
@@ -147,6 +162,13 @@ public partial class MainWindow : Window
     /// lasts, and a dispatcher that is never idle is a window that never paints - the
     /// blank rectangle that looks like a hung application. Coalescing to one scroll
     /// per idle moment keeps the behaviour and drops the cost.
+    /// <para>
+    /// A reader who has scrolled up is reading history; yanking them back down with
+    /// every burst makes the page unusable exactly when there is a lot to read. So the
+    /// batch scroll fires only when the tail is already on screen (or the list has
+    /// never overflowed, which is the same thing). Scrolling back to the bottom is the
+    /// user's own action, and the next batch then follows again.
+    /// </para>
     /// </remarks>
     private void OnLogLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
@@ -161,11 +183,60 @@ public partial class MainWindow : Window
         {
             _scrollPending = false;
 
-            if (LogList.Items.Count > 0)
+            if (LogList.Items.Count == 0 || !UserFollowsLogTail())
             {
-                LogList.ScrollIntoView(LogList.Items[^1]);
+                return;
             }
+
+            LogList.ScrollIntoView(LogList.Items[^1]);
         }));
+    }
+
+    /// <summary>
+    /// Whether the log's last line is on screen, i.e. whether new lines may scroll.
+    /// The viewer is looked up per batch rather than cached: the page only realises
+    /// its template when first visited, and a template rebuild would strand a cached
+    /// reference.
+    /// </summary>
+    private bool UserFollowsLogTail()
+    {
+        var viewer = FindDescendantScrollViewer(LogList);
+
+        // Not in the visual tree yet (page never visited): nothing to measure, and
+        // the console behaviour the window has always had is the right default.
+        if (viewer is null)
+        {
+            return true;
+        }
+
+        // Content that fits has no reading position to protect.
+        if (viewer.ExtentHeight <= viewer.ViewportHeight + 1)
+        {
+            return true;
+        }
+
+        return viewer.VerticalOffset + viewer.ViewportHeight >= viewer.ExtentHeight - 12;
+    }
+
+    private static ScrollViewer? FindDescendantScrollViewer(DependencyObject root)
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is ScrollViewer viewer)
+            {
+                return viewer;
+            }
+
+            var found = FindDescendantScrollViewer(child);
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     private void OnExitClicked(object sender, RoutedEventArgs e)

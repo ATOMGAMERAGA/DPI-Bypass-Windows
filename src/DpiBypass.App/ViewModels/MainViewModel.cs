@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Windows;
+using System.Windows.Data;
 using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.Core;
@@ -24,7 +27,7 @@ public sealed record StrategyOption(string? Id, string Display, string Descripti
     public override string ToString() => Display;
 }
 
-public sealed record ScopeOption(ProtectionScope Scope, string Title, string Description);
+public sealed record ScopeOption(ProtectionScope Scope, string Title, string Description, bool IsRecommended = false);
 
 /// <summary>Where a protected domain came from, so the UI can say so.</summary>
 public enum DomainOrigin
@@ -88,7 +91,6 @@ public sealed class MainViewModel : ObservableObject
     private string _dnsSummary = "-";
     private string _discordSummary = "Aranıyor…";
     private string _browserSummary = "Aranıyor…";
-    private bool _tuningInProgress;
     private IspOption _selectedIsp;
     private StrategyOption _selectedStrategy;
     private DnsOption _selectedDns;
@@ -102,6 +104,9 @@ public sealed class MainViewModel : ObservableObject
     private bool _isLatencyBusy;
     private string _latencyStatusLine = "Kapalı.";
     private string _domainStatus = string.Empty;
+    private string _domainStatusSeverity = string.Empty;
+    private string _domainFilter = string.Empty;
+    private bool _isTuning;
     private bool _suppressPersist;
 
     public MainViewModel(ProtectionService service, Dispatcher dispatcher)
@@ -109,6 +114,11 @@ public sealed class MainViewModel : ObservableObject
         _service = service;
         _dispatcher = dispatcher;
         _autoStart = new AutoStartManager(log: AppLog.InfoSink);
+
+        // Created before the first RefreshDomains so its raise finds the view in
+        // place. The view reads Domains and never owns it.
+        FilteredDomains = CollectionViewSource.GetDefaultView(Domains);
+        FilteredDomains.Filter = FilterDomain;
 
         IspOptions = [new IspOption(null, "Otomatik algıla (önerilen)")];
         foreach (var profile in IspCatalog.All)
@@ -149,9 +159,10 @@ public sealed class MainViewModel : ObservableObject
                 "Sadece Discord uygulamasının ve Discord alan adlarının trafiği işlenir. En düşük etki."),
             new ScopeOption(
                 ProtectionScope.BlockedSites,
-                "Engelli site listesi (önerilen)",
+                "Engelli site listesi",
                 "Discord ve Türkiye'de engellendiği bilinen diğer siteler, hangi program açarsa açsın korunur. "
-                    + "Yeni engelli siteler kendiliğinden bulunup listeye eklenir."),
+                    + "Yeni engelli siteler kendiliğinden bulunup listeye eklenir.",
+                IsRecommended: true),
             new ScopeOption(
                 ProtectionScope.DiscordAndBrowsers,
                 "Engelli siteler + tarayıcılar",
@@ -184,7 +195,7 @@ public sealed class MainViewModel : ObservableObject
 
         ToggleCommand = new AsyncRelayCommand(ToggleAsync);
         TestCommand = new AsyncRelayCommand(TestAsync);
-        RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !_tuningInProgress);
+        RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !IsTuning);
         TestAllCommand = new AsyncRelayCommand(TestAllAsync);
         LatencyTestCommand = new AsyncRelayCommand(TestLatencyAsync, () => !_isLatencyBusy);
         LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
@@ -192,6 +203,9 @@ public sealed class MainViewModel : ObservableObject
         AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
         ForgetTtlNetworkCommand = new RelayCommand(ForgetSelectedTtlNetwork, () => _selectedTtlNetwork is not null);
+        ClearDomainFilterCommand = new RelayCommand(() => DomainFilter = string.Empty, () => HasFilter);
+        CopyLogCommand = new RelayCommand(CopyLogToClipboard);
+        ClearLogCommand = new RelayCommand(ClearLogView);
 
         _service.Changed += OnServiceChanged;
         _service.HostRewritten += OnHostRewritten;
@@ -257,6 +271,12 @@ public sealed class MainViewModel : ObservableObject
 
     public RelayCommand ForgetTtlNetworkCommand { get; }
 
+    public RelayCommand ClearDomainFilterCommand { get; }
+
+    public RelayCommand CopyLogCommand { get; }
+
+    public RelayCommand ClearLogCommand { get; }
+
     public string ProductTitle => AppPaths.ProductName;
 
     public string AuthorLine => $"Geliştirici: {AppPaths.Author}";
@@ -293,6 +313,19 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
+
+    /// <summary>A strategy sweep is measuring on the network; the retune action is out.</summary>
+    public bool IsTuning
+    {
+        get => _isTuning;
+        private set
+        {
+            if (Set(ref _isTuning, value))
+            {
+                RetuneCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
 
     public string ToggleCaption => _isRunning ? "Korumayı durdur" : "Korumayı başlat";
 
@@ -587,6 +620,46 @@ public sealed class MainViewModel : ObservableObject
 
     public string DomainStatus { get => _domainStatus; private set => Set(ref _domainStatus, value); }
 
+    /// <summary>"ok", "error" or "" - the colour of <see cref="DomainStatus"/>; the wording stays the source of truth.</summary>
+    public string DomainStatusSeverity { get => _domainStatusSeverity; private set => Set(ref _domainStatusSeverity, value); }
+
+    /// <summary>Text the domain list is narrowed by. Empty shows everything.</summary>
+    public string DomainFilter
+    {
+        get => _domainFilter;
+        set
+        {
+            if (!Set(ref _domainFilter, value))
+            {
+                return;
+            }
+
+            // The predicate reads the field, so one refresh re-runs it. The list
+            // itself stays virtualised; only its rows change.
+            FilteredDomains.Refresh();
+            Raise(nameof(HasFilter));
+            Raise(nameof(DomainsViewEmpty));
+        }
+    }
+
+    public bool HasFilter => !string.IsNullOrWhiteSpace(_domainFilter);
+
+    /// <summary>
+    /// The domain list as the filter narrows it. The underlying collection stays
+    /// complete, so the engine's learned-domain events need no extra bookkeeping.
+    /// </summary>
+    public ICollectionView FilteredDomains { get; }
+
+    /// <summary>Nothing survives the current filter (or the list is empty) - drives the empty state.</summary>
+    public bool DomainsViewEmpty => FilteredDomains.IsEmpty;
+
+    private bool FilterDomain(object item)
+    {
+        return item is DomainEntry entry
+            && (string.IsNullOrWhiteSpace(_domainFilter)
+                || entry.Domain.Contains(_domainFilter.Trim(), StringComparison.OrdinalIgnoreCase));
+    }
+
     public string DomainSummary =>
         $"{Domains.Count} alan adı korunuyor · {Domains.Count(d => d.Origin == DomainOrigin.Learned)} tanesi kendiliğinden bulundu";
 
@@ -623,10 +696,12 @@ public sealed class MainViewModel : ObservableObject
 
         if (!_service.AddDomain(domain))
         {
+            DomainStatusSeverity = "error";
             DomainStatus = $"'{domain.Trim()}' zaten korunuyor ya da geçerli bir alan adı değil.";
             return;
         }
 
+        DomainStatusSeverity = "ok";
         DomainStatus = $"'{domain.Trim().ToLowerInvariant()}' eklendi. Alt alan adları da kapsanır.";
         NewDomain = string.Empty;
         RefreshDomains();
@@ -639,7 +714,9 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        DomainStatus = _service.RemoveDomain(entry.Domain)
+        var removed = _service.RemoveDomain(entry.Domain);
+        DomainStatusSeverity = removed ? "ok" : "error";
+        DomainStatus = removed
             ? $"'{entry.Domain}' artık korunmuyor."
             : $"'{entry.Domain}' çıkarılamadı.";
 
@@ -677,6 +754,7 @@ public sealed class MainViewModel : ObservableObject
 
         SelectedDomain = null;
         Raise(nameof(DomainSummary));
+        Raise(nameof(DomainsViewEmpty));
     }
 
     // --- Vodafone sınırsız modu ----------------------------------------------
@@ -902,8 +980,7 @@ public sealed class MainViewModel : ObservableObject
 
     private async Task RetuneAsync()
     {
-        _tuningInProgress = true;
-        RetuneCommand.RaiseCanExecuteChanged();
+        IsTuning = true;
         TuningStatus = "Yöntemler ölçülüyor…";
 
         try
@@ -915,8 +992,7 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
-            _tuningInProgress = false;
-            RetuneCommand.RaiseCanExecuteChanged();
+            IsTuning = false;
         }
     }
 
@@ -994,6 +1070,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         RefreshDomains();
+        DomainStatusSeverity = "ok";
         DomainStatus = $"Yeni engelli site bulundu ve eklendi: {domain}";
     }
 
@@ -1177,6 +1254,35 @@ public sealed class MainViewModel : ObservableObject
         {
             AppLog.Error("Günlük klasörü açılamadı", ex);
         }
+    }
+
+    /// <summary>
+    /// Copies the on-screen log view to the clipboard. The clipboard can be briefly
+    /// owned by another process, so a refusal is logged rather than thrown - the log
+    /// file is untouched either way.
+    /// </summary>
+    private void CopyLogToClipboard()
+    {
+        try
+        {
+            Clipboard.SetText(string.Join(Environment.NewLine, LogLines));
+            AppLog.Info($"Günlük görünümündeki {LogLines.Count} satır panoya kopyalandı.");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Günlük panoya kopyalanamadı", ex);
+        }
+    }
+
+    /// <summary>
+    /// Clears the on-screen view only. The file on disk keeps every line, which is
+    /// what the page caption says; pending lines queued for display are dropped with
+    /// the view so "temizle" does what it says.
+    /// </summary>
+    private void ClearLogView()
+    {
+        _pendingLogLines.Clear();
+        LogLines.Clear();
     }
 
     public void Detach()
