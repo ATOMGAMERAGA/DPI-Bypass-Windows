@@ -1,0 +1,388 @@
+using System.Net.NetworkInformation;
+using DpiBypass.Core.Network;
+
+namespace DpiBypass.Tests.Latency;
+
+/// <summary>Builders for the values the latency tests are written in terms of.</summary>
+internal static class Fake
+{
+    /// <summary>
+    /// A distinct network per suffix. The gateway is derived from the name because
+    /// <see cref="NetworkFingerprint.Key"/> is built from it, and two fixtures that
+    /// accidentally shared a key would silently be the same network to the optimizer.
+    /// </summary>
+    public static NetworkFingerprint Network(string suffix, bool online = true) => new()
+    {
+        AdapterId = $"adapter-{suffix}",
+        AdapterName = $"Intel {suffix}",
+        AdapterType = NetworkInterfaceType.Ethernet,
+        InterfaceIndex = online ? 10 : 0,
+        GatewayAddress = online ? $"192.0.2.{(suffix.Sum(character => character) % 200) + 1}" : null,
+    };
+
+    public static AdapterLatencyCapability Capability(NetworkFingerprint network, params string[] powerProperties)
+    {
+        powerProperties = powerProperties.Length == 0 ? ["SelectiveSuspend"] : powerProperties;
+
+        return new AdapterLatencyCapability
+        {
+            AdapterId = network.AdapterId!,
+            AdapterName = network.AdapterName!,
+            AdapterType = network.AdapterType,
+            IsPhysical = true,
+            IsVirtual = false,
+            IsUp = true,
+            PowerManagement = powerProperties.ToDictionary(property => property, _ => 2, StringComparer.OrdinalIgnoreCase),
+        };
+    }
+
+    /// <summary>A measurement with a plausible shape; only what a test names is varied.</summary>
+    public static LatencyMeasurement Measurement(
+        double median,
+        double jitter = 3,
+        double? p95 = null,
+        double? p99 = null,
+        double loss = 0,
+        string endpoint = "1.1.1.1",
+        LatencyLoadState load = LatencyLoadState.Idle,
+        double gateway = 1.2) => new()
+        {
+            MeasuredAt = DateTimeOffset.UtcNow,
+            RemoteEndpoint = endpoint,
+            Protocol = "ICMP",
+            RemoteAttempts = 24,
+            RemoteReplies = (int)Math.Round(24 * (100 - loss) / 100),
+            GatewayAttempts = 8,
+            GatewayReplies = 8,
+            MinimumRttMs = Math.Max(0.1, median - 3),
+            MedianRttMs = median,
+            P95RttMs = p95 ?? median + 9,
+            P99RttMs = p99 ?? (p95 ?? median + 9) + 4,
+            JitterMs = jitter,
+            PacketLossPercent = loss,
+            GatewayMedianRttMs = gateway,
+            GatewayP95RttMs = gateway + 0.5,
+            Load = Load(load),
+        };
+
+    public static NetworkLoadSample Load(LatencyLoadState state) => state switch
+    {
+        LatencyLoadState.Unknown => NetworkLoadSample.Unknown,
+        LatencyLoadState.Idle => new NetworkLoadSample { State = state, UplinkKbps = 12, DownlinkKbps = 40 },
+        LatencyLoadState.UplinkLoaded => new NetworkLoadSample { State = state, UplinkKbps = 9000, DownlinkKbps = 40 },
+        LatencyLoadState.DownlinkLoaded => new NetworkLoadSample { State = state, UplinkKbps = 12, DownlinkKbps = 45000 },
+        _ => new NetworkLoadSample { State = state, UplinkKbps = 9000, DownlinkKbps = 45000 },
+    };
+
+    public static LatencyOptimizationCandidate Candidate(string property = "SelectiveSuspend", bool cpuSensitive = false) => new()
+    {
+        Kind = LatencySettingKind.PowerManagement,
+        PropertyName = property,
+        OriginalPowerValue = 2,
+        DesiredPowerValue = 1,
+        CpuSensitive = cpuSensitive,
+        Description = property,
+    };
+
+    public static LatencyOptimizationSnapshot Snapshot(
+        string adapterId,
+        string property,
+        LatencySettingKind kind = LatencySettingKind.PowerManagement,
+        LatencyTransactionState state = LatencyTransactionState.Committed) => new()
+        {
+            AdapterId = adapterId,
+            AdapterName = adapterId,
+            NetworkKey = "network",
+            CreatedAt = DateTimeOffset.UtcNow,
+            State = state,
+            Settings =
+            [
+                new LatencySettingSnapshot
+                {
+                    AdapterId = adapterId,
+                    AdapterName = adapterId,
+                    Kind = kind,
+                    PropertyName = property,
+                    OriginalPowerValue = kind == LatencySettingKind.PowerManagement ? 2 : null,
+                    OriginalValues = kind == LatencySettingKind.AdvancedProperty ? ["1"] : [],
+                    AppliedDescription = property,
+                    CapturedAt = DateTimeOffset.UtcNow,
+                },
+            ],
+        };
+
+    public static IReadOnlyList<LatencyPair> Pairs(params (double Baseline, double Candidate)[] medians) =>
+    [
+        .. medians.Select(pair => new LatencyPair
+        {
+            Baseline = Measurement(pair.Baseline),
+            Candidate = Measurement(pair.Candidate),
+        }),
+    ];
+}
+
+/// <summary>
+/// An adapter that remembers what is currently written to it.
+/// </summary>
+/// <remarks>
+/// The live state is the point: a paired A/B test is only meaningful against a probe
+/// whose answer depends on what is applied right now, so the two doubles share this set
+/// rather than replaying a fixed script of measurements.
+/// </remarks>
+internal sealed class FakeController : ILatencyAdapterController
+{
+    private int _concurrentApplies;
+
+    public string[] PowerProperties { get; init; } = ["SelectiveSuspend"];
+
+    /// <summary>Property whose apply throws, simulating a driver error mid-run.</summary>
+    public string? ThrowOnApply { get; init; }
+
+    /// <summary>Property the driver silently declines to write.</summary>
+    public string? RefuseApply { get; init; }
+
+    public TimeSpan ApplyDelay { get; init; }
+
+    public LatencyRestoreOutcome RestoreOutcome { get; init; } = LatencyRestoreOutcome.Restored;
+
+    /// <summary>Null makes the adapter disappear, as a driver update or unplug would.</summary>
+    public Func<NetworkFingerprint, AdapterLatencyCapability?>? Detect { get; init; }
+
+    /// <summary>The values currently written to the adapter.</summary>
+    public HashSet<string> Live { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public List<string> Applied { get; } = [];
+
+    public List<string> Restored { get; } = [];
+
+    public List<string> Events { get; } = [];
+
+    public int MaxConcurrentApplies { get; private set; }
+
+    /// <summary>Called as the write reaches the adapter, for ordering assertions.</summary>
+    public Action<string>? OnApply { get; set; }
+
+    public Task<AdapterLatencyCapability?> DetectAsync(
+        NetworkFingerprint network,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(Detect is null
+            ? Fake.Capability(network, PowerProperties)
+            : Detect(network));
+
+    public async Task<LatencyApplyResult> ApplyAsync(
+        AdapterLatencyCapability adapter,
+        LatencyOptimizationCandidate candidate,
+        CancellationToken cancellationToken = default)
+    {
+        var concurrent = Interlocked.Increment(ref _concurrentApplies);
+        MaxConcurrentApplies = Math.Max(MaxConcurrentApplies, concurrent);
+        Applied.Add(candidate.PropertyName);
+        Events.Add($"{adapter.AdapterId}:{candidate.PropertyName}");
+        OnApply?.Invoke(candidate.PropertyName);
+
+        try
+        {
+            if (ApplyDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(ApplyDelay, cancellationToken);
+            }
+
+            if (candidate.PropertyName == ThrowOnApply)
+            {
+                throw new InvalidOperationException("driver apply failed");
+            }
+
+            if (candidate.PropertyName == RefuseApply)
+            {
+                return new LatencyApplyResult(false, "sürücü değeri canlı uygulamadı");
+            }
+
+            Live.Add(candidate.PropertyName);
+            return new LatencyApplyResult(true);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _concurrentApplies);
+        }
+    }
+
+    public Task<LatencyRestoreOutcome> RestoreAsync(
+        LatencySettingSnapshot setting,
+        CancellationToken cancellationToken = default)
+    {
+        Restored.Add(setting.PropertyName);
+        Events.Add($"restore:{setting.AdapterId}:{setting.PropertyName}");
+
+        if (RestoreOutcome is LatencyRestoreOutcome.Restored or LatencyRestoreOutcome.AlreadyOriginal)
+        {
+            Live.Remove(setting.PropertyName);
+        }
+
+        return Task.FromResult(RestoreOutcome);
+    }
+}
+
+/// <summary>A probe whose answer is a function of what the controller has applied.</summary>
+internal sealed class FakeProbe : ILatencyProbe
+{
+    private readonly Func<IReadOnlySet<string>, int, LatencyMeasurement> _measure;
+    private readonly FakeController _controller;
+
+    public FakeProbe(FakeController controller, Func<IReadOnlySet<string>, int, LatencyMeasurement> measure)
+    {
+        _controller = controller;
+        _measure = measure;
+    }
+
+    /// <summary>A link nothing changes: every measurement is the same.</summary>
+    public static FakeProbe Flat(FakeController controller, double median = 25)
+        => new(controller, (_, _) => Fake.Measurement(median));
+
+    /// <summary>A link where one property really does help, by a repeatable amount.</summary>
+    public static FakeProbe Improves(
+        FakeController controller,
+        string property = "SelectiveSuspend",
+        double median = 26,
+        double gain = 5)
+        => new(controller, (live, _) => live.Contains(property)
+            ? Fake.Measurement(median - gain, jitter: 2.2, p95: median - gain + 6)
+            : Fake.Measurement(median, jitter: 3.4, p95: median + 9));
+
+    public List<string> Requests { get; } = [];
+
+    public int Measurements { get; private set; }
+
+    public LatencyConnectivity Connectivity { get; init; } = new(true, true);
+
+    /// <summary>Set to make connectivity fail only once a property is applied.</summary>
+    public string? BreaksConnectivity { get; init; }
+
+    public Task<LatencyMeasurement> MeasureAsync(
+        NetworkFingerprint network,
+        LatencyProbeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Requests.Add(request.RemoteEndpoint ?? "(survey)");
+
+        var measurement = _measure(_controller.Live, Measurements);
+        Measurements++;
+        return Task.FromResult(measurement);
+    }
+
+    public Task<LatencyConnectivity> CheckConnectivityAsync(
+        NetworkFingerprint network,
+        string remoteEndpoint,
+        CancellationToken cancellationToken = default)
+    {
+        if (BreaksConnectivity is not null && _controller.Live.Contains(BreaksConnectivity))
+        {
+            return Task.FromResult(new LatencyConnectivity(false, false));
+        }
+
+        return Task.FromResult(Connectivity);
+    }
+}
+
+internal sealed class FakeSnapshotStore : ILatencySnapshotStore
+{
+    public LatencyOptimizationSnapshot? Value { get; set; }
+
+    public List<LatencyTransactionState> States { get; } = [];
+
+    /// <summary>Called on every write, for ordering assertions.</summary>
+    public Action<LatencyOptimizationSnapshot>? OnSave { get; set; }
+
+    public Task<LatencyOptimizationSnapshot?> LoadAsync(CancellationToken cancellationToken = default)
+        => Task.FromResult(Clone(Value));
+
+    public Task SaveAsync(LatencyOptimizationSnapshot snapshot, CancellationToken cancellationToken = default)
+    {
+        Value = Clone(snapshot);
+        States.Add(snapshot.State);
+        OnSave?.Invoke(snapshot);
+        return Task.CompletedTask;
+    }
+
+    public Task ClearAsync(CancellationToken cancellationToken = default)
+    {
+        Value = null;
+        return Task.CompletedTask;
+    }
+
+    private static LatencyOptimizationSnapshot? Clone(LatencyOptimizationSnapshot? snapshot) => snapshot is null
+        ? null
+        : snapshot with
+        {
+            Settings = [.. snapshot.Settings.Select(setting => setting with { OriginalValues = [.. setting.OriginalValues] })],
+        };
+}
+
+internal sealed class FakeProfileStore : ILatencyProfileStore
+{
+    public List<LatencyProfile> Profiles { get; } = [];
+
+    public Task<LatencyProfile?> FindAsync(string networkKey, string adapterId, CancellationToken cancellationToken = default)
+        => Task.FromResult(Profiles.FirstOrDefault(profile =>
+            profile.NetworkKey == networkKey
+            && string.Equals(profile.AdapterId, adapterId, StringComparison.OrdinalIgnoreCase)));
+
+    public Task SaveAsync(LatencyProfile profile, CancellationToken cancellationToken = default)
+    {
+        Profiles.RemoveAll(entry => entry.NetworkKey == profile.NetworkKey
+            && string.Equals(entry.AdapterId, profile.AdapterId, StringComparison.OrdinalIgnoreCase));
+        Profiles.Add(profile);
+        return Task.CompletedTask;
+    }
+
+    public Task RemoveAsync(string networkKey, string adapterId, CancellationToken cancellationToken = default)
+    {
+        Profiles.RemoveAll(entry => entry.NetworkKey == networkKey
+            && string.Equals(entry.AdapterId, adapterId, StringComparison.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>Wires one optimizer up with doubles that share the adapter's live state.</summary>
+internal sealed class LatencyScenario
+{
+    public LatencyScenario(
+        FakeController? controller = null,
+        FakeProbe? probe = null,
+        LatencyOptimizerOptions? options = null,
+        FakeProfileStore? profiles = null,
+        Func<DateTimeOffset>? now = null)
+    {
+        Controller = controller ?? new FakeController();
+        Probe = probe ?? FakeProbe.Flat(Controller);
+        Profiles = profiles ?? new FakeProfileStore();
+
+        Optimizer = new LatencyOptimizer(
+            Controller,
+            Probe,
+            Snapshots,
+            log: line => Logs.Add(line),
+            profiles: Profiles,
+            options: options ?? new LatencyOptimizerOptions { MinimumCycles = 2, MaximumCycles = 3 },
+            now: now);
+    }
+
+    public FakeController Controller { get; }
+
+    public FakeProbe Probe { get; }
+
+    public FakeSnapshotStore Snapshots { get; } = new();
+
+    public FakeProfileStore Profiles { get; }
+
+    /// <summary>Everything the run logged, so the operational events can be asserted.</summary>
+    public List<string> Logs { get; } = [];
+
+    public LatencyOptimizer Optimizer { get; }
+
+    public static LatencyScenario WithImprovement(double gain = 5)
+    {
+        var controller = new FakeController();
+        return new LatencyScenario(controller, FakeProbe.Improves(controller, gain: gain));
+    }
+}

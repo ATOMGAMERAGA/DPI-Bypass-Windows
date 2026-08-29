@@ -93,10 +93,14 @@
         </Border>
 
         <!-- ======================= Body ======================= -->
-        <TabControl Grid.Row="1" Style="{StaticResource NavTabControlStyle}">
+        <TabControl Grid.Row="1"
+                    x:Name="NavigationTabs"
+                    Style="{StaticResource NavTabControlStyle}"
+                    SelectionChanged="OnNavigationSelectionChanged">
 
             <!-- ============ Durum ============ -->
-            <TabItem Style="{StaticResource NavTabItemStyle}">
+            <TabItem Style="{StaticResource NavTabItemStyle}"
+                     AutomationProperties.Name="Durum">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconShieldGeometry}" />
@@ -237,7 +241,8 @@
             </TabItem>
 
             <!-- ============ Kapsam ============ -->
-            <TabItem Style="{StaticResource NavTabItemStyle}">
+            <TabItem Style="{StaticResource NavTabItemStyle}"
+                     AutomationProperties.Name="Kapsam">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLayersGeometry}" />
@@ -304,7 +309,8 @@
             </TabItem>
 
             <!-- ============ Siteler ============ -->
-            <TabItem Style="{StaticResource NavTabItemStyle}">
+            <TabItem Style="{StaticResource NavTabItemStyle}"
+                     AutomationProperties.Name="Siteler">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconGlobeGeometry}" />
@@ -465,7 +471,8 @@
             </TabItem>
 
             <!-- ============ Ağ ve yöntem ============ -->
-            <TabItem Style="{StaticResource NavTabItemStyle}">
+            <TabItem Style="{StaticResource NavTabItemStyle}"
+                     AutomationProperties.Name="Ağ ve yöntem">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSignalGeometry}" />
@@ -571,7 +578,8 @@
             </TabItem>
 
             <!-- ============ DNS ve ayarlar ============ -->
-            <TabItem Style="{StaticResource NavTabItemStyle}">
+            <TabItem Style="{StaticResource NavTabItemStyle}"
+                     AutomationProperties.Name="DNS ve ayarlar">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSlidersGeometry}" />
@@ -658,7 +666,7 @@
                                 </StackPanel>
 
                                 <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Text="Aktif ağ bağdaştırıcısında güvenli düşük-gecikme optimizasyonlarını ölçerek uygular. Fayda sağlamayan veya bağlantıyı kötüleştiren değişiklikler otomatik geri alınır." />
+                                           Text="Her ayar tek tek, eşli A/B turlarıyla ölçülür: ayarsız ölç, ayarı uygula, tekrar ölç, geri al — ve bu birkaç kez. Bir ayar yalnızca median, p95, p99 veya jitter kazancı turlar boyunca tekrarlandığında kalır. Kazanç yoksa, kayıp arttıysa ya da bağlantı bozulduysa özgün değerler anında geri yüklenir." />
 
                                 <CheckBox Content="Ping düşürmeyi etkinleştir"
                                           Margin="0,16,0,0"
@@ -691,91 +699,74 @@
 
                                 <TextBlock Style="{StaticResource CaptionStyle}"
                                            Margin="0,10,0,0"
-                                           Text="IP, DHCP, gateway, DNS, IPv6, WinDivert ve Vodafone TTL kuralları bu özellik tarafından değiştirilmez." />
+                                           TextWrapping="Wrap"
+                                           Text="Yalnızca bağdaştırıcının geri alınabilir ayarları değiştirilir; IP, DHCP, gateway, DNS, IPv6, TCP kayıt defteri ayarları ve paket yolu bu özellik tarafından değiştirilmez. Oyun ve ses trafiği normal Windows ağ yolunda kalır." />
                             </StackPanel>
                         </Border>
 
-                        <!-- ===== Vodafone sınırsız modu ===== -->
+                        <!-- ===== Mobil hotspot uyumluluğu ve tanılama ===== -->
                         <Border Style="{StaticResource CardStyle}">
-                            <Expander Style="{StaticResource AdvancedExpanderStyle}">
-                                <Expander.Header>
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="Vodafone sınırsız modu (hotspot TTL düzeltmesi)"
-                                                   Style="{StaticResource SectionTitleStyle}"
-                                                   Margin="0"
-                                                   VerticalAlignment="Center" />
-                                        <Path Data="{StaticResource IconWarningGeometry}"
-                                              Width="15"
-                                              Height="15"
-                                              Stretch="Uniform"
-                                              Margin="10,1,0,0"
-                                              VerticalAlignment="Center"
-                                              Stroke="{DynamicResource AppWarningBrush}"
-                                              StrokeThickness="1.6"
-                                              StrokeStartLineCap="Round"
-                                              StrokeEndLineCap="Round"
-                                              StrokeLineJoin="Round"
-                                              ToolTip="Bu mod operatör sözleşmenizin kullanım koşullarına aykırıdır."
-                                              AutomationProperties.Name="Uyarı" />
-                                    </StackPanel>
-                                </Expander.Header>
-                                <StackPanel>
-                                    <TextBlock Style="{StaticResource CaptionStyle}"
-                                               Text="Vodafone'un sınırsız tarifelerinde mobil veri sınırsızdır, ancak paylaşım (hotspot) ayrı bir kotadan düşer. Operatör paylaşımı paketin TTL değerinden anlar: telefonun kendi trafiği 64 ile ulaşırken bilgisayardan gelen paket 63 olarak varır. Bu mod paketleri 65 ile yollar; telefon bir düşürünce operatöre tam 64 gider." />
+                            <StackPanel>
+                                <TextBlock Text="Mobil hotspot uyumluluğu ve tanılama"
+                                           Style="{StaticResource SectionTitleStyle}"
+                                           Margin="0,0,0,8" />
 
-                                    <CheckBox Content="Bu ağda sınırsız modunu aç"
-                                              Margin="0,14,0,0"
-                                              Style="{StaticResource SwitchStyle}"
-                                              IsChecked="{Binding HotspotTtlFix, Mode=TwoWay}" />
-                                    <TextBlock Text="{Binding TtlStatusLine}"
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Text="Telefon paylaşımı ve mobil veri bağlantılarını inceler: IPv4/IPv6 adresi ve erişimi, DNS, gecikme ve kayıp, MTU sorunu, operatör NAT'ı ve etkin VPN. Yalnızca okur; hiçbir ayarı, paketi veya kuralı değiştirmez." />
+
+                                <CheckBox Content="Ağ değiştiğinde bağlantıyı kendiliğinden incele"
+                                          Margin="0,16,0,0"
+                                          Style="{StaticResource SwitchStyle}"
+                                          IsChecked="{Binding HotspotDiagnostics, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="26,4,0,0"
+                                           Text="Başka bir ağa geçildiğinde kısa bir inceleme çalıştırır ve sonucu günlüğe yazar. Kapalıyken yalnızca “Tanıla” düğmesiyle çalışır." />
+
+                                <ProgressBar Height="3"
+                                             Margin="0,14,0,0"
+                                             IsIndeterminate="{Binding IsHotspotBusy}"
+                                             Background="{DynamicResource AppSubtleBackgroundBrush}"
+                                             Foreground="{DynamicResource AppAccentBrush}" />
+
+                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,10,0,0">
+                                    <TextBlock Text="{Binding HotspotStatusLine}"
                                                Style="{StaticResource MonospaceStyle}"
-                                               Margin="26,6,0,0" />
+                                               TextWrapping="Wrap" />
+                                </Border>
 
-                                    <CheckBox Content="Paylaşılan bağdaştırıcıda IPv6'yı engelle (önerilen)"
-                                              Margin="0,12,0,0"
-                                              Style="{StaticResource SwitchStyle}"
-                                              IsChecked="{Binding HotspotDropIPv6, Mode=TwoWay}" />
-                                    <TextBlock Style="{StaticResource CaptionStyle}"
-                                               Margin="26,4,0,0"
-                                               Text="Telefon tethering yaparken bilgisayara kendi global IPv6 adresini verir; o zaman operatör aynı aboneden iki farklı kaynak görür ve TTL ne olursa olsun paylaşım anlaşılır." />
-
-                                    <TextBlock Text="Modun etkin olduğu ağlar" Style="{StaticResource FieldLabelStyle}" Margin="0,16,0,4" />
-                                    <TextBlock Style="{StaticResource CaptionStyle}"
-                                               Margin="0,0,0,6"
-                                               Text="Mod yalnızca burada listelenen ağlarda çalışır. Ev Wi-Fi'ına geçtiğinizde kural kendiliğinden kalkar, telefona döndüğünüzde geri gelir." />
-                                    <Border Style="{StaticResource MonoPanelStyle}" Padding="6">
-                                        <ListBox Style="{StaticResource MonospaceListStyle}"
-                                                 ItemContainerStyle="{StaticResource DomainRowStyle}"
-                                                 MaxHeight="140"
-                                                 ItemsSource="{Binding TtlNetworks}"
-                                                 DisplayMemberPath="Display"
-                                                 SelectedItem="{Binding SelectedTtlNetwork, Mode=TwoWay}" />
-                                    </Border>
-                                    <Button Content="Seçili ağı unut"
-                                            MinWidth="150"
-                                            Margin="0,8,0,0"
-                                            HorizontalAlignment="Left"
+                                <WrapPanel Margin="0,12,0,0">
+                                    <Button Content="Tanıla"
+                                            MinWidth="130"
+                                            Margin="0,0,8,0"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding ForgetTtlNetworkCommand}" />
+                                            Command="{Binding HotspotDiagnoseCommand}" />
+                                    <Button Content="Eski yapılandırmayı temizle"
+                                            MinWidth="220"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding HotspotCleanupCommand}" />
+                                </WrapPanel>
 
-                                    <Border Style="{StaticResource NoticeCardStyle}" Margin="0,16,0,0">
-                                        <StackPanel>
-                                            <TextBlock Style="{StaticResource NoticeTextStyle}"
-                                                       Text="Bu mod operatör sözleşmenizin kullanım koşullarına aykırıdır. Otomatik sayacı atlatır, ancak çok yüksek kullanım adil kullanım incelemesine takılabilir — orada TTL'in bir etkisi olmaz. Sorumluluk kullanıcıya aittir." />
-                                            <TextBlock Style="{StaticResource CaptionStyle}"
-                                                       Margin="0,8,0,0"
-                                                       Text="Atlatma bozulmaz: düşük TTL'li (2-8) sahte paketler kasıtlı olarak yolda ölür, bu yüzden TTL yeniden yazımı yalnızca 32'nin üstündeki paketlere uygulanır." />
-                                        </StackPanel>
-                                    </Border>
-                                </StackPanel>
-                            </Expander>
+                                <Border Style="{StaticResource NoticeCardStyle}" Margin="0,16,0,0">
+                                    <StackPanel>
+                                        <TextBlock Style="{StaticResource NoticeTextStyle}"
+                                                   Text="Eski &quot;Vodafone sınırsız modu&quot; (hotspot TTL yeniden yazımı) kaldırıldı. Operatörün paylaşım sayacını atlatmayı amaçlıyordu; bu abonelik koşullarına aykırıydı ve uygulamanın çözebileceği bir sorun değil." />
+                                        <TextBlock Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,8,0,0"
+                                                   Text="Eski sürümden gelen ayar dosyaları her açılışta otomatik olarak temizlenir: TTL yeniden yazımı kapatılır, kayıtlı ağ listesi silinir ve yerine bu tanılama açılır. Yedekten dönen veya elle düzenlenen bir dosya da modu geri getiremez." />
+                                        <TextBlock Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,8,0,0"
+                                                   Text="Plan / hotspot hakkınız TTL, SSID, operatör adı, APN veya IP aralığından anlaşılamaz; uygulama tahmin etmek yerine &quot;Bilinmiyor&quot; der." />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
 
             <!-- ============ Günlük ============ -->
-            <TabItem Style="{StaticResource NavTabItemStyle}">
+            <TabItem Style="{StaticResource NavTabItemStyle}"
+                     AutomationProperties.Name="Günlük">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLogGeometry}" />

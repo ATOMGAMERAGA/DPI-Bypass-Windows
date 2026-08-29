@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
 using DpiBypass.Core.Logging;
-using DpiBypass.Core.Vodafone;
+using DpiBypass.Core.MobileHotspot;
 
 namespace DpiBypass.Core.Config;
 
@@ -27,7 +27,7 @@ public sealed record NetworkProfile
     public int FailureCount { get; init; }
 }
 
-public sealed record AppSettings
+public sealed record AppSettings : IHotspotLegacyState
 {
     /// <summary>Discord only, Discord plus browsers, or the whole machine.</summary>
     public ProtectionScope Scope { get; set; } = ProtectionScope.DiscordAndBrowsers;
@@ -98,55 +98,66 @@ public sealed record AppSettings
 
     public List<string> ExcludedDomains { get; set; } = [];
 
-    // --- Vodafone unlimited mode -------------------------------------------------
+    // --- Mobile hotspot ------------------------------------------------------------
 
-    /// <summary>Master switch for the hotspot TTL fix.</summary>
+    /// <summary>
+    /// Run the read-only hotspot checks by themselves after a network change.
+    /// </summary>
+    /// <remarks>
+    /// The checks - addressing, reachability, DNS, MTU - are what replaced the TTL
+    /// rewrite, and they are always available on demand. This only decides whether
+    /// moving to a different network also runs them and logs the answer. It is switched
+    /// on automatically for anyone who had the old mode enabled, so the upgrade leaves
+    /// them with something rather than a missing feature.
+    /// See <see cref="HotspotLegacyMigration"/>.
+    /// </remarks>
+    public bool HotspotDiagnostics { get; set; }
+
+    /// <summary>When the retired hotspot TTL configuration was cleaned out of this file.</summary>
+    public DateTimeOffset? HotspotLegacyMigratedAt { get; set; }
+
+    // --- Retired: the hotspot TTL rewrite -------------------------------------------
+    // Kept as fields only so a settings file written by an older build is recognised and
+    // cleaned rather than silently carried forward. Nothing reads them for behaviour;
+    // ConfigStore runs the migration on every load, so an old file - or a restored
+    // backup, or a hand edit - can never switch the rewrite back on.
+
+    /// <summary>Legacy master switch. Always false after a load.</summary>
     public bool HotspotTtlFix { get; set; }
 
-    /// <summary>Networks the fix is allowed to run on, newest last.</summary>
-    public List<TtlFixNetwork> HotspotTtlNetworks { get; set; } = [];
-
-    /// <summary>Advanced; 65 is correct for a phone that routes once.</summary>
-    public byte HotspotTtlValue { get; set; } = Vodafone.TtlFixSettings.DefaultTimeToLive;
-
-    public bool HotspotDropIPv6 { get; set; } = true;
-
-    public TtlFixSettings BuildTtlFixSettings() => new()
-    {
-        TimeToLive = HotspotTtlValue,
-        DropIPv6 = HotspotDropIPv6,
-    };
-
-    public bool HotspotNetworkRegistered(string key)
-        => !string.IsNullOrEmpty(key) && HotspotTtlNetworks.Any(n => n.Key == key);
-
-    /// <summary>Remembers a network, refreshing it if already known and dropping the oldest.</summary>
-    public void RememberHotspotNetwork(string key, string displayName, string adapterName)
-    {
-        if (string.IsNullOrEmpty(key))
-        {
-            return;
-        }
-
-        HotspotTtlNetworks.RemoveAll(n => n.Key == key);
-        HotspotTtlNetworks.Add(new TtlFixNetwork
-        {
-            Key = key,
-            DisplayName = displayName,
-            AdapterName = adapterName,
-        });
-
-        while (HotspotTtlNetworks.Count > Vodafone.TtlFixSettings.MaxNetworks)
-        {
-            HotspotTtlNetworks.RemoveAt(0);
-        }
-    }
-
-    public bool ForgetHotspotNetwork(string key) => HotspotTtlNetworks.RemoveAll(n => n.Key == key) > 0;
+    /// <summary>Legacy per network list. Always empty after a load.</summary>
+    public List<LegacyHotspotNetwork> HotspotTtlNetworks { get; set; } = [];
 
     /// <summary>Per network results, keyed by <see cref="NetworkProfile.Key"/>.</summary>
     [JsonIgnore]
     public Dictionary<string, NetworkProfile> Networks { get; set; } = [];
+
+    /// <summary>
+    /// True when the load that produced this object had to clean legacy hotspot state
+    /// out of it, so the caller knows the file on disk is now behind.
+    /// </summary>
+    [JsonIgnore]
+    public bool LegacyHotspotCleaned { get; internal set; }
+
+    bool IHotspotLegacyState.LegacyTtlFixEnabled
+    {
+        get => HotspotTtlFix;
+        set => HotspotTtlFix = value;
+    }
+
+    List<LegacyHotspotNetwork> IHotspotLegacyState.LegacyNetworks => HotspotTtlNetworks;
+
+    bool IHotspotLegacyState.DiagnosticsEnabled
+    {
+        get => HotspotDiagnostics;
+        set => HotspotDiagnostics = value;
+    }
+
+    DateTimeOffset? IHotspotLegacyState.LegacyMigratedAt
+    {
+        get => HotspotLegacyMigratedAt;
+        set => HotspotLegacyMigratedAt = value;
+    }
 }
 
 /// <summary>
@@ -210,16 +221,20 @@ public sealed class ConfigStore
 
         // A null entry throws in every lookup that walks this list, and a keyless one can
         // never name a network anyway.
-        var hotspotNetworks = settings.HotspotTtlNetworks;
-        settings.HotspotTtlNetworks = hotspotNetworks is null
+        settings.HotspotTtlNetworks = settings.HotspotTtlNetworks is null
             ? []
-            : [.. hotspotNetworks
-                .Where(network => network is not null && !string.IsNullOrWhiteSpace(network.Key))
-                .Select(network => network with
-                {
-                    DisplayName = network.DisplayName ?? string.Empty,
-                    AdapterName = network.AdapterName ?? string.Empty,
-                })];
+            : [.. settings.HotspotTtlNetworks.Where(network => network is not null)];
+
+        // Every load, not once from a marker: a restored backup or a hand edit must not
+        // be able to bring the retired TTL rewrite back. The pass is idempotent, so
+        // running it on a file it has already cleaned changes nothing.
+        var migration = HotspotLegacyMigration.Apply(settings, DateTimeOffset.UtcNow);
+        settings.LegacyHotspotCleaned = migration.Changed;
+
+        if (migration.Changed)
+        {
+            AppLog.Info($"Eski hotspot yapılandırması bulundu ve temizlendi. {migration.Summary}");
+        }
 
         settings.Networks = settings.Networks
             .Where(pair => pair.Value is not null && !string.IsNullOrWhiteSpace(pair.Key))

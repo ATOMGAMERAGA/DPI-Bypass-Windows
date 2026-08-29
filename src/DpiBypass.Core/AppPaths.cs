@@ -32,6 +32,9 @@ public static class AppPaths
     /// <summary>Exact original NIC values retained until every change is restored.</summary>
     public static string LatencySnapshotFile { get; } = Path.Combine(StateDirectory, "latency-snapshot.json");
 
+    /// <summary>Per adapter and per network results a benchmark has already verified.</summary>
+    public static string LatencyProfilesFile { get; } = Path.Combine(StateDirectory, "latency-profiles.json");
+
     /// <summary>Domains the app worked out are blocked, learned while running.</summary>
     public static string LearnedDomainsFile { get; } = Path.Combine(StateDirectory, "learned-domains.json");
 
@@ -69,7 +72,8 @@ public static class AppPaths
 
             foreach (var name in new[]
             {
-                "settings.json", "networks.json", "dns-snapshot.json", "latency-snapshot.json", "learned-domains.json",
+                "settings.json", "networks.json", "dns-snapshot.json", "latency-snapshot.json",
+                "latency-profiles.json", "learned-domains.json",
             })
             {
                 var source = Path.Combine(LegacyStateDirectory, name);

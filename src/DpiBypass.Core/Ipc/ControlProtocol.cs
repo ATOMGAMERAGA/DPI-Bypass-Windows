@@ -51,6 +51,18 @@ public static class ControlProtocol
         public const string Search = "search";
         public const string Enable = "enable";
         public const string Disable = "disable";
+
+        /// <summary>Read-only checks on a tethered or mobile connection.</summary>
+        public const string HotspotDiagnose = "hotspot.diagnose";
+
+        public const string HotspotStatus = "hotspot.status";
+
+        /// <summary>Removes anything an older build's hotspot TTL mode left behind.</summary>
+        public const string HotspotCleanup = "hotspot.cleanup";
+
+        // Retired: the hotspot TTL rewrite. The names stay so an older shortcut, script
+        // or habit still lands somewhere sensible - "off" performs the cleanup, and "on"
+        // explains what replaced it instead of failing with an unknown command.
         public const string VodafoneOn = "vodafone.on";
         public const string VodafoneOff = "vodafone.off";
         public const string VodafoneStatus = "vodafone.status";

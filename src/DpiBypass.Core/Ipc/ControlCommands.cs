@@ -1,7 +1,7 @@
 using System.Text;
 using DpiBypass.Core.Engine;
+using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
-using DpiBypass.Core.Vodafone;
 
 namespace DpiBypass.Core.Ipc;
 
@@ -52,23 +52,31 @@ public sealed class ControlCommands
                 await _service.StopAsync(cancellationToken).ConfigureAwait(false);
                 return ControlResponse.Success("Koruma kapatıldı.");
 
-            case ControlProtocol.Commands.VodafoneOn:
-                try
-                {
-                    _service.EnableTtlFixHere();
-                    return ControlResponse.Success(DescribeVodafone());
-                }
-                catch (TtlFixException ex)
-                {
-                    return ControlResponse.Failure(ex.Message);
-                }
+            case ControlProtocol.Commands.HotspotDiagnose:
+            {
+                var diagnostics = await _service.RunHotspotDiagnosticsAsync(cancellationToken).ConfigureAwait(false);
+                return diagnostics.HasInternet
+                    ? ControlResponse.Success(diagnostics.ToReport())
+                    : ControlResponse.Failure(diagnostics.ToReport());
+            }
 
+            case ControlProtocol.Commands.HotspotStatus:
+                return ControlResponse.Success(DescribeHotspot());
+
+            case ControlProtocol.Commands.HotspotCleanup:
             case ControlProtocol.Commands.VodafoneOff:
-                _service.DisableTtlFix();
-                return ControlResponse.Success(DescribeVodafone());
+            {
+                var migration = _service.CleanUpLegacyHotspotConfiguration();
+                return ControlResponse.Success($"{migration.Summary}\n{DescribeHotspot()}");
+            }
+
+            case ControlProtocol.Commands.VodafoneOn:
+                return ControlResponse.Failure(
+                    "Hotspot TTL modu kaldırıldı ve yapılandırması temizlendi. "
+                    + "Yerine 'hotspot diagnose' bağlantıyı değiştirmeden inceler.");
 
             case ControlProtocol.Commands.VodafoneStatus:
-                return ControlResponse.Success(DescribeVodafone());
+                return ControlResponse.Success(DescribeHotspot());
 
             case ControlProtocol.Commands.LatencyOn:
             {
@@ -117,7 +125,7 @@ public sealed class ControlCommands
         builder.AppendLine($"Kapsam      : {ProtectionService.DescribeScope(_service.Settings.Scope)}");
         builder.AppendLine($"DNS         : {DescribeDns()}");
         builder.AppendLine($"Alan adları : {_service.ProtectedDomainCount} ({_service.LearnedDomains.Count} kendiliğinden bulundu)");
-        builder.AppendLine($"Sınırsız mod: {DescribeVodafone()}");
+        builder.AppendLine($"Hotspot     : {DescribeHotspot()}");
         builder.AppendLine($"Ping düşürme: {DescribeLatency().Replace(Environment.NewLine, " · ")}");
 
         if (stats is not null)
@@ -144,23 +152,25 @@ public sealed class ControlCommands
         _ => "sistem ayarı",
     };
 
-    private string DescribeVodafone()
+    private string DescribeHotspot()
     {
-        var status = _service.TtlFixStatus;
+        var status = _service.HotspotStatus;
+        var builder = new StringBuilder();
 
-        if (!status.Enabled)
+        builder.Append(status.DiagnosticsEnabled ? "tanılama açık" : "tanılama kapalı");
+
+        if (status.LegacyCleanedAt is { } cleaned)
         {
-            return "kapalı";
+            builder.Append($" · eski TTL yapılandırması {cleaned.LocalDateTime:yyyy-MM-dd} tarihinde temizlendi");
         }
 
-        if (!status.Active)
+        if (status.LastResult is { } last)
         {
-            return status.RegisteredHere
-                ? "açık, kural kurulamadı"
-                : $"açık, bu ağ ('{status.NetworkName}') kayıtlı değil";
+            builder.Append($" · son tanılama: internet {(last.HasInternet ? "var" : "yok")}, "
+                + $"DNS {(last.DnsWorks ? "çalışıyor" : "çalışmıyor")}");
         }
 
-        return $"etkin · TTL {status.TimeToLive} · düzeltilen paket {status.RewrittenPackets:N0}";
+        return builder.ToString();
     }
 
     private string DescribeLatency()

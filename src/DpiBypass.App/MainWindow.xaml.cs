@@ -502,6 +502,34 @@ public partial class MainWindow : Window
         return null;
     }
 
+    /// <summary>
+    /// Records which page the user moved to.
+    /// </summary>
+    /// <remarks>
+    /// <c>SelectionChanged</c> bubbles, so every combo box and list on every page raises
+    /// it through this handler as well. Only the rail's own transitions are interesting,
+    /// and logging the rest would bury them - hence the source check rather than a
+    /// filter on the arguments.
+    /// </remarks>
+    private void OnNavigationSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (!ReferenceEquals(e.OriginalSource, NavigationTabs))
+        {
+            return;
+        }
+
+        var to = e.AddedItems.Count > 0 ? DescribeTab(e.AddedItems[0]) : "-";
+        var from = e.RemovedItems.Count > 0 ? DescribeTab(e.RemovedItems[0]) : null;
+
+        AppLog.Info(from is null ? $"Sekme açıldı: {to}" : $"Sekme değişti: {from} → {to}");
+    }
+
+    /// <summary>The automation name each navigation item carries, for logs and readers.</summary>
+    private static string DescribeTab(object? item) => item is System.Windows.Controls.TabItem tab
+        && System.Windows.Automation.AutomationProperties.GetName(tab) is { Length: > 0 } name
+        ? name
+        : "?";
+
     private void OnExitClicked(object sender, RoutedEventArgs e)
     {
         _exiting = true;
