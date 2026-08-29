@@ -373,6 +373,31 @@ Test-Case 'the installer is asked for a log the failure path can quote' {
     if ($explain -ge $fail) { throw 'the explanation is printed after the script has thrown' }
 }
 
+Test-Case 'the install waits only for Setup and not for the application it launches' {
+    # Start-Process -Wait follows the child process tree on Windows. Inno Setup's
+    # final [Run] entry starts the long-lived application, so using -Wait here leaves
+    # the one-line installer on "Kurulum çalıştırılıyor..." until the user exits the
+    # app even though Setup itself is already finished.
+    $script = Get-Content -Path $scriptPath -Raw
+    $setupStart = [regex]::Match($script, '(?s)\$setupStart\s*=\s*@\{(?<body>.*?)\}')
+    if (-not $setupStart.Success) { throw 'the setup Start-Process arguments were not found' }
+    if ($setupStart.Groups['body'].Value -match '\bWait\s*=') {
+        throw 'Setup is still launched through Start-Process -Wait'
+    }
+
+    $start = $script.IndexOf('$process = Start-Process @setupStart', [StringComparison]::Ordinal)
+    if ($start -lt 0) { throw 'Setup is no longer started as a Process object' }
+
+    $wait = $script.IndexOf('$process.WaitForExit()', $start, [StringComparison]::Ordinal)
+    $exitCode = $script.IndexOf('if ($process.ExitCode -ne 0)', $start, [StringComparison]::Ordinal)
+
+    if ($wait -lt 0) { throw 'the exact Setup process is not waited for' }
+    if ($exitCode -lt 0) { throw 'the Setup exit code is not checked' }
+    if (-not ($start -lt $wait -and $wait -lt $exitCode)) {
+        throw 'Setup is not awaited before its exit code is read'
+    }
+}
+
 Test-Case 'the post-install check does not treat a hand-off as a failure' {
     # The installer's own last step launches the app, so the copy this script starts
     # normally hands its request over and exits within a second. Reading that exit as

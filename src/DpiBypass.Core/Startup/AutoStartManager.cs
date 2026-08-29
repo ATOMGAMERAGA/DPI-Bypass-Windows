@@ -8,11 +8,13 @@ namespace DpiBypass.Core.Startup;
 /// Makes the app come up with Windows.
 /// </summary>
 /// <remarks>
-/// A scheduled task is used rather than the Run key, because the engine needs
-/// administrator rights and a Run key entry would put a UAC prompt in front of the
-/// user on every single boot. A logon task registered with the highest available
-/// privileges starts elevated and silently. If task registration is refused for any
-/// reason we fall back to the Run key, which still works - it just prompts.
+/// A scheduled task owns the elevated launch, because the engine needs administrator
+/// rights and starting the app itself from the Run key would put a UAC prompt in front
+/// of the user on every boot. The Run key starts that task instead. This extra hop is
+/// intentional: Windows lists it under Settings &gt; Apps &gt; Startup and its switch can
+/// genuinely disable the launch, while Task Scheduler still supplies elevation
+/// without a prompt. If task registration is refused we fall back to launching the app
+/// from the Run key, which still works - it just prompts.
 /// </remarks>
 public sealed class AutoStartManager
 {
@@ -21,9 +23,12 @@ public sealed class AutoStartManager
     /// <summary>Names used before the app was renamed, cleaned up whenever we touch autostart.</summary>
     private const string LegacyTaskName = "AtomDpiBypass-Autostart";
     private const string LegacyRunValueName = "AtomDpiBypass";
+    private const string PreviousRunValueName = "DpiBypass";
 
     private const string RunKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-    private const string RunValueName = "DpiBypass";
+    private const string StartupApprovedRunKeyPath =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    private const string RunValueName = "DPI Bypass";
 
     private readonly string _executablePath;
     private readonly Action<string>? _log;
@@ -36,27 +41,40 @@ public sealed class AutoStartManager
 
     public async Task<bool> IsEnabledAsync(CancellationToken cancellationToken = default)
     {
+        ProcessResult? query = null;
+
         try
         {
-            var query = await ProcessRunner
+            query = await ProcessRunner
                 .RunAsync("schtasks.exe", ["/Query", "/TN", TaskName], TimeSpan.FromSeconds(20), cancellationToken)
                 .ConfigureAwait(false);
-
-            if (query.Success)
-            {
-                return true;
-            }
         }
         catch (Exception ex)
         {
-            // Answering "we do not know" as "not registered" would have the caller
-            // register it again, which is harmless. Throwing would not be: this is
-            // awaited from a fire and forget started at construction time, where the
-            // failure disappears and the autostart checkbox never finishes loading.
+            // The Run entry below still gives us a conservative answer. Throwing would
+            // not: this is awaited from a fire and forget started at construction time,
+            // where the failure disappears and the autostart checkbox never finishes.
             _log?.Invoke($"Autostart state could not be read: {ex.Message}");
         }
 
-        return RunKeyExists();
+        var runCommand = ReadEnabledRunCommand();
+        if (runCommand is null)
+        {
+            return false;
+        }
+
+        // The current entry only asks Task Scheduler to run the elevated task, so a
+        // definitively missing task means it cannot start anything. A direct Run-key
+        // fallback (and the entry written by older versions) remains self-sufficient.
+        if (IsTaskBridge(runCommand))
+        {
+            // A query exception is uncertainty rather than proof that the task is
+            // missing. Preserve the visible Windows switch in that case and try again
+            // on the next launch.
+            return query is null || query.Value.Success;
+        }
+
+        return true;
     }
 
     public async Task<bool> EnableAsync(bool startMinimised, CancellationToken cancellationToken = default)
@@ -83,19 +101,25 @@ public sealed class AutoStartManager
 
             if (create.Success)
             {
-                RemoveRunKey();
                 await RemoveLegacyAutoStartAsync(cancellationToken).ConfigureAwait(false);
-                _log?.Invoke("Autostart registered as an elevated logon task.");
-                return true;
+
+                if (WriteTaskRunKey())
+                {
+                    _log?.Invoke("Autostart registered in Startup Apps through an elevated task.");
+                    return true;
+                }
+
+                _log?.Invoke("Startup Apps entry could not be written; falling back to a direct Run key.");
+                return WriteDirectRunKey(startMinimised);
             }
 
             _log?.Invoke($"Scheduled task registration failed ({create.ExitCode}); falling back to the Run key.");
-            return WriteRunKey(startMinimised);
+            return WriteDirectRunKey(startMinimised);
         }
         catch (Exception ex)
         {
             _log?.Invoke($"Autostart could not be enabled: {ex.Message}");
-            return WriteRunKey(startMinimised);
+            return WriteDirectRunKey(startMinimised);
         }
         finally
         {
@@ -148,16 +172,24 @@ public sealed class AutoStartManager
     }
 
     private string BuildTaskXml(bool startMinimised)
+        => BuildTaskXml(
+            _executablePath,
+            startMinimised,
+            Elevation.CurrentUserSid,
+            Elevation.CurrentUserName);
+
+    internal static string BuildTaskXml(
+        string executablePath,
+        bool startMinimised,
+        string? sid,
+        string? userName)
     {
         // The same constant the launch path parses, so the two can never drift apart
         // and leave a logon task whose switch nothing recognises.
         var arguments = startMinimised ? StartupPlan.MinimisedSwitch : string.Empty;
-        var sid = Elevation.CurrentUserSid;
-        var userName = Elevation.CurrentUserName;
-
         // Prefer the SID: it survives the account being renamed.
         var principalIdentity = string.IsNullOrEmpty(sid)
-            ? $"      <UserId>{Escape(userName)}</UserId>"
+            ? $"      <UserId>{Escape(userName ?? string.Empty)}</UserId>"
             : $"      <UserId>{Escape(sid)}</UserId>";
 
         return $"""
@@ -168,12 +200,7 @@ public sealed class AutoStartManager
                 <Description>{Escape(AppPaths.ProductName)} - DPI engellerini aşan koruma servisini oturum açıldığında başlatır.</Description>
                 <URI>\{TaskName}</URI>
               </RegistrationInfo>
-              <Triggers>
-                <LogonTrigger>
-                  <Enabled>true</Enabled>
-                  <Delay>PT10S</Delay>
-                </LogonTrigger>
-              </Triggers>
+              <Triggers />
               <Principals>
                 <Principal id="Author">
             {principalIdentity}
@@ -206,24 +233,42 @@ public sealed class AutoStartManager
               </Settings>
               <Actions Context="Author">
                 <Exec>
-                  <Command>{Escape(_executablePath)}</Command>
+                  <Command>{Escape(executablePath)}</Command>
                   <Arguments>{Escape(arguments)}</Arguments>
-                  <WorkingDirectory>{Escape(Path.GetDirectoryName(_executablePath) ?? string.Empty)}</WorkingDirectory>
+                  <WorkingDirectory>{Escape(Path.GetDirectoryName(executablePath) ?? string.Empty)}</WorkingDirectory>
                 </Exec>
               </Actions>
             </Task>
             """;
     }
 
-    private bool WriteRunKey(bool startMinimised)
+    private bool WriteTaskRunKey()
+        => WriteRunValue(BuildTaskRunCommand(Environment.SystemDirectory));
+
+    private bool WriteDirectRunKey(bool startMinimised)
+        => WriteRunValue(
+            $"\"{_executablePath}\"{(startMinimised ? " " + StartupPlan.MinimisedSwitch : string.Empty)}");
+
+    private bool WriteRunValue(string command)
     {
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true);
-            key?.SetValue(
-                RunValueName,
-                $"\"{_executablePath}\"{(startMinimised ? " " + StartupPlan.MinimisedSwitch : string.Empty)}");
-            return key is not null;
+            if (key is null)
+            {
+                return false;
+            }
+
+            key.SetValue(RunValueName, command);
+            key.DeleteValue(PreviousRunValueName, throwOnMissingValue: false);
+            key.DeleteValue(LegacyRunValueName, throwOnMissingValue: false);
+
+            // A removed-and-recreated Run value can retain the disabled verdict
+            // Windows stored under StartupApproved. Enabling it inside this app is an
+            // explicit user action, so remove that stale verdict and let Windows
+            // recreate the normal enabled state.
+            ClearStartupApproval(RunValueName, PreviousRunValueName, LegacyRunValueName);
+            return true;
         }
         catch (Exception ex)
         {
@@ -232,17 +277,47 @@ public sealed class AutoStartManager
         }
     }
 
-    private static bool RunKeyExists()
+    internal static string BuildTaskRunCommand(string? systemDirectory)
+    {
+        var executable = string.IsNullOrWhiteSpace(systemDirectory)
+            ? "schtasks.exe"
+            : Path.Combine(systemDirectory, "schtasks.exe");
+
+        return $"\"{executable}\" /Run /TN \"{TaskName}\"";
+    }
+
+    internal static bool IsTaskBridge(string command)
+        => command.Contains("schtasks.exe", StringComparison.OrdinalIgnoreCase)
+           && command.Contains("/Run", StringComparison.OrdinalIgnoreCase)
+           && command.Contains(TaskName, StringComparison.OrdinalIgnoreCase);
+
+    private static string? ReadEnabledRunCommand()
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
-            return key?.GetValue(RunValueName) is not null;
+            if (key is null)
+            {
+                return null;
+            }
+
+            foreach (var name in new[] { RunValueName, PreviousRunValueName, LegacyRunValueName })
+            {
+                if (key.GetValue(name) is string command
+                    && !string.IsNullOrWhiteSpace(command)
+                    && IsStartupApproved(name))
+                {
+                    return command;
+                }
+            }
         }
         catch (Exception)
         {
-            return false;
+            // An unreadable entry is not enabled as far as the current user is
+            // concerned; the settings checkbox will stay conservative.
         }
+
+        return null;
     }
 
     private static void RemoveRunKey()
@@ -250,14 +325,56 @@ public sealed class AutoStartManager
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
-            if (key?.GetValue(RunValueName) is not null)
+            if (key is not null)
             {
                 key.DeleteValue(RunValueName, throwOnMissingValue: false);
+                key.DeleteValue(PreviousRunValueName, throwOnMissingValue: false);
+                key.DeleteValue(LegacyRunValueName, throwOnMissingValue: false);
             }
+
+            ClearStartupApproval(RunValueName, PreviousRunValueName, LegacyRunValueName);
         }
         catch (Exception)
         {
             // Nothing to clean up.
+        }
+    }
+
+    private static bool IsStartupApproved(string valueName)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(StartupApprovedRunKeyPath);
+            var state = key?.GetValue(valueName) as byte[];
+
+            // Windows uses 0x03 for a Run entry disabled in Startup Apps. A missing
+            // record and the normal 0x02 record both mean enabled.
+            return state is not { Length: > 0 } || state[0] != 0x03;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+
+    private static void ClearStartupApproval(params string[] valueNames)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(StartupApprovedRunKeyPath, writable: true);
+            if (key is null)
+            {
+                return;
+            }
+
+            foreach (var name in valueNames)
+            {
+                key.DeleteValue(name, throwOnMissingValue: false);
+            }
+        }
+        catch (Exception)
+        {
+            // Windows will recreate the state when it next enumerates Startup Apps.
         }
     }
 

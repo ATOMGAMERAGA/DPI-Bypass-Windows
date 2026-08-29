@@ -410,10 +410,17 @@ try {
     $mode = if ($Quiet) { '/VERYSILENT' } else { '/SILENT' }
     $arguments = @($mode, '/NORESTART', '/SUPPRESSMSGBOXES', "`"/LOG=$setupLog`"")
 
-    $setupStart = @{ FilePath = $setupPath; ArgumentList = $arguments; Wait = $true; PassThru = $true }
+    # Do not give Start-Process -Wait here. On Windows it waits for the whole child
+    # process tree, not only Setup. The final [Run] entry deliberately starts the
+    # long-lived DPI Bypass UI, so -Wait leaves this script on "Kurulum
+    # çalıştırılıyor..." for as long as the application remains open even though
+    # Setup itself has already completed. Process.WaitForExit waits for this exact
+    # installer PID and no descendant.
+    $setupStart = @{ FilePath = $setupPath; ArgumentList = $arguments; PassThru = $true }
     if ($SafeWorkingDirectory) { $setupStart['WorkingDirectory'] = $SafeWorkingDirectory }
 
     $process = Start-Process @setupStart
+    $process.WaitForExit()
     if ($process.ExitCode -ne 0) {
         Write-Host ''
         Write-Warn (Get-SetupExitReason $process.ExitCode)

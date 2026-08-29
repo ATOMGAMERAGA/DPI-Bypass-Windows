@@ -309,10 +309,12 @@ gösterilir.
 
 ## Otomatik başlatma
 
-Kurulumda, oturum açıldığında **yükseltilmiş** çalışan bir Görev Zamanlayıcı
-görevi kaydedilir (`DpiBypass-Autostart`). Bu sayede her açılışta yönetici
-onayı sorulmaz. Görev kaydedilemezse `Run` anahtarına düşülür — o durumda onay
-istenir. İstemiyorsanız **DNS ve ayarlar** sekmesinden kapatabilirsiniz.
+Kurulumda uygulama Windows'un **Başlangıç Uygulamaları** listesine eklenir. Bu
+kayıt, **yükseltilmiş** çalışan `DpiBypass-Autostart` görevini tetikler; böylece
+her açılışta yönetici onayı sorulmaz ve Windows Ayarları'ndaki anahtar gerçekten
+açılışı denetler. Görev kaydedilemezse uygulama doğrudan `Run` anahtarına düşer —
+o durumda onay istenir. İstemiyorsanız Windows Başlangıç Uygulamaları'ndan veya
+**DNS ve ayarlar** sekmesinden kapatabilirsiniz.
 
 ## Ayarlar
 

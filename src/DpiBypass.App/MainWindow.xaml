@@ -100,7 +100,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconShieldGeometry}" />
-                        <TextBlock Text="_Durum" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Durum" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
@@ -157,34 +157,46 @@
                             </Grid>
                         </Border>
 
-                        <!-- What the engine is working with, in quiet tiles that
-                             wrap to one column when the window narrows. -->
-                        <WrapPanel Margin="0,0,-12,4">
-                            <Border Style="{StaticResource InfoTileStyle}" Width="270" Margin="0,0,12,8">
+                        <!-- What the engine is working with. Equal columns use the
+                             whole card width instead of leaving a dead strip on the
+                             right at the window's normal size. -->
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="8" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource InfoTileStyle}">
                                 <StackPanel>
                                     <TextBlock Text="Ağ" Style="{StaticResource InfoTileLabelStyle}" />
                                     <TextBlock Text="{Binding NetworkName}" Style="{StaticResource InfoTileValueStyle}" />
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource InfoTileStyle}" Width="270" Margin="0,0,12,8">
+                            <Border Grid.Row="0" Grid.Column="2" Style="{StaticResource InfoTileStyle}">
                                 <StackPanel>
                                     <TextBlock Text="Operatör" Style="{StaticResource InfoTileLabelStyle}" />
                                     <TextBlock Text="{Binding IspSummary}" Style="{StaticResource InfoTileValueStyle}" />
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource InfoTileStyle}" Width="270" Margin="0,0,12,8">
+                            <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource InfoTileStyle}">
                                 <StackPanel>
                                     <TextBlock Text="Yöntem" Style="{StaticResource InfoTileLabelStyle}" />
                                     <TextBlock Text="{Binding StrategySummary}" Style="{StaticResource InfoTileValueStyle}" />
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource InfoTileStyle}" Width="270" Margin="0,0,12,8">
+                            <Border Grid.Row="2" Grid.Column="2" Style="{StaticResource InfoTileStyle}">
                                 <StackPanel>
                                     <TextBlock Text="Kapsam" Style="{StaticResource InfoTileLabelStyle}" />
                                     <TextBlock Text="{Binding SelectedScope.Title}" Style="{StaticResource InfoTileValueStyle}" />
                                 </StackPanel>
                             </Border>
-                        </WrapPanel>
+                        </Grid>
 
                         <Border Style="{StaticResource CardStyle}" Margin="0,8,0,12">
                             <StackPanel>
@@ -229,7 +241,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLayersGeometry}" />
-                        <TextBlock Text="_Kapsam" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Kapsam" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
@@ -296,7 +308,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconGlobeGeometry}" />
-                        <TextBlock Text="_Siteler" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Siteler" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <Grid>
@@ -457,7 +469,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSignalGeometry}" />
-                        <TextBlock Text="Ağ ve _yöntem" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="Ağ ve _yöntem" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
@@ -563,7 +575,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSlidersGeometry}" />
-                        <TextBlock Text="DNS ve _ayarlar" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="DNS ve _ayarlar" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
@@ -598,7 +610,7 @@
                                           IsChecked="{Binding StartWithWindows, Mode=TwoWay}" />
                                 <TextBlock Style="{StaticResource CaptionStyle}"
                                            Margin="26,0,0,10"
-                                           Text="Yükseltilmiş bir oturum açma görevi kaydedilir; böylece her açılışta yönetici onayı sorulmaz." />
+                                           Text="Windows Başlangıç Uygulamaları listesine eklenir; yükseltilmiş görev sayesinde her açılışta yönetici onayı sorulmaz." />
                                 <CheckBox Content="Açılışta pencereyi göstermeden tepside başla"
                                           Margin="0,0,0,4"
                                           Style="{StaticResource SwitchStyle}"
@@ -767,7 +779,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLogGeometry}" />
-                        <TextBlock Text="_Günlük" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Günlük" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <Grid>

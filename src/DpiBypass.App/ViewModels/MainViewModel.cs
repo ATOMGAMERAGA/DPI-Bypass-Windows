@@ -1215,7 +1215,7 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Reads and reconciles the logon task, off the UI thread from the first line.
+    /// Reads the Windows startup registration, off the UI thread from the first line.
     /// </summary>
     /// <remarks>
     /// Started from the constructor, which runs before the window has drawn anything,
@@ -1231,15 +1231,14 @@ public sealed class MainViewModel : ObservableObject
         {
             var enabled = await Task.Run(() => _autoStart.IsEnabledAsync()).ConfigureAwait(true);
 
-            // Reconcile: the setting says it should be on but the task is missing (for
-            // example after the app folder moved), so put it back.
-            if (_service.Settings.StartWithWindows && !enabled)
+            // Windows Settings owns its Startup Apps switch too. If the user changes
+            // it there, that decision must flow back into our checkbox instead of the
+            // app immediately registering itself again and undoing their choice.
+            if (_service.Settings.StartWithWindows != enabled)
             {
-                await Task.Run(() => _autoStart.EnableAsync(_service.Settings.StartMinimised)).ConfigureAwait(true);
-            }
-            else if (!_service.Settings.StartWithWindows && enabled)
-            {
-                await Task.Run(() => _autoStart.DisableAsync()).ConfigureAwait(true);
+                _service.Settings.StartWithWindows = enabled;
+                _service.SaveSettings();
+                Raise(nameof(StartWithWindows));
             }
         }
         catch (Exception ex)
