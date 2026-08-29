@@ -277,12 +277,21 @@ DpiBypass.exe latency test        # kalıcı ayar değiştirmeden ölç
 DpiBypass.exe latency restore     # özgün NIC değerlerini kurtar
 DpiBypass.exe restore-dns         # DNS ayarlarını geri yükle
 DpiBypass.exe --health-check [sn] # çalışan kopyanın penceresini açmasını bekle
+DpiBypass.exe --ui-selftest       # arayüzü sına ve çık (ağ motorunu açmaz)
 ```
 
 `--health-check` tek örnek kilidini almaz: yalnızca çalışan kopyadan penceresini
 açmasını ister ve pencere gerçekten göründüğünde `0`, hiçbir kopya yanıt vermezse
 `1` döner. Henüz açılmakta olan bir kopya durumunu bildirdiği için beklenir —
 kurulum betiği de kurulumun başarılı sayılıp sayılmayacağına bununla karar verir.
+"Gerçekten göründü" burada tam anlamıyla ilk karenin çizilmiş olmasıdır: yalnızca
+pencere tanıtıcısı oluşmuş, hiç çizilmemiş bir pencere `0` döndürmez.
+
+`--ui-selftest` uygulamayı normal biçimde açar, penceresinin gerçekten çizilip
+çizilmediğini ölçer ve sonucu çıkış koduyla bildirip kapanır. Paket sürücüsünü
+açmaz, DNS'e dokunmaz ve denetim kanalını başlatmaz; bir arıza bulursa pencere
+durumunu ve açılış izlemesini `%ProgramData%\DPI Bypass\logs\ui-diagnostics.log`
+dosyasına yazar. Başka bir kopya çalışmıyorken çalıştırın.
 
 Durum ve denetim komutları, adlandırılmış bir kanal üzerinden **çalışan
 uygulamaya** bağlanır — ayarları dosyadan okuyup tahmin etmez. Uygulama
@@ -394,7 +403,8 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Belirti | Bakılacak yer |
 | --- | --- |
 | Kısayola tıklıyorum, pencere açılmıyor | Uygulama zaten tepside çalışıyordur; kısayolu yeniden çalıştırmak çalışan kopyanın penceresini öne getirir. Yine açılmıyorsa `%ProgramData%\DPI Bypass\logs\crash.log` ve o günün `.log` dosyasındaki "Açılış kararı" / "Görünürlük denetimi" satırlarına bakın |
-| Uygulama çalışıyor ama hiçbir yerde görünmüyor | Bildirim alanı simgesi **^** okunun altında olabilir. `DpiBypass.exe --show` pencereyi her koşulda açar |
+| Uygulama çalışıyor ama hiçbir yerde görünmüyor | Bildirim alanı simgesi **^** okunun altında olabilir. `DpiBypass.exe --show` pencereyi her koşulda açar. Görev çubuğunda düğme var ama pencere yoksa `DpiBypass.exe --ui-selftest` neyin eksik olduğunu (ilk kare, DWM gizlemesi, ekran dışı konum) söyler ve `%ProgramData%\DPI Bypass\logs\ui-diagnostics.log` dosyasına yazar |
+| Görev çubuğunda düğme var, pencere hiç görünmüyor | Uygulama artık bunu kendisi fark ediyor: ilk kare çizilene kadar pencere "açıldı" sayılmaz, sınırlı sayıda kurtarma denemesi yapılır (öne getir → ekrana taşı → arka planı düz renge al → gerekirse pencereyi bir kez yeniden oluştur) ve hepsi başarısız olursa günlük klasörünü gösteren bir ileti çıkar. Günlükte "Pencere erişilemiyor" ve "Açılış izlemesi" satırlarına bakın |
 | Kurulum bitince pencere bir an açılıp hemen kapanıyor | v1.0.0.51 ve öncesinde kurulum uygulamayı başlatıyor, tek satırlık komut da bir saniye sonra ikinci bir kopya başlatıyordu. Henüz açılmakta olan ilk kopya "buradayım" diyemediği için ikinci kopya onu kapalı sayıp kapatıyordu — ekranda görülen tam olarak budur. Sonraki sürümlerde açılmakta olan kopya durumunu baştan bildiriyor ve beklenip kapatılmıyor. Sürümü güncelleyin; sürerse günlükteki "Çalışan kopya henüz açılıyor" satırlarını bildirin |
 | Uygulama açılırken donuyor, yaklaşık 40 saniye sonra kayboluyor | Aynı arızanın devamıydı: açılış hatasında uygulama, hatayı yazmadan önce DNS'i geri almak için 38 saniyeye kadar bekliyordu. Artık önce `%ProgramData%\DPI Bypass\logs\crash.log` yazılıp hata gösteriliyor, DNS kurtarma ayrı `DpiBypass.Recovery.exe` sürecine devrediliyor. Bu dosyanın içeriğini bildirin |
 | Kurulumdan hemen sonra "yol bulunamadı" gibi bir hata çıkıyor | Kurulum, uygulamayı silmek üzere olduğu geçici klasörden başlatıyordu; uygulama artık her başlangıçta kendi klasörüne geçiyor ve yardımcı programları tam yolla çağırıyor. Güncel sürümde görülmemeli — görülüyorsa o günün günlüğündeki ilk iki satırı (sürüm, klasör, komut satırı) bildirin |

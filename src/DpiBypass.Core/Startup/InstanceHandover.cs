@@ -73,4 +73,54 @@ public static class InstanceHandover
         HandoverReply.Starting when !startupBudgetSpent => LaunchAction.WaitForStartup,
         _ => LaunchAction.ProbeLiveness,
     };
+
+    /// <summary>
+    /// What the copy holding the lock should answer, given the state of its window.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The answer that matters is <see cref="HandoverReply.WindowShown"/>, because the
+    /// launch that hears it exits without showing the user anything of its own. It used
+    /// to be sent whenever <c>IsWindowVisible</c> said yes, which is true of an HWND
+    /// that has never drawn a frame - so a copy stuck with an invisible window told
+    /// every subsequent launch that the user was looking at the application. Nothing
+    /// could ever get past it: the shortcut did nothing, for ever, and there was no
+    /// window to close and no error to read.
+    /// </para>
+    /// <para>
+    /// So the window has to be genuinely reachable to claim it. A window that is still
+    /// on its way answers <see cref="HandoverReply.Starting"/>, which asks the other
+    /// launch to wait rather than to act. And a window that has exhausted its own
+    /// recovery answers <see cref="HandoverReply.NoAnswer"/> - the truth, and the answer
+    /// that lets the new launch take the lock and give the user a working copy.
+    /// </para>
+    /// </remarks>
+    /// <param name="observation">The state of this copy's window.</param>
+    /// <param name="startupComplete">Whether the dispatcher loop is running.</param>
+    /// <param name="recoveryExhausted">
+    /// Whether this copy has finished trying to get its window on screen and failed.
+    /// </param>
+    public static HandoverReply ReplyFor(
+        WindowObservation observation,
+        bool startupComplete,
+        bool recoveryExhausted)
+    {
+        if (!startupComplete)
+        {
+            return HandoverReply.Starting;
+        }
+
+        var health = WindowHealthEvaluator.Evaluate(observation).Health;
+
+        return health switch
+        {
+            WindowHealth.Reachable => HandoverReply.WindowShown,
+
+            // Asked for a window and still working on it. Waiting is cheaper for
+            // everyone than a takeover that ends a copy owning the packet driver.
+            WindowHealth.Broken when !recoveryExhausted => HandoverReply.Starting,
+
+            _ => HandoverReply.NoAnswer,
+        };
+    }
 }

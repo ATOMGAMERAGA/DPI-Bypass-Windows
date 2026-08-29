@@ -51,6 +51,20 @@ public sealed record AppSettings
     /// </remarks>
     public bool HasShownWindow { get; set; }
 
+    /// <summary>
+    /// Stops the app from ever asking Windows for the Mica material behind its window.
+    /// </summary>
+    /// <remarks>
+    /// The material is drawn by the compositor, which means the window stops painting
+    /// its own client area to let it through. On a machine where DWM accepts the request
+    /// and then does not draw anything, the result is a window that is running, focused,
+    /// listed in the taskbar and completely see-through - and nothing Windows will answer
+    /// distinguishes that from a window being drawn perfectly. So the app sets this for
+    /// itself when the user's own behaviour says they cannot see the window, and never
+    /// tries the material on that machine again. Cosmetic either way.
+    /// </remarks>
+    public bool DisableWindowBackdrop { get; set; }
+
     public DnsMode DnsMode { get; set; } = DnsMode.EncryptedLoopback;
 
     public bool BlockQuicHandshakes { get; set; } = true;

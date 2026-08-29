@@ -109,6 +109,31 @@ public class StartupPlanTests
         Assert.True(StartupPlan.WantsMinimised([argument]));
     }
 
+    [Theory]
+    [InlineData("--show")]
+    [InlineData("-show")]
+    [InlineData("/show")]
+    [InlineData("--SHOW")]
+    public void EveryFormOfTheShowSwitchIsUnderstood(string argument)
+    {
+        // The installer's post-install launch and the desktop shortcut both use this,
+        // and a spelling that is not recognised turns "open the app" into a tray start.
+        Assert.True(StartupPlan.WantsWindow([argument]));
+        Assert.True(StartupPlan.Decide([argument], true, true, true).ShowsWindow);
+    }
+
+    [Theory]
+    [InlineData("--ui-selftest")]
+    [InlineData("/ui-selftest")]
+    public void AnArbitrarySwitchIsMatchedTheSameWay(string argument)
+    {
+        // The startup self test is spelled the way every other switch is, and looked up
+        // through the same matcher rather than a second one that could drift from it.
+        Assert.True(StartupPlan.HasSwitch([argument], "--ui-selftest"));
+        Assert.False(StartupPlan.HasSwitch(["--ui-selftest-later"], "--ui-selftest"));
+        Assert.False(StartupPlan.HasSwitch(null, "--ui-selftest"));
+    }
+
     [Fact]
     public void AnUnrelatedArgumentIsNotAHideRequest()
     {

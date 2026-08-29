@@ -270,6 +270,8 @@ internal static class CommandLineTasks
           DpiBypass.exe --minimized         tepside başlat (oturum açma görevi bunu kullanır)
           DpiBypass.exe --health-check [sn] çalışan kopyanın penceresini açmasını bekle
                                             (0 = pencere açıldı, 1 = açılmadı)
+          DpiBypass.exe --ui-selftest       arayüzü sınayıp çıkar; ağ motorunu açmaz
+                                            (0 = pencere gerçekten çizildi, 1 = çizilmedi)
 
         Durum ve denetim komutları çalışan uygulamaya bağlanır; uygulama kapalıysa
         bunu söyler. Argümansız çalıştırmak pencereyi açar.

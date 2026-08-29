@@ -55,6 +55,46 @@ public partial class App : Application
     /// </remarks>
     private static readonly TimeSpan FatalRecoveryBudget = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// How long the window is given to draw its first frame before the watchdog starts
+    /// treating the silence as a fault, and the backoff after that.
+    /// </summary>
+    /// <remarks>
+    /// The first entry is generous because a healthy window does not use it at all:
+    /// <c>ContentRendered</c> ends the wait the moment it arrives, so these intervals
+    /// are only ever spent by a window that is already in trouble.
+    /// </remarks>
+    private static readonly TimeSpan[] HealthCheckSchedule =
+    [
+        TimeSpan.FromSeconds(3),
+        TimeSpan.FromSeconds(3),
+        TimeSpan.FromSeconds(5),
+        TimeSpan.FromSeconds(8),
+    ];
+
+    /// <summary>
+    /// How close together two launches have to be for the second to count as the user
+    /// saying the window is not really there.
+    /// </summary>
+    private static readonly TimeSpan RedundantActivationWindow = TimeSpan.FromMinutes(1);
+
+    /// <summary>How long the UI self test waits for a window before reporting failure.</summary>
+    private static readonly TimeSpan SelfTestBudget = TimeSpan.FromSeconds(40);
+
+    /// <summary>
+    /// Runs the whole normal startup, reports whether a real window reached the screen,
+    /// and exits with 0 or 1.
+    /// </summary>
+    /// <remarks>
+    /// Nothing is bypassed by it: the same elevation check, the same instance lock, the
+    /// same window. All it changes is that the packet driver, DNS and the control
+    /// channel are left alone - a window can be verified without any of them, and
+    /// verifying a window is no reason to take over a machine's name resolution - and
+    /// that the process ends with a verdict instead of waiting for the user. Its report
+    /// goes to the same log folder as everything else.
+    /// </remarks>
+    private const string SelfTestSwitch = "--ui-selftest";
+
     private SingleInstance? _instance;
     private ControlServer? _control;
     private ProtectionService? _service;
@@ -65,8 +105,35 @@ public partial class App : Application
     private DispatcherTimer? _visibilityWatchdog;
     private StartupPlan _plan = new(StartupVisibility.ShowWindow, "başlatılıyor");
     private bool _shuttingDown;
-    private bool _windowEverShown;
     private bool _dnsWatchdogStarted;
+
+    /// <summary>
+    /// Whether the app currently intends the user to be looking at the window. Set by
+    /// the startup plan and by every activation request; cleared when the user closes
+    /// the window to the notification area, which is the one case where "not on screen"
+    /// is the right answer rather than a fault.
+    /// </summary>
+    private bool _windowWanted;
+
+    /// <summary>Whether a confirmed, reachable frame has been seen in this process.</summary>
+    private bool _windowConfirmed;
+
+    private int _recoveryAttempts;
+    private bool _recreationSpent;
+    private bool _failureReported;
+
+    /// <summary>
+    /// Launches that asked for a window this process already believed was on screen.
+    /// More than one in a row is the user telling us they cannot see it.
+    /// </summary>
+    private int _redundantActivations;
+
+    private DateTime _lastRedundantActivation;
+
+    private bool _selfTest;
+
+    /// <summary>What this process exits with. Only the self test sets anything else.</summary>
+    private int _exitCode;
 
     /// <summary>
     /// Whether start-up has finished and the dispatcher loop is running, so an
@@ -74,6 +141,13 @@ public partial class App : Application
     /// Read from the activation listener thread, written once and never cleared.
     /// </summary>
     private volatile bool _startupComplete;
+
+    /// <summary>
+    /// Whether this copy has finished trying to get its window on screen and failed.
+    /// Read from the activation listener thread: it is what turns a later launch from
+    /// "wait for the running copy" into "take over from it".
+    /// </summary>
+    private volatile bool _recoveryExhausted;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -89,7 +163,10 @@ public partial class App : Application
         // keeps the whole of startup on the thread that owns the UI.
         SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher));
 
+        StartupTrace.Mark("App.OnStartup girildi");
+
         PinWorkingDirectory();
+        StartupTrace.Mark($"çalışma klasörü sabitlendi: {AppContext.BaseDirectory}");
 
         // Startup runs before the dispatcher loop, so an exception escaping here kills
         // the process without a window, a tray icon or a log line - which is exactly
@@ -164,6 +241,7 @@ public partial class App : Application
     {
         AppPaths.MigrateLegacyState();
         AppLog.Initialise();
+        StartupTrace.Mark("günlük hazır");
         AppLog.Info($"{AppPaths.ProductName} başlatılıyor · {AppPaths.Author}");
         AppLog.Info($"Sürüm {typeof(App).Assembly.GetName().Version?.ToString(4) ?? "-"} · "
             + $"klasör: {AppPaths.InstallDirectory} · komut satırı: {(e.Args.Length == 0 ? "(yok)" : string.Join(' ', e.Args))}");
@@ -176,12 +254,19 @@ public partial class App : Application
             return;
         }
 
+        _selfTest = StartupPlan.HasSwitch(e.Args, SelfTestSwitch);
+
         _instance = SingleInstance.Acquire();
+        StartupTrace.Mark($"tek örnek kilidi alındı · birincil={_instance.IsPrimary}");
+
         if (!TryContinueAsPrimary())
         {
+            StartupTrace.Mark("ikincil kopya · devredildi, çıkılıyor");
             Shutdown();
             return;
         }
+
+        StartupTrace.Mark("bu kopya birincil");
 
         // Before anything that takes time, and that is the whole point. Everything
         // below - the elevation check, the service, the palette, the window - happens
@@ -195,11 +280,14 @@ public partial class App : Application
             // A second launch (Start menu, desktop shortcut) arrives here.
             _instance!.ActivationRequested += OnActivationRequested;
             _instance.BeginListening();
+            StartupTrace.Mark("etkinleştirme dinleyicisi çalışıyor");
         });
 
         // The packet driver is unopenable without elevation. The manifest asks for it,
         // so reaching this branch means the manifest was bypassed somehow; ask once and
         // hand over rather than starting up half working.
+        StartupTrace.Mark($"yükseltme durumu · yönetici={Elevation.IsElevated}");
+
         if (!Elevation.IsElevated)
         {
             // Release the instance lock first, or the elevated copy we are about to
@@ -226,15 +314,24 @@ public partial class App : Application
         InstallExceptionHandlers();
 
         // --- phase one: the parts without which there is nothing to show -----------
+        StartupTrace.Mark("ProtectionService kurucusu başladı");
         _service = new ProtectionService();
+        StartupTrace.Mark("ProtectionService kurucusu bitti");
+
+        StartupTrace.Mark("MainViewModel kurucusu başladı");
         _viewModel = new MainViewModel(_service, Dispatcher);
+        StartupTrace.Mark("MainViewModel kurucusu bitti");
 
         // The palette is applied before the window is built so the first frame is
         // already the right colour, but a palette that will not load is a cosmetic
         // problem: the Fluent theme underneath it still renders every control.
+        StartupTrace.Mark("tema başlatılıyor");
         TryApplyTheme();
+        StartupTrace.Mark($"tema hazır · koyu={_theme?.IsDark}");
 
+        StartupTrace.Mark("bildirim alanı simgesi başlatılıyor");
         var trayReady = TryCreateTrayIcon();
+        StartupTrace.Mark($"bildirim alanı simgesi hazır · var={trayReady}");
 
         if (!TryCreateWindow())
         {
@@ -252,13 +349,18 @@ public partial class App : Application
                 warning: true);
         }
 
-        _plan = StartupPlan.Decide(
-            e.Args,
-            _service.Settings.StartMinimised,
-            _service.Settings.HasShownWindow,
-            trayReady);
+        _plan = _selfTest
+            ? new StartupPlan(StartupVisibility.ShowWindow, "arayüz kendi kendini sınıyor")
+            : StartupPlan.Decide(
+                e.Args,
+                _service.Settings.StartMinimised,
+                _service.Settings.HasShownWindow,
+                trayReady);
 
         AppLog.Info($"Açılış kararı: {(_plan.ShowsWindow ? "pencere gösteriliyor" : "tepside")} ({_plan.Reason}).");
+        StartupTrace.Mark($"açılış kararı · {(_plan.ShowsWindow ? "pencere" : "tepsi")} ({_plan.Reason})");
+
+        _windowWanted = _plan.ShowsWindow;
 
         if (_plan.ShowsWindow)
         {
@@ -279,10 +381,42 @@ public partial class App : Application
         // the listener keeps saying "still starting", which is the truth.
         Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => _startupComplete = true));
 
+        StartDispatcherHeartbeat();
+
+        StartupTrace.Mark("açılış tamamlandı · ileti döngüsüne geçiliyor");
+
+        if (_selfTest)
+        {
+            // The self test exists to answer one question - does this build put a real
+            // window on screen - so it deliberately never opens the driver, rewrites
+            // DNS or touches the network.
+            AppLog.Info("Arayüz kendi kendini sınama kipi: ağ motoru başlatılmıyor.");
+            StartSelfTestDeadline();
+            return;
+        }
+
         // --- phase two: everything the window does not depend on --------------------
         // Queued behind the first frame rather than run in front of it, and each part
         // guarded on its own so one refusing has no say over the others.
         Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(StartBackgroundServices));
+    }
+
+    /// <summary>
+    /// Measures how long the dispatcher took to get to a queued item, once.
+    /// </summary>
+    /// <remarks>
+    /// The one number that separates "the window is broken" from "the UI thread is
+    /// blocked", and they need opposite fixes. Queued at background priority so it sits
+    /// behind layout and render: if this reports a few milliseconds the loop is healthy
+    /// and a missing window is the window's problem, and if it reports seconds - or
+    /// never arrives at all - something in front of it is holding the thread.
+    /// </remarks>
+    private void StartDispatcherHeartbeat()
+    {
+        var queued = System.Diagnostics.Stopwatch.StartNew();
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            StartupTrace.Mark($"ileti döngüsü nabzı · kuyruktan {queued.Elapsed.TotalMilliseconds:0.0} ms sonra çalıştı")));
     }
 
     /// <summary>
@@ -295,6 +429,8 @@ public partial class App : Application
         {
             return;
         }
+
+        StartupTrace.Mark("arka plan servisleri başlatılıyor");
 
         Guarded("Denetim kanalı", () =>
         {
@@ -376,6 +512,7 @@ public partial class App : Application
             _window = new MainWindow(_viewModel!, _theme);
             _window.CloseToTrayRequested += OnCloseToTray;
             _window.ExitRequested += () => _ = ShutdownAsync();
+            _window.FirstFrameRendered += OnFirstFrameRendered;
             return true;
         }
         catch (Exception ex)
@@ -388,6 +525,9 @@ public partial class App : Application
 
     private void OnCloseToTray()
     {
+        // The one case where a window that is not on screen is correct rather than
+        // broken. Everything that judges visibility reads this.
+        _windowWanted = false;
         _window?.Hide();
 
         // Windows 11 files an icon it has not seen before behind the overflow
@@ -400,76 +540,427 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Checks, once the message loop is running, that this process actually put
-    /// something on screen - and puts the window up if it did not.
+    /// Watches, once the message loop is running, for a window that is meant to be on
+    /// screen and is not - and gets it there.
     /// </summary>
     /// <remarks>
-    /// Everything before this point can succeed and still leave nothing for the user:
-    /// the shell can drop a notification area icon it was offered while it was still
-    /// starting up, and a window can be shown into a compositor state that never
-    /// paints it. Neither reports an error. Rather than trust the startup path, the
-    /// app looks at the result twice - soon, and then once more after the desktop has
-    /// settled - and shows the window if it cannot account for itself.
+    /// <para>
+    /// Everything before this point can succeed and still leave nothing for the user.
+    /// The shell drops a notification area icon it was offered while it was still
+    /// starting up. A window is shown into a compositor state that never paints it. A
+    /// window carries coordinates from a monitor that has since been unplugged. DWM
+    /// cloaks a window and keeps reporting it as visible. None of those report an
+    /// error, and the old version of this check could not see any of them: it asked
+    /// <c>IsVisible</c>, which is true in every one of those cases, and concluded the
+    /// app was fine.
+    /// </para>
+    /// <para>
+    /// So the question is now asked properly - <see cref="WindowHealthEvaluator"/> gets
+    /// what WPF, the window manager and DWM each say - and it has three answers rather
+    /// than two. A reachable window ends the watch. A window the user deliberately put
+    /// away ends it too, once the way back in has been checked. Only the third answer
+    /// starts recovery, and that recovery is bounded: a few escalating attempts, then a
+    /// message the user can act on. A watchdog that shows and activates a window on a
+    /// timer for ever is not a fix, it is a second bug.
+    /// </para>
     /// </remarks>
     private void StartVisibilityWatchdog()
     {
         var checks = 0;
 
-        _visibilityWatchdog = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+        // Background, not ApplicationIdle: still below input, layout and render, so it
+        // can never get in front of the first frame - but not starved either, and a
+        // check that never runs is a watchdog that does not exist.
+        _visibilityWatchdog = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromSeconds(4),
+            Interval = HealthCheckSchedule[0],
         };
 
         _visibilityWatchdog.Tick += (_, _) =>
         {
+            if (_shuttingDown)
+            {
+                StopVisibilityWatchdog();
+                return;
+            }
+
             checks++;
 
-            var windowUp = _window is { IsVisible: true };
+            var observation = Observe();
+            var report = WindowHealthEvaluator.Evaluate(observation);
 
-            // "Never got there", not "is not there now": a user who closed the window
-            // to the tray in the first seconds meant it, and having it climb back out
-            // would be its own kind of broken.
-            if (!windowUp && _plan.ShowsWindow && !_windowEverShown)
+            switch (report.Health)
             {
-                AppLog.Warning("Pencere görünmüyor; yeniden gösteriliyor.");
-                ShowMainWindow();
-            }
-            else if (!windowUp)
-            {
-                // Hidden on purpose: make sure the way back in is really there.
-                _tray?.EnsureVisible();
-            }
-            else
-            {
-                // On screen, but a window handed to a compositor that has stopped
-                // drawing the material is a see-through hole with the controls
-                // floating in it - running, reachable, and indistinguishable from an
-                // app that failed to open. The window paints itself again if so.
-                _window?.EnsureBackgroundIsPainted();
+                case WindowHealth.Reachable:
+                    ConfirmWindowReachable(observation, report);
+                    return;
+
+                case WindowHealth.HiddenOnPurpose:
+                    // Hidden because that is what was asked for: make sure the way back
+                    // in is really there, then stop watching.
+                    _tray?.EnsureVisible();
+                    LogVisibility(observation, report);
+                    StopVisibilityWatchdog();
+                    return;
+
+                default:
+                    Recover(observation, report);
+                    break;
             }
 
-            if (checks >= 2)
+            if (_visibilityWatchdog is not null)
             {
-                // The one line in the log that answers "was it ever on screen?".
-                AppLog.Info(
-                    $"Görünürlük denetimi: pencere {(_windowEverShown ? "gösterildi" : "gizli")} · "
-                        + $"bildirim alanı simgesi {(_tray is null ? "yok" : "var")} · arka plan: {WindowBackdrop.Availability}.");
-
-                _visibilityWatchdog!.Stop();
-                _visibilityWatchdog = null;
+                _visibilityWatchdog.Interval = HealthCheckSchedule[Math.Min(checks, HealthCheckSchedule.Length - 1)];
             }
         };
 
         _visibilityWatchdog.Start();
     }
 
-    /// <summary>
-    /// Records that the window has been seen, so later launches are allowed to start
-    /// in the notification area.
-    /// </summary>
-    private void RememberWindowWasShown()
+    /// <summary>Puts the watch back on for a window that is wanted and is not up.</summary>
+    private void EnsureVisibilityWatchdog()
     {
-        _windowEverShown = true;
+        if (_visibilityWatchdog is null && !_recoveryExhausted && !_shuttingDown)
+        {
+            StartVisibilityWatchdog();
+        }
+    }
+
+    private void StopVisibilityWatchdog()
+    {
+        _visibilityWatchdog?.Stop();
+        _visibilityWatchdog = null;
+    }
+
+    /// <summary>
+    /// Gathers what WPF, the window manager and DWM each say about the window.
+    /// </summary>
+    private WindowObservation Observe()
+    {
+        var window = _window;
+        if (window is null)
+        {
+            return WindowObservation.Missing(_windowWanted, _tray is not null);
+        }
+
+        var native = WindowInspector.Inspect(window);
+
+        return new WindowObservation(
+            WindowExists: true,
+            WantsToBeVisible: _windowWanted,
+            Readiness: window.Readiness,
+            WpfVisible: window.IsVisible,
+            HasHandle: native.HasHandle,
+            NativeVisible: native.Visible,
+            Minimised: native.Minimised || window.WindowState == WindowState.Minimized,
+            Cloak: native.Cloak,
+            OnScreen: native.OnScreen,
+            TrayAvailable: _tray is not null);
+    }
+
+    /// <summary>
+    /// The window drew its first frame. Everything that treats the app as having been
+    /// seen hangs off here, and nothing hangs off <c>Show()</c> returning.
+    /// </summary>
+    private void OnFirstFrameRendered()
+    {
+        var observation = Observe();
+        var report = WindowHealthEvaluator.Evaluate(observation);
+
+        if (report.IsReachable)
+        {
+            ConfirmWindowReachable(observation, report);
+            return;
+        }
+
+        // A frame was drawn into something the user still cannot get to - cloaked, or
+        // off every attached monitor. The watchdog owns that from here.
+        AppLog.Warning($"İlk kare çizildi ama pencere erişilebilir değil: {report.Reason}.");
+    }
+
+    /// <summary>
+    /// Records the one outcome that counts: a real window, on a real monitor, that the
+    /// user can reach.
+    /// </summary>
+    private void ConfirmWindowReachable(WindowObservation observation, WindowHealthReport report)
+    {
+        StopVisibilityWatchdog();
+
+        if (!_windowConfirmed)
+        {
+            _windowConfirmed = true;
+            _recoveryAttempts = 0;
+            StartupTrace.Mark($"pencere doğrulandı · {report.Reason}");
+            LogVisibility(observation, report);
+
+            // Both of these are queued rather than run here. This is called from inside
+            // the first render, and neither writing a settings file nor negotiating with
+            // the compositor belongs in front of the frame the user is waiting for.
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            {
+                RememberWindowWasShown(observation);
+
+                // The material is asked for only now, on a window already proved to be
+                // on screen, so a machine where it is accepted and then never drawn can
+                // no longer cost the user the first frame.
+                EnableWindowBackdrop();
+            }));
+        }
+
+        CompleteSelfTest(success: true, observation, report);
+    }
+
+    /// <summary>Runs the next bounded recovery step for a window that will not appear.</summary>
+    private void Recover(WindowObservation observation, WindowHealthReport report)
+    {
+        var step = WindowRecovery.Next(observation, _recoveryAttempts, _recreationSpent);
+
+        AppLog.Warning(
+            $"Pencere erişilemiyor ({report.Reason}); kurtarma adımı {step} "
+            + $"({_recoveryAttempts + 1}/{WindowRecovery.MaxAttempts}).");
+        AppLog.Warning($"Pencere durumu · {DescribeWindow(observation)}");
+
+        switch (step)
+        {
+            case WindowRecoveryStep.None:
+                return;
+
+            case WindowRecoveryStep.GiveUp:
+                GiveUpOnWindow(observation, report);
+                return;
+
+            case WindowRecoveryStep.Recreate:
+                _recreationSpent = true;
+                _recoveryAttempts++;
+                RecreateWindow();
+                return;
+        }
+
+        // Reveal, Reposition and OpaqueFallback all end in a raise; they differ in what
+        // they put right first.
+        _recoveryAttempts++;
+
+        if (step == WindowRecoveryStep.Reposition)
+        {
+            WindowActivation.EnsureOnScreen(_window!);
+        }
+        else if (step == WindowRecoveryStep.OpaqueFallback)
+        {
+            // The client area may have been handed to a compositor that is not drawing
+            // it. Taking it back costs a visual effect and nothing else.
+            _window!.DisableBackdrop("pencere görünür değil");
+            _window.ForceRedraw();
+        }
+
+        ShowMainWindow();
+    }
+
+    /// <summary>
+    /// Builds a replacement window, once, for a handle that has never drawn a frame.
+    /// </summary>
+    /// <remarks>
+    /// The last step, and the only one that can lose anything. Everything the window
+    /// shows lives in the view model, which outlives it, so the replacement comes up
+    /// with the same state - but the old handle and whatever was wrong with it are
+    /// gone. Deliberately not reachable more than once per process: a window that is
+    /// rebuilt on a timer is an application that flashes on screen for ever.
+    /// </remarks>
+    private void RecreateWindow()
+    {
+        AppLog.Warning("Pencere hiç çizilmedi; tek seferlik olarak yeniden oluşturuluyor.");
+        StartupTrace.Mark("pencere yeniden oluşturuluyor");
+
+        try
+        {
+            var old = _window;
+            _window = null;
+
+            if (old is not null)
+            {
+                old.FirstFrameRendered -= OnFirstFrameRendered;
+                old.CloseForReplacement();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Eski pencere kapatılamadı", ex);
+        }
+
+        if (!TryCreateWindow())
+        {
+            return;
+        }
+
+        // The replacement never asks for the compositor material: whatever the old one
+        // could not draw, this one is going to draw itself.
+        _window!.DisableBackdrop("yeniden oluşturulan pencere düz renkle açılıyor");
+        ShowMainWindow();
+    }
+
+    /// <summary>
+    /// The end of the line: no usable window, and the user has to be told rather than
+    /// left with a process they cannot reach.
+    /// </summary>
+    private void GiveUpOnWindow(WindowObservation observation, WindowHealthReport report)
+    {
+        StopVisibilityWatchdog();
+        _recoveryExhausted = true;
+
+        if (_failureReported)
+        {
+            return;
+        }
+
+        _failureReported = true;
+
+        AppLog.Error($"Arayüz başlatılamadı: {report.Reason}");
+        AppLog.Error($"Pencere durumu · {DescribeWindow(observation)}");
+        StartupTrace.Dump(report.Reason);
+        WriteUiDiagnostics(observation, report);
+
+        _tray?.Notify(
+            AppPaths.ProductName,
+            $"Pencere açılamadı ({report.Reason}). Koruma çalışıyor; ayrıntılar: {AppPaths.LogDirectory}",
+            warning: true);
+
+        ShowStartupFailureDialog(report.Reason);
+        CompleteSelfTest(success: false, observation, report);
+    }
+
+    /// <summary>
+    /// Says what happened, on a thread of its own.
+    /// </summary>
+    /// <remarks>
+    /// A modal dialog on the UI thread would stop the dispatcher, which is the one
+    /// thing that must keep running: it is what lets a later launch be answered, the
+    /// notification area icon respond, and the engine's continuations complete. Its own
+    /// STA thread costs nothing and keeps the process usable while the message is up.
+    /// </remarks>
+    private static void ShowStartupFailureDialog(string reason)
+    {
+        try
+        {
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    MessageBox.Show(
+                        $"{AppPaths.ProductName} penceresi açılamadı.\n\n{reason}\n\n"
+                            + "Koruma arka planda çalışmaya devam ediyor ve bildirim alanı simgesinden "
+                            + "yönetilebilir.\n\nTanılama kayıtları:\n"
+                            + AppPaths.LogDirectory,
+                        AppPaths.ProductName,
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                }
+                catch (Exception)
+                {
+                    // A session with no interactive desktop cannot show a dialog. The
+                    // log file and the notification area message are still there.
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "DpiBypass.StartupFailure",
+            };
+
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Başlatma hatası iletisi gösterilemedi", ex);
+        }
+    }
+
+    /// <summary>
+    /// Leaves the window state and the startup timeline in a file of their own, so the
+    /// evidence survives even when the daily log is rotated or crowded.
+    /// </summary>
+    private static void WriteUiDiagnostics(WindowObservation observation, WindowHealthReport report)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.LogDirectory);
+            var path = Path.Combine(AppPaths.LogDirectory, "ui-diagnostics.log");
+
+            var text = new System.Text.StringBuilder()
+                .AppendLine($"{DateTimeOffset.Now:O} · arayüz açılamadı")
+                .AppendLine($"karar: {report}")
+                .AppendLine($"pencere: {observation}")
+                .AppendLine($"arka plan: {WindowBackdrop.Availability}")
+                .AppendLine("açılış izlemesi:");
+
+            foreach (var mark in StartupTrace.Timeline)
+            {
+                text.Append("    ").AppendLine(mark);
+            }
+
+            File.AppendAllText(path, text.AppendLine().ToString());
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Arayüz tanılama dosyası yazılamadı", ex);
+        }
+    }
+
+    /// <summary>The one line in the log that answers "was it ever on screen?".</summary>
+    private void LogVisibility(WindowObservation observation, WindowHealthReport report)
+        => AppLog.Info(
+            $"Görünürlük denetimi: {report.Reason} · hazırlık {observation.Readiness} · "
+            + $"bildirim alanı simgesi {(_tray is null ? "yok" : "var")} · "
+            + $"arka plan: {WindowBackdrop.Availability}.");
+
+    /// <summary>Everything about the window worth putting in a log line, in one string.</summary>
+    private string DescribeWindow(WindowObservation observation)
+    {
+        var window = _window;
+
+        var description = $"{observation} · WindowState={window?.WindowState.ToString() ?? "-"} · "
+            + $"Visibility={window?.Visibility.ToString() ?? "-"} · "
+            + $"ShowInTaskbar={window?.ShowInTaskbar.ToString() ?? "-"} · "
+            + $"arka plan={WindowBackdrop.Availability}";
+
+        // The native side adds the HWND, its rectangle and the monitors it was compared
+        // against, which is the part that explains an off-screen or cloaked window.
+        return window is null ? description : $"{description} · {WindowInspector.Inspect(window)}";
+    }
+
+    /// <summary>Turns on the compositor material, unless this machine has ruled it out.</summary>
+    private void EnableWindowBackdrop()
+    {
+        if (_window is null)
+        {
+            return;
+        }
+
+        if (_service?.Settings.DisableWindowBackdrop == true)
+        {
+            _window.DisableBackdrop("ayarlarda kapatılmış");
+            return;
+        }
+
+        _window.EnableBackdrop();
+    }
+
+    /// <summary>
+    /// Records that the window has genuinely been in front of the user, so later
+    /// launches are allowed to start in the notification area.
+    /// </summary>
+    /// <remarks>
+    /// Written only after a confirmed frame on a reachable window, and that is the
+    /// whole point of the check. This used to be saved the instant <c>Show()</c>
+    /// returned, which is true of a window that never draws - so one failed first run
+    /// told every later logon that the user had already seen the app, and the logon
+    /// task was free to start it in the notification area for ever after. A first run
+    /// that fails must leave no trace that says it succeeded.
+    /// </remarks>
+    private void RememberWindowWasShown(WindowObservation observation)
+    {
+        if (!WindowHealthEvaluator.MayRecordWindowShown(observation))
+        {
+            return;
+        }
 
         var service = _service;
         if (service is null || service.Settings.HasShownWindow)
@@ -648,10 +1139,10 @@ public partial class App : Application
         // what the waiting launch is told, so a stuck dispatcher has to report failure
         // rather than let the request disappear into a queue that is not being drained.
         // And the answer is the window's, not the dispatcher's - an operation that
-        // completed while failing to raise the window is still a launch that showed
-        // the user nothing.
-        var shown = false;
-        var operation = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => shown = ShowMainWindow()));
+        // completed while the window is still not on screen is a launch that showed the
+        // user nothing, and it now says so rather than claiming success.
+        var reply = HandoverReply.NoAnswer;
+        var operation = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() => reply = ActivateForLaunch()));
 
         // Longer than the first wait on the other side and matched to the second one,
         // so a busy dispatcher gets to finish rather than being written off while the
@@ -662,7 +1153,7 @@ public partial class App : Application
         // instance before it acts on the answer.
         var completed = operation.Wait(BusyHandover) == DispatcherOperationStatus.Completed;
 
-        return completed && shown ? HandoverReply.WindowShown : HandoverReply.NoAnswer;
+        return completed ? reply : HandoverReply.NoAnswer;
     }
 
     private bool TryCreateTrayIcon()
@@ -791,38 +1282,186 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Puts the window in front of the user. Returns whether it is genuinely there.
+    /// Puts the window in front of the user, and reports whether the raise itself ran.
     /// </summary>
     /// <remarks>
-    /// The return value is not decoration: it is what a second launch is told, and
-    /// that launch takes over when the answer is no. Reporting success because
-    /// <c>Show()</c> did not throw is how a wedged copy keeps every later launch
-    /// from ever producing a window.
+    /// Deliberately not a claim that anything is on screen. Whether the user can see
+    /// the window is settled by <see cref="WindowHealthEvaluator"/> once a frame has
+    /// been drawn, because that is a different question with a different answer and
+    /// conflating the two is the bug this whole path was rebuilt around.
     /// </remarks>
-    private bool ShowMainWindow()
+    private void ShowMainWindow()
     {
         if (_window is null)
         {
-            return false;
+            AppLog.Warning("Gösterilecek pencere yok.");
+            return;
         }
 
-        var shown = WindowActivation.BringToFront(_window);
+        _windowWanted = true;
 
-        if (shown)
+        StartupTrace.Mark($"ShowMainWindow · hazırlık={_window.Readiness}");
+        var outcome = WindowActivation.Raise(_window);
+        StartupTrace.Mark(
+            $"ShowMainWindow bitti · adımlar={(outcome.Completed ? "tamam" : "hata")} · ön plan={outcome.Foreground}");
+
+        if (!outcome.Completed)
         {
-            RememberWindowWasShown();
-
-            // Raising a window can rebuild its handle, and a rebuilt handle has none
-            // of the backdrop state the old one was given - which leaves a window
-            // that paints nothing over a material nobody is drawing.
-            _window.EnsureBackgroundIsPainted();
+            return;
         }
-        else
+
+        // Raising a window can rebuild its handle, and a rebuilt handle has none of the
+        // backdrop state the old one was given - which leaves a window that paints
+        // nothing over a material nobody is drawing.
+        _window.EnsureBackgroundIsPainted();
+    }
+
+    /// <summary>
+    /// Answers a second launch that asked for the window, from the UI thread.
+    /// </summary>
+    /// <remarks>
+    /// The repeat-request check is the escape hatch for the one failure this process
+    /// cannot see for itself. A window whose client area is handed to the compositor is
+    /// invisible if the compositor does not draw the material, and nothing Windows will
+    /// answer distinguishes that from a window being drawn perfectly - so the evidence
+    /// has to come from the user, and it does: they launched the app again while this
+    /// process believed its window was reachable and in front of them. That only makes
+    /// sense if they cannot see it, so the material goes, permanently, on this machine.
+    /// A cosmetic loss, reversible by hand in settings.json, in exchange for the app
+    /// being reachable at all.
+    /// </remarks>
+    private HandoverReply ActivateForLaunch()
+    {
+        NoteRedundantActivation(Observe());
+
+        ShowMainWindow();
+
+        var observation = Observe();
+        var reply = InstanceHandover.ReplyFor(observation, _startupComplete, _recoveryExhausted);
+
+        if (reply != HandoverReply.WindowShown)
         {
-            AppLog.Warning("Pencere öne getirilemedi.");
+            AppLog.Warning(
+                $"Etkinleştirme isteği yanıtı: {reply} · {WindowHealthEvaluator.Evaluate(observation).Reason}");
+
+            // A launch asked for a window and did not get one. That is the same fault
+            // the startup watchdog exists for, so it goes back on - otherwise a copy
+            // that has been sitting in the notification area since boot has nothing
+            // watching it, and every later launch waits out its budget and takes over.
+            EnsureVisibilityWatchdog();
         }
 
-        return shown;
+        return reply;
+    }
+
+    /// <summary>
+    /// Counts launches that asked for a window this process already believed was on
+    /// screen, and acts on the second one.
+    /// </summary>
+    /// <remarks>
+    /// The evidence is the user's behaviour, because nothing else can supply it. A
+    /// window whose client area has been handed to the compositor is invisible when the
+    /// compositor does not draw the material, and Windows reports that window as
+    /// visible, uncloaked, on a monitor and focused - identical to a window being drawn
+    /// perfectly. Someone launching the application again, twice, while this process
+    /// says its window is already up and not minimised, is telling us the one thing we
+    /// cannot measure. So the material goes, on this machine, permanently.
+    /// </remarks>
+    private void NoteRedundantActivation(WindowObservation before)
+    {
+        if (_window is not { BackdropActive: true }
+            || before.Minimised
+            || !WindowHealthEvaluator.Evaluate(before).IsReachable)
+        {
+            _redundantActivations = 0;
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        _redundantActivations = now - _lastRedundantActivation <= RedundantActivationWindow
+            ? _redundantActivations + 1
+            : 1;
+        _lastRedundantActivation = now;
+
+        if (_redundantActivations < 2)
+        {
+            return;
+        }
+
+        AppLog.Warning(
+            "Uygulama, penceresi zaten açık ve önde görünürken yeniden başlatıldı; "
+            + "pencere arka planı kalıcı olarak kapatılıyor.");
+
+        _window.DisableBackdrop("kullanıcı pencereyi göremiyor");
+        _window.ForceRedraw();
+        PersistBackdropOptOut();
+    }
+
+    /// <summary>Remembers that this machine must never be offered the material again.</summary>
+    private void PersistBackdropOptOut()
+    {
+        var service = _service;
+        if (service is null || service.Settings.DisableWindowBackdrop)
+        {
+            return;
+        }
+
+        try
+        {
+            service.Settings.DisableWindowBackdrop = true;
+            service.SaveSettings();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Pencere arka planı ayarı kaydedilemedi", ex);
+        }
+    }
+
+    /// <summary>Ends the UI self test with a verdict the caller can read from the exit code.</summary>
+    private void CompleteSelfTest(bool success, WindowObservation observation, WindowHealthReport report)
+    {
+        if (!_selfTest)
+        {
+            return;
+        }
+
+        _selfTest = false;
+
+        AppLog.Info(
+            $"Arayüz sınaması {(success ? "BAŞARILI" : "BAŞARISIZ")} · {report} · {DescribeWindow(observation)}");
+
+        if (!success)
+        {
+            StartupTrace.Dump("arayüz sınaması");
+            WriteUiDiagnostics(observation, report);
+        }
+
+        // Queued rather than immediate so this can be called from inside the very
+        // handlers the shutdown tears down, and routed through the normal teardown so
+        // the instance lock and the service are released the way they always are.
+        _exitCode = success ? 0 : 1;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => _ = ShutdownAsync()));
+    }
+
+    /// <summary>Stops the self test from waiting for a window that is never going to come.</summary>
+    private void StartSelfTestDeadline()
+    {
+        var deadline = new DispatcherTimer(DispatcherPriority.Background) { Interval = SelfTestBudget };
+
+        deadline.Tick += (_, _) =>
+        {
+            deadline.Stop();
+
+            if (!_selfTest)
+            {
+                return;
+            }
+
+            var observation = Observe();
+            CompleteSelfTest(success: false, observation, WindowHealthEvaluator.Evaluate(observation));
+        };
+
+        deadline.Start();
     }
 
     /// <summary>
@@ -937,8 +1576,7 @@ public partial class App : Application
 
         try
         {
-            _visibilityWatchdog?.Stop();
-            _visibilityWatchdog = null;
+            StopVisibilityWatchdog();
             _window?.Hide();
             _viewModel?.Detach();
 
@@ -963,7 +1601,7 @@ public partial class App : Application
             _theme?.Dispose();
             _instance?.Dispose();
             AppLog.Info("Kapatıldı.");
-            Shutdown();
+            Shutdown(_exitCode);
         }
     }
 
