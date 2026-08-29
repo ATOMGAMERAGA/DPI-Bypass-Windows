@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Text;
 using System.Text.Json;
 
 namespace DpiBypass.Core.Ipc;
@@ -26,7 +27,15 @@ public sealed class ControlServer : IAsyncDisposable
         _log = log;
     }
 
-    public void Start() => _loop = Task.Run(() => AcceptLoopAsync(_stopping.Token));
+    public void Start()
+    {
+        if (_loop is { IsCompleted: false })
+        {
+            return;
+        }
+
+        _loop = Task.Run(() => AcceptLoopAsync(_stopping.Token));
+    }
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
     {
@@ -44,9 +53,13 @@ public sealed class ControlServer : IAsyncDisposable
                 await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
                 await ServeAsync(pipe, cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (OperationCanceledException)
+            {
+                _log?.Invoke("Control channel request timed out.");
             }
             catch (Exception ex)
             {
@@ -67,10 +80,11 @@ public sealed class ControlServer : IAsyncDisposable
 
     private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
     {
-        using var reader = new StreamReader(pipe, leaveOpen: true);
-        await using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(ControlProtocol.RequestTimeout);
+        var token = timeout.Token;
 
-        var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        var line = await ReadLineBoundedAsync(pipe, ControlProtocol.MaxRequestBytes, token).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(line))
         {
             return;
@@ -82,24 +96,45 @@ public sealed class ControlServer : IAsyncDisposable
             var request = JsonSerializer.Deserialize<ControlRequest>(line, ControlProtocol.Json);
             response = request is null
                 ? ControlResponse.Failure("boş istek")
-                : await _handler(request).ConfigureAwait(false);
+                : await _handler(request).WaitAsync(token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             response = ControlResponse.Failure(ex.Message);
         }
 
-        await writer.WriteLineAsync(JsonSerializer.Serialize(response, ControlProtocol.Json)).ConfigureAwait(false);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(response, ControlProtocol.Json) + "\n");
+        await pipe.WriteAsync(bytes, token).ConfigureAwait(false);
+    }
 
-        // Let the client read the answer before the pipe goes away.
-        try
+    private static async Task<string?> ReadLineBoundedAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[256];
+        using var memory = new MemoryStream();
+
+        while (memory.Length < maxBytes)
         {
-            pipe.WaitForPipeDrain();
+            var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read <= 0)
+            {
+                break;
+            }
+
+            var newline = Array.IndexOf(buffer, (byte)'\n', 0, read);
+            var count = newline >= 0 ? newline : read;
+            memory.Write(buffer, 0, count);
+            if (newline >= 0)
+            {
+                break;
+            }
         }
-        catch (Exception)
+
+        if (memory.Length == 0 || memory.Length >= maxBytes)
         {
-            // The client may already have gone.
+            return null;
         }
+
+        return Encoding.UTF8.GetString(memory.ToArray()).TrimEnd('\r');
     }
 
     public async ValueTask DisposeAsync()
@@ -145,15 +180,20 @@ public static class ControlClient
     {
         try
         {
+            var requestTimeout = timeout ?? TimeSpan.FromSeconds(3);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(requestTimeout);
+            var token = deadline.Token;
+
             await using var pipe = new NamedPipeClientStream(".", ControlProtocol.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await pipe.ConnectAsync((int)(timeout ?? TimeSpan.FromSeconds(3)).TotalMilliseconds, cancellationToken).ConfigureAwait(false);
+            await pipe.ConnectAsync((int)requestTimeout.TotalMilliseconds, token).ConfigureAwait(false);
 
             await using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
             using var reader = new StreamReader(pipe, leaveOpen: true);
 
-            await writer.WriteLineAsync(JsonSerializer.Serialize(request, ControlProtocol.Json)).ConfigureAwait(false);
+            await writer.WriteLineAsync(JsonSerializer.Serialize(request, ControlProtocol.Json).AsMemory(), token).ConfigureAwait(false);
 
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(token).ConfigureAwait(false);
             return line is null ? null : JsonSerializer.Deserialize<ControlResponse>(line, ControlProtocol.Json);
         }
         catch (TimeoutException)
@@ -165,6 +205,10 @@ public static class ControlClient
             return null;
         }
         catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return null;
         }

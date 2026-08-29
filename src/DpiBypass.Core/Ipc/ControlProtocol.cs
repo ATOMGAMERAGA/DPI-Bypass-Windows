@@ -25,13 +25,16 @@ public sealed record ControlResponse
 
 public static class ControlProtocol
 {
+    public const int MaxRequestBytes = 16 * 1024;
+
+    public static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>
     /// The pipe the running instance listens on.
     /// </summary>
     /// <remarks>
-    /// Local only, and both ends run elevated because the executable's manifest
-    /// requires it - so no attempt is made to widen the pipe's default DACL. A
-    /// non-administrator cannot start the client in the first place.
+    /// Local only. The server also restricts request size and deadlines because
+    /// pipe clients may be buggy or hostile even on the same machine.
     /// </remarks>
     public const string PipeName = "DpiBypass.Control";
 

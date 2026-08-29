@@ -36,23 +36,35 @@ internal static class PacketFactory
         return packet;
     }
 
-    public static byte[] BuildIPv6Tcp(byte[] payload, ushort destinationPort = 443, uint sequence = 7)
+    public static byte[] BuildIPv6Tcp(
+        byte[] payload,
+        ushort destinationPort = 443,
+        uint sequence = 7,
+        bool destinationOptions = false)
     {
-        var total = 40 + 20 + payload.Length;
+        var extensionLength = destinationOptions ? 8 : 0;
+        var tcpOffset = 40 + extensionLength;
+        var total = tcpOffset + 20 + payload.Length;
         var packet = new byte[total];
 
         packet[0] = 0x60; // IPv6
-        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(4), (ushort)(20 + payload.Length));
-        packet[6] = 6; // TCP
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(4), (ushort)(extensionLength + 20 + payload.Length));
+        packet[6] = destinationOptions ? (byte)60 : (byte)6;
         packet[7] = 64; // hop limit
 
-        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(40), 40000);
-        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(42), destinationPort);
-        BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(44), sequence);
-        packet[52] = 5 << 4;
-        packet[53] = 0x18;
+        if (destinationOptions)
+        {
+            packet[40] = 6; // next header: TCP
+            packet[41] = 0; // (0 + 1) * 8 bytes
+        }
 
-        payload.CopyTo(packet, 60);
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(tcpOffset), 40000);
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(tcpOffset + 2), destinationPort);
+        BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(tcpOffset + 4), sequence);
+        packet[tcpOffset + 12] = 5 << 4;
+        packet[tcpOffset + 13] = 0x18;
+
+        payload.CopyTo(packet, tcpOffset + 20);
         return packet;
     }
 

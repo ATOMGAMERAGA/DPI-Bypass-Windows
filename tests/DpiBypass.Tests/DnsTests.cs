@@ -35,6 +35,20 @@ public class DnsMessageTests
     }
 
     [Fact]
+    public void WireCacheKeyIgnoresOnlyTheTransactionId()
+    {
+        var first = DnsMessage.BuildQuery(1, "example.test", DnsRecordType.A);
+        var second = DnsMessage.BuildQuery(2, "example.test", DnsRecordType.A);
+        var noRecursion = DnsMessage.BuildQuery(1, "example.test", DnsRecordType.A, recursionDesired: false);
+
+        Assert.True(DnsMessage.TryBuildCacheKey(first, out var firstKey));
+        Assert.True(DnsMessage.TryBuildCacheKey(second, out var secondKey));
+        Assert.True(DnsMessage.TryBuildCacheKey(noRecursion, out var noRecursionKey));
+        Assert.Equal(firstKey, secondKey);
+        Assert.NotEqual(firstKey, noRecursionKey);
+    }
+
+    [Fact]
     public void IdCanBeRewrittenWithoutDisturbingTheRest()
     {
         var query = DnsMessage.BuildQuery(1, "discord.com", DnsRecordType.A);
@@ -77,6 +91,41 @@ public class DnsMessageTests
             (DnsRecordType.A, 120u, new byte[] { 5, 6, 7, 8 }));
 
         Assert.Equal(120u, DnsMessage.GetMinimumTtl(response));
+    }
+
+    [Fact]
+    public void CachedResponsesHaveTheirTtlsAgedBeforeReplay()
+    {
+        var response = BuildResponse(
+            "example.test",
+            (DnsRecordType.A, 120u, new byte[] { 192, 0, 2, 10 }),
+            (DnsRecordType.A, 30u, new byte[] { 192, 0, 2, 11 }));
+
+        var aged = DnsMessage.AgeResponseTtls(response, TimeSpan.FromSeconds(45));
+        var answers = DnsMessage.ReadAnswers(aged);
+
+        Assert.Equal(75u, answers[0].Ttl);
+        Assert.Equal(0u, answers[1].Ttl);
+    }
+
+    [Fact]
+    public void ResponseMustMatchTheOriginalQuestion()
+    {
+        var query = DnsMessage.BuildQuery(0x1111, "example.test", DnsRecordType.A);
+        var good = BuildResponse("example.test", (DnsRecordType.A, 60u, new byte[] { 192, 0, 2, 1 }));
+        var wrongName = BuildResponse("other.test", (DnsRecordType.A, 60u, new byte[] { 192, 0, 2, 1 }));
+        var wrongType = BuildResponse("example.test", (DnsRecordType.A, 60u, new byte[] { 192, 0, 2, 1 }));
+        DnsMessage.SetId(good, 0x1111);
+        DnsMessage.SetId(wrongName, 0x1111);
+        DnsMessage.SetId(wrongType, 0x1111);
+        BinaryPrimitives.WriteUInt16BigEndian(wrongType.AsSpan(12 + DnsMessage.EncodeName("example.test").Length), DnsRecordType.Aaaa);
+
+        Assert.True(DnsMessage.IsResponseForQuery(query, good));
+        Assert.False(DnsMessage.IsResponseForQuery(query, wrongName));
+        Assert.False(DnsMessage.IsResponseForQuery(query, wrongType));
+
+        DnsMessage.SetId(good, 0x2222);
+        Assert.False(DnsMessage.IsResponseForQuery(query, good));
     }
 
     [Fact]
@@ -175,6 +224,14 @@ public class DnsMessageTests
     [Fact]
     public void RejectsOverlongLabels()
         => Assert.Throws<ArgumentException>(() => DnsMessage.EncodeName(new string('a', 64) + ".com"));
+
+    [Fact]
+    public void RejectsUrlsAndControlCharactersAsDnsNames()
+    {
+        Assert.Throws<ArgumentException>(() => DnsMessage.EncodeName("https://example.test/path"));
+        Assert.Throws<ArgumentException>(() => DnsMessage.EncodeName("exa\u0001mple.test"));
+        Assert.Throws<ArgumentException>(() => DnsMessage.EncodeName("example..test"));
+    }
 
     private static byte[] BuildResponse(string name, params (ushort Type, uint Ttl, byte[] Data)[] answers)
     {

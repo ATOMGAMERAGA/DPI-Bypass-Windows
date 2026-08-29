@@ -166,6 +166,33 @@ public class TcpIpPacketTests
     }
 
     [Fact]
+    public void ParsesTcpAfterAnIPv6DestinationOptionsHeader()
+    {
+        var payload = Encoding.ASCII.GetBytes("v6 extension payload");
+        var packet = PacketFactory.BuildIPv6Tcp(payload, sequence: 19, destinationOptions: true);
+
+        var parsed = TcpIpPacket.Parse(packet);
+
+        Assert.True(parsed.IsValid);
+        Assert.Equal(48, parsed.TcpHeaderOffset);
+        Assert.Equal(68, parsed.PayloadOffset);
+        Assert.Equal(19u, parsed.SequenceNumber);
+        Assert.Equal(payload, parsed.Payload(packet).ToArray());
+    }
+
+    [Fact]
+    public void RejectsIpFragmentsWithoutAttemptingReassembly()
+    {
+        var ipv4 = PacketFactory.BuildIPv4Tcp([1, 2, 3]);
+        ipv4[6] = 0x20; // More Fragments
+        Assert.False(TcpIpPacket.Parse(ipv4).IsValid);
+
+        var ipv6 = PacketFactory.BuildIPv6Tcp([1, 2, 3], destinationOptions: true);
+        ipv6[6] = 44; // Fragment header instead of Destination Options
+        Assert.False(TcpIpPacket.Parse(ipv6).IsValid);
+    }
+
+    [Fact]
     public void RewritesLengthAndSequenceForASplitSegment()
     {
         var payload = Encoding.ASCII.GetBytes("0123456789");
@@ -219,5 +246,25 @@ public class TcpIpPacketTests
         // Ethernet padding must not be mistaken for extra payload.
         var parsed = TcpIpPacket.Parse(padded);
         Assert.Equal(payload.Length, parsed.PayloadLength);
+    }
+}
+
+public class QuicPacketTests
+{
+    [Fact]
+    public void RecognisesV1AndV2InitialPackets()
+    {
+        Assert.True(QuicPacket.IsInitial([0xC0, 0x00, 0x00, 0x00, 0x01]));
+        Assert.True(QuicPacket.IsInitial([0xD0, 0x6B, 0x33, 0x43, 0xCF]));
+    }
+
+    [Fact]
+    public void RejectsRetryVersionNegotiationAndShortHeaders()
+    {
+        Assert.False(QuicPacket.IsInitial([0xF0, 0x00, 0x00, 0x00, 0x01]));
+        Assert.False(QuicPacket.IsInitial([0xC0, 0x6B, 0x33, 0x43, 0xCF]));
+        Assert.False(QuicPacket.IsInitial([0xC0, 0x00, 0x00, 0x00, 0x00]));
+        Assert.False(QuicPacket.IsInitial([0x40, 0x01, 0x02, 0x03, 0x04]));
+        Assert.False(QuicPacket.IsInitial([0xC0, 0x00]));
     }
 }
