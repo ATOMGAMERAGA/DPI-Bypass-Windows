@@ -1265,7 +1265,7 @@ public sealed class MainViewModel : ObservableObject
     {
         try
         {
-            Clipboard.SetText(string.Join(Environment.NewLine, LogLines));
+            System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, LogLines));
             AppLog.Info($"Günlük görünümündeki {LogLines.Count} satır panoya kopyalandı.");
         }
         catch (Exception ex)
