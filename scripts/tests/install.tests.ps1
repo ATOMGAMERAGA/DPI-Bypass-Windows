@@ -416,10 +416,17 @@ Test-Case 'the install command does not launch a second copy over the installer'
         throw 'the app is launched before the health check has looked for a running copy'
     }
 
-    # The guard itself: without it the launch is unconditional again.
-    $guard = $script.IndexOf('if (-not $healthy -and -not $appProcess) {', [StringComparison]::Ordinal)
-    if ($guard -lt 0) { throw 'the --show launch is no longer guarded by the health check result' }
+    # The guard itself: only code 2 means there is no primary copy. Code 1 means a
+    # copy answered but its window failed, and launching over it repeats the whole
+    # recovery wait instead of fixing anything.
+    $guard = $script.IndexOf('if ($healthExitCode -eq 2 -and -not $appProcess) {', [StringComparison]::Ordinal)
+    if ($guard -lt 0) { throw 'the --show launch is not restricted to the no-instance result' }
     if ($guard -gt $launches[0].Index) { throw 'the guard does not cover the launch' }
+
+    $failureBreak = $script.IndexOf('elseif (-not $healthy) {', $guard, [StringComparison]::Ordinal)
+    if ($failureBreak -lt 0 -or $failureBreak -gt $launches[0].Index + 1000) {
+        throw 'a responsive copy with a broken window is not failed immediately'
+    }
 }
 
 Test-Case 'a failed check never stops a copy this script did not start' {

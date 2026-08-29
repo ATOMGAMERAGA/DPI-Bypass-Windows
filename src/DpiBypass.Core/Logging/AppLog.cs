@@ -62,7 +62,12 @@ public static class AppLog
 
     public static void Error(string message) => Write(LogLevel.Error, message);
 
-    public static void Error(string message, Exception exception) => Write(LogLevel.Error, $"{message}: {exception.Message}");
+    // Exception.Message throws away the inner exception, which is commonly the only
+    // useful part of WPF and reflection failures (for example, the missing resource
+    // wrapped by a XamlParseException). Keep the full exception chain and stack in the
+    // persistent log so a startup failure can be diagnosed from the file the dialog
+    // points at instead of reproducing it on the developer's machine first.
+    public static void Error(string message, Exception exception) => Write(LogLevel.Error, $"{message}:{Environment.NewLine}{exception}");
 
     public static void Write(LogLevel level, string message)
     {

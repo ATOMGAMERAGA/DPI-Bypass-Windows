@@ -39,6 +39,7 @@ Write-Host 'XAML resources' -ForegroundColor Cyan
 Write-Host "  $($defined.Count) key(s) defined across the app's dictionaries"
 
 $missing = New-Object System.Collections.Generic.List[string]
+$forwardReferences = New-Object System.Collections.Generic.List[string]
 $references = 0
 
 foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
@@ -57,18 +58,42 @@ foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
             $missing.Add("$($file.Name): $kind $key")
         }
     }
+
+    # StaticResource is resolved while a ResourceDictionary is read and therefore
+    # cannot point forward to a key declared later in that same dictionary. Merely
+    # checking that the key exists somewhere missed exactly this failure: the app
+    # compiled, but MainWindow.InitializeComponent threw before drawing a frame.
+    if ($text -match '^\s*<ResourceDictionary\b') {
+        $definitions = @{}
+        foreach ($definition in [regex]::Matches($text, 'x:Key="([^"]+)"')) {
+            if (-not $definitions.ContainsKey($definition.Groups[1].Value)) {
+                $definitions[$definition.Groups[1].Value] = $definition.Index
+            }
+        }
+
+        foreach ($reference in [regex]::Matches($text, '\{StaticResource\s+([^},]+)\}')) {
+            $key = $reference.Groups[1].Value.Trim()
+            if ($definitions.ContainsKey($key) -and $definitions[$key] -gt $reference.Index) {
+                $line = 1 + $text.Substring(0, $reference.Index).Split("`n").Count - 1
+                $forwardReferences.Add("$($file.Name):$line StaticResource $key is declared later")
+            }
+        }
+    }
 }
 
 Write-Host "  $references reference(s) checked"
 
-if ($missing.Count -gt 0) {
+if ($missing.Count -gt 0 -or $forwardReferences.Count -gt 0) {
     Write-Host ''
     foreach ($entry in $missing) {
         Write-Host "  MISSING $entry" -ForegroundColor Red
     }
+    foreach ($entry in $forwardReferences) {
+        Write-Host "  FORWARD $entry" -ForegroundColor Red
+    }
 
     Write-Host ''
-    Write-Host "$($missing.Count) resource reference(s) have no definition." -ForegroundColor Red
+    Write-Host "$($missing.Count) missing and $($forwardReferences.Count) forward resource reference(s)." -ForegroundColor Red
     exit 1
 }
 

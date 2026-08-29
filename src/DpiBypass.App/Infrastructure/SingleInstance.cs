@@ -8,6 +8,19 @@ using DpiBypass.Core.Startup;
 
 namespace DpiBypass.App.Infrastructure;
 
+/// <summary>The installer's view of a request to show the primary window.</summary>
+public enum VisibleWindowRequest
+{
+    /// <summary>A primary copy confirmed that a rendered window is reachable.</summary>
+    WindowShown = 0,
+
+    /// <summary>A primary copy answered, but could not produce a usable window.</summary>
+    WindowFailed = 1,
+
+    /// <summary>No primary copy owns the activation objects; the caller may start one.</summary>
+    NoInstance = 2,
+}
+
 /// <summary>
 /// Keeps one copy of the app running and gives later launches a way to say
 /// "show yourself" instead of dying quietly.
@@ -267,17 +280,18 @@ public sealed class SingleInstance : IDisposable
     /// where the probe can become primary a millisecond before the application it is
     /// checking and make that application exit as the "second" copy.
     /// </summary>
-    public static bool RequestVisibleWindow(TimeSpan timeout)
+    public static VisibleWindowRequest RequestVisibleWindow(TimeSpan timeout)
     {
         using var activate = OpenEvent(ActivateEventName, create: false);
         using var acknowledge = OpenEvent(AcknowledgeEventName, create: false);
         using var starting = OpenEvent(StartingEventName, create: false);
         if (activate is null || acknowledge is null)
         {
-            return false;
+            return VisibleWindowRequest.NoInstance;
         }
 
         var deadline = DateTime.UtcNow + timeout;
+        var primaryAnswered = false;
 
         try
         {
@@ -288,7 +302,7 @@ public sealed class SingleInstance : IDisposable
                 var remaining = deadline - DateTime.UtcNow;
                 if (remaining <= TimeSpan.Zero)
                 {
-                    return false;
+                    return primaryAnswered ? VisibleWindowRequest.WindowFailed : VisibleWindowRequest.NoInstance;
                 }
 
                 acknowledge.Reset();
@@ -296,7 +310,7 @@ public sealed class SingleInstance : IDisposable
 
                 if (!activate.Set())
                 {
-                    return false;
+                    return primaryAnswered ? VisibleWindowRequest.WindowFailed : VisibleWindowRequest.NoInstance;
                 }
 
                 var reply = WaitForReply(acknowledge, starting, Shorter(remaining, ReplyWindow));
@@ -304,29 +318,30 @@ public sealed class SingleInstance : IDisposable
                 switch (reply)
                 {
                     case HandoverReply.WindowShown:
-                        return true;
+                        return VisibleWindowRequest.WindowShown;
 
                     // Still coming up: that is a running instance, so keep waiting for
                     // the window rather than reporting the installation as failed. The
                     // pause is what keeps that from being a spin on the event.
                     case HandoverReply.Starting:
+                        primaryAnswered = true;
                         var pause = deadline - DateTime.UtcNow;
                         if (pause <= TimeSpan.Zero)
                         {
-                            return false;
+                            return VisibleWindowRequest.WindowFailed;
                         }
 
                         Thread.Sleep(Shorter(pause, PollInterval));
                         continue;
 
                     default:
-                        return false;
+                        return primaryAnswered ? VisibleWindowRequest.WindowFailed : VisibleWindowRequest.NoInstance;
                 }
             }
         }
         catch (Exception)
         {
-            return false;
+            return primaryAnswered ? VisibleWindowRequest.WindowFailed : VisibleWindowRequest.NoInstance;
         }
     }
 

@@ -155,18 +155,6 @@
         <Setter Property="Height" Value="22" />
     </Style>
 
-    <!-- A card that reads as a caution rather than a plain panel: used for the
-         settings that change how packets leave the machine system-wide. -->
-    <Style x:Key="NoticeCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
-        <Setter Property="Background" Value="{DynamicResource AppWarningSoftBrush}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource AppWarningBrush}" />
-        <Setter Property="Padding" Value="14" />
-    </Style>
-
-    <Style x:Key="NoticeTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
-        <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
-    </Style>
-
     <!-- ======== Typography ======== -->
 
     <Style x:Key="PageTitleStyle" TargetType="TextBlock">
@@ -218,6 +206,20 @@
     <Style x:Key="InfoTileValueStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyStyle}">
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Margin" Value="0,3,0,0" />
+    </Style>
+
+    <!-- A card that reads as a caution rather than a plain panel: used for the
+         settings that change how packets leave the machine system-wide. Keep the
+         text style after CaptionStyle: StaticResource lookups in a resource
+         dictionary cannot resolve a key declared later in the same dictionary. -->
+    <Style x:Key="NoticeCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
+        <Setter Property="Background" Value="{DynamicResource AppWarningSoftBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppWarningBrush}" />
+        <Setter Property="Padding" Value="14" />
+    </Style>
+
+    <Style x:Key="NoticeTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
     </Style>
 
     <!-- A transient one-line result ("added", "removed"). Takes no space until it

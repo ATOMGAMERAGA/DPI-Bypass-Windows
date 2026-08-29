@@ -94,7 +94,11 @@ internal static class CommandLineTasks
                 // is answered immediately, without spending any of the budget. The
                 // short timeout this used to have expired against a first launch that
                 // was still loading and reported a working installation as broken.
-                Environment.ExitCode = SingleInstance.RequestVisibleWindow(HealthCheckTimeout(argument)) ? 0 : 1;
+                // 0 = a rendered window, 1 = a primary copy answered but its window
+                // failed, 2 = no primary copy. The installer may start an app only for
+                // the last case; treating a broken-but-live copy as "nobody" made it
+                // launch a second long recovery cycle and doubled failed install time.
+                Environment.ExitCode = (int)SingleInstance.RequestVisibleWindow(HealthCheckTimeout(argument));
                 return true;
 
             // --- catalogue listings, which need no running instance ---------------
@@ -269,7 +273,7 @@ internal static class CommandLineTasks
           DpiBypass.exe --show              pencereyi her koşulda aç
           DpiBypass.exe --minimized         tepside başlat (oturum açma görevi bunu kullanır)
           DpiBypass.exe --health-check [sn] çalışan kopyanın penceresini açmasını bekle
-                                            (0 = pencere açıldı, 1 = açılmadı)
+                                            (0 = açıldı, 1 = pencere hatası, 2 = uygulama yok)
           DpiBypass.exe --ui-selftest       arayüzü sınayıp çıkar; ağ motorunu açmaz
                                             (0 = pencere gerçekten çizildi, 1 = çizilmedi)
 

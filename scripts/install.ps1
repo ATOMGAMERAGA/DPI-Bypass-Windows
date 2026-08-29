@@ -496,20 +496,24 @@ try {
                 $healthExitCode = -1
             }
 
-            # A non-zero code on the first attempt means nothing answered at all - the
-            # named objects a running copy owns do not exist, which the check reports
-            # immediately rather than waiting out its timeout. That is the one case
-            # where this script has to launch the app itself: an installer that did not
-            # run the launch entry, or a copy that has already exited.
+            # Exit code 2 means the named objects a running copy owns do not exist.
+            # That is the one case where this script has to launch the app itself: an
+            # installer that did not run the launch entry, or a copy that has already
+            # exited. Exit code 1 is different: a primary copy answered but its window
+            # failed. Starting another copy over it only repeats the same recovery and
+            # used to double the wait before the installer reported the real error.
             #
             # Started in its own folder, not in this script's temporary one: that folder
             # is deleted in the finally block below, and a running process whose working
             # directory has been removed cannot launch a child of its own - which is how
             # the very first run after an install ends up unable to register its logon
             # task or configure DNS, reporting a path error about neither.
-            if (-not $healthy -and -not $appProcess) {
+            if ($healthExitCode -eq 2 -and -not $appProcess) {
                 $appProcess = Start-Process -FilePath $appExe -ArgumentList '--show' `
                     -WorkingDirectory $now.InstallLocation -PassThru
+            }
+            elseif (-not $healthy) {
+                break
             }
         }
 

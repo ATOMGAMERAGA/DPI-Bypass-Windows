@@ -118,6 +118,39 @@ jobs:
           }
           Write-Host 'Publish output verified.'
 
+      - name: Smoke-test the real WPF window
+        shell: pwsh
+        run: |
+          # Compiling BAML and checking resource names is not enough: WPF resolves
+          # templates and StaticResource references while InitializeComponent runs.
+          # Launch the published executable on the Windows runner and require a real
+          # first frame before an installer containing it is allowed to ship.
+          $publish = (Resolve-Path 'artifacts/publish').Path
+          $exe = Join-Path $publish 'DpiBypass.exe'
+          $process = Start-Process -FilePath $exe `
+                                   -ArgumentList '--ui-selftest' `
+                                   -WorkingDirectory $publish `
+                                   -PassThru
+
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw 'The WPF window self-test did not finish within 60 seconds.'
+          }
+
+          if ($process.ExitCode -ne 0) {
+            $logs = Join-Path $env:ProgramData 'DPI Bypass\logs'
+            Write-Host "WPF self-test failed with exit code $($process.ExitCode)."
+            if (Test-Path $logs) {
+              Get-ChildItem $logs -File | Sort-Object LastWriteTime | ForEach-Object {
+                Write-Host "--- $($_.FullName)"
+                Get-Content $_.FullName -Tail 200
+              }
+            }
+            throw 'The published application could not render its main window.'
+          }
+
+          Write-Host 'Published WPF window rendered successfully.'
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress --yes

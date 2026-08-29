@@ -281,8 +281,9 @@ DpiBypass.exe --ui-selftest       # arayüzü sına ve çık (ağ motorunu açma
 ```
 
 `--health-check` tek örnek kilidini almaz: yalnızca çalışan kopyadan penceresini
-açmasını ister ve pencere gerçekten göründüğünde `0`, hiçbir kopya yanıt vermezse
-`1` döner. Henüz açılmakta olan bir kopya durumunu bildirdiği için beklenir —
+açmasını ister ve pencere gerçekten göründüğünde `0`, çalışan kopya pencereyi
+açamazsa `1`, çalışan bir kopya yoksa `2` döner. Henüz açılmakta olan bir kopya
+durumunu bildirdiği için beklenir —
 kurulum betiği de kurulumun başarılı sayılıp sayılmayacağına bununla karar verir.
 "Gerçekten göründü" burada tam anlamıyla ilk karenin çizilmiş olmasıdır: yalnızca
 pencere tanıtıcısı oluşmuş, hiç çizilmemiş bir pencere `0` döndürmez.
