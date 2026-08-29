@@ -52,6 +52,8 @@ public sealed class UiMarkupTests
     {
         var document = XDocument.Load(FindMainWindow());
 
-        Assert.Empty(document.Descendants().Attributes("Width").Where(attribute => attribute.Value == "270"));
+        Assert.DoesNotContain(
+            "270",
+            document.Descendants().Attributes("Width").Select(attribute => attribute.Value));
     }
 }
