@@ -7,6 +7,7 @@ using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.App.ViewModels;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.Startup;
 
 namespace DpiBypass.App;
 
@@ -15,16 +16,21 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel;
     private readonly ThemeManager? _theme;
     private bool _micaApplied;
+    private bool _backdropSuppressed;
     private nint _backdropHandle;
     private bool _scrollPending;
     private bool _exiting;
+    private bool _detached;
+    private bool _contentRenderedSeen;
 
     public MainWindow(MainViewModel viewModel, ThemeManager? theme)
     {
         _viewModel = viewModel;
         _theme = theme;
 
+        StartupTrace.Mark("MainWindow ctor · InitializeComponent başladı");
         InitializeComponent();
+        StartupTrace.Mark("MainWindow ctor · InitializeComponent bitti");
         DataContext = viewModel;
 
 #pragma warning disable WPF0001 // Fluent theming is still marked experimental.
@@ -52,21 +58,242 @@ public partial class MainWindow : Window
         }
 
         ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged += OnLogLinesChanged;
+
+        Loaded += OnWindowLoaded;
+        Readiness = WindowReadiness.Created;
+        StartupTrace.Mark("MainWindow ctor bitti");
     }
 
     public event Action? CloseToTrayRequested;
 
     public event Action? ExitRequested;
 
+    /// <summary>Raised on the UI thread the first time a frame reaches the screen.</summary>
+    public event Action? FirstFrameRendered;
+
+    /// <summary>
+    /// How far this window has actually got. The only value that means the user can
+    /// see something is <see cref="WindowReadiness.Rendered"/>.
+    /// </summary>
+    public WindowReadiness Readiness { get; private set; } = WindowReadiness.None;
+
+    /// <summary>Whether the client area is currently handed to the compositor.</summary>
+    public bool BackdropActive => _micaApplied;
+
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
 
-        // Mica needs a window handle, which only exists from here on. When it is not
-        // available the solid Fluent background stays, so nothing else has to change.
-        _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
-        _backdropHandle = _micaApplied ? new WindowInteropHelper(this).Handle : nint.Zero;
-        AppLog.Info($"Pencere arka planı: {WindowBackdrop.Availability}.");
+        Readiness = WindowReadiness.SourceInitialized;
+        StartupTrace.Mark($"SourceInitialized · HWND=0x{new WindowInteropHelper(this).Handle:X}");
+
+        // Only the title bar's light/dark rendering here. The material itself is a
+        // separate, later decision: see EnableBackdrop.
+        WindowBackdrop.UpdateTitleBarTheme(this, _theme?.IsDark ?? false);
+    }
+
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+
+        if (Readiness < WindowReadiness.Rendered)
+        {
+            StartupTrace.Mark($"Activated · hazırlık={Readiness}");
+        }
+    }
+
+    /// <summary>
+    /// The first real frame. Everything that treats the window as successful hangs off
+    /// this, and nothing hangs off <c>Show()</c> returning.
+    /// </summary>
+    protected override void OnContentRendered(EventArgs e)
+    {
+        base.OnContentRendered(e);
+
+        if (!_contentRenderedSeen)
+        {
+            // Traced whether or not it is the signal that won the race, because "did
+            // ContentRendered arrive at all" is the first question anybody reading a
+            // startup log about a missing window needs answered.
+            _contentRenderedSeen = true;
+            StartupTrace.Mark("ContentRendered");
+        }
+
+        MarkRendered("ContentRendered");
+    }
+
+    private void OnWindowLoaded(object sender, RoutedEventArgs e)
+    {
+        if (Readiness < WindowReadiness.Loaded)
+        {
+            Readiness = WindowReadiness.Loaded;
+        }
+
+        StartupTrace.Mark("Loaded");
+
+        // Loaded only ever fires on a window that has been shown, so this subscription
+        // is scoped to a window that is genuinely on its way up.
+        CompositionTarget.Rendering += OnComposition;
+    }
+
+    /// <summary>
+    /// The corroborating first-frame signal: WPF composing a frame while this window is
+    /// visible and has a real size.
+    /// </summary>
+    /// <remarks>
+    /// <c>ContentRendered</c> is the primary signal and the right one, but the whole
+    /// startup now hangs off first-frame confirmation, and hanging it off exactly one
+    /// event would trade the old failure for a new one - a window that is perfectly fine
+    /// and never confirmed would be put through recovery it does not need. This is an
+    /// independent witness: the render loop ran, with this window visible and laid out.
+    /// Whichever arrives first ends the wait, and both unsubscribe immediately, so a
+    /// per-frame handler never outlives the frame it was waiting for.
+    /// </remarks>
+    private void OnComposition(object? sender, EventArgs e)
+    {
+        if (!IsVisible || ActualWidth <= 0 || ActualHeight <= 0)
+        {
+            return;
+        }
+
+        MarkRendered("CompositionTarget.Rendering");
+    }
+
+    private void MarkRendered(string signal)
+    {
+        CompositionTarget.Rendering -= OnComposition;
+
+        if (Readiness >= WindowReadiness.Rendered)
+        {
+            // Shown again after being hidden. The first frame is already accounted for.
+            return;
+        }
+
+        Readiness = WindowReadiness.Rendered;
+        StartupTrace.Mark($"ilk kare çizildi · {signal}");
+
+        try
+        {
+            FirstFrameRendered?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("İlk kare bildirimi işlenemedi", ex);
+        }
+    }
+
+    /// <summary>
+    /// Asks Windows for the Mica material, if it is safe to ask for it here.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called only once the window has been confirmed on screen, and that ordering is
+    /// the fix rather than a detail. Turning the material on means telling WPF to stop
+    /// painting the client area, because the compositor is going to paint it instead -
+    /// so when the compositor does not, the window becomes a transparent hole with the
+    /// controls floating in it. Doing that during <c>OnSourceInitialized</c>, as this
+    /// used to, put the failure in front of the very first frame: the app's first ever
+    /// window was the one at risk of being invisible, on a machine where nobody had
+    /// seen the app before and had no reason to look in the notification area.
+    /// </para>
+    /// <para>
+    /// Now the first frame is always opaque and always drawn by WPF. The material is a
+    /// second step applied to a window already proved reachable, and it is dropped
+    /// again the moment anything about it is in doubt.
+    /// </para>
+    /// </remarks>
+    public void EnableBackdrop()
+    {
+        if (_micaApplied || _backdropSuppressed || Readiness < WindowReadiness.Rendered)
+        {
+            return;
+        }
+
+        try
+        {
+            _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
+            _backdropHandle = _micaApplied ? new WindowInteropHelper(this).Handle : nint.Zero;
+            AppLog.Info($"Pencere arka planı: {WindowBackdrop.Availability}.");
+        }
+        catch (Exception ex)
+        {
+            _micaApplied = false;
+            _backdropHandle = nint.Zero;
+            AppLog.Error("Pencere arka planı uygulanamadı", ex);
+        }
+    }
+
+    /// <summary>
+    /// Takes the client area back off the compositor for good and paints it here.
+    /// </summary>
+    /// <remarks>
+    /// The escape hatch for the one failure that cannot be detected from inside this
+    /// process: DWM accepting the backdrop request and then not drawing the material.
+    /// Nothing Windows will answer distinguishes that from a window that is being drawn
+    /// perfectly, so the recovery is driven by the user - a second launch of an app
+    /// whose window this process believes is already in front of them - and by the
+    /// visibility watchdog. Suppressed rather than merely removed, so nothing turns it
+    /// back on later in the same session.
+    /// </remarks>
+    public void DisableBackdrop(string reason)
+    {
+        _backdropSuppressed = true;
+
+        if (!_micaApplied)
+        {
+            RestoreOpaqueBackground();
+            return;
+        }
+
+        try
+        {
+            WindowBackdrop.Remove(this);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Pencere arka planı kaldırılamadı", ex);
+        }
+
+        _micaApplied = false;
+        _backdropHandle = nint.Zero;
+        RestoreOpaqueBackground();
+        AppLog.Warning($"Pencere arka planı düz renge alındı: {reason}.");
+    }
+
+    /// <summary>Forces a layout and paint pass. Used only by recovery.</summary>
+    public void ForceRedraw()
+    {
+        try
+        {
+            InvalidateVisual();
+            UpdateLayout();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Pencere yeniden çizilemedi", ex);
+        }
+    }
+
+    /// <summary>
+    /// Unhooks everything this window subscribed to and closes it without the
+    /// close-to-tray or exit behaviour, so a replacement can be built.
+    /// </summary>
+    public void CloseForReplacement()
+    {
+        _exiting = true;
+        CloseToTrayRequested = null;
+        ExitRequested = null;
+        FirstFrameRendered = null;
+
+        try
+        {
+            Close();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Pencere kapatılamadı", ex);
+            Detach();
+        }
     }
 
     /// <summary>
@@ -121,17 +348,50 @@ public partial class MainWindow : Window
                 AppLog.Info("Pencere arka planı düz renge alındı.");
             }
 
-            // Nothing is drawing the client area, so the window has to. A fully
-            // transparent brush here is the failure being repaired, not a choice.
-            if (Background is null or SolidColorBrush { Color.A: 0 })
-            {
-                SetResourceReference(BackgroundProperty, "AppWindowBackgroundBrush");
-            }
+            RestoreOpaqueBackground();
         }
         catch (Exception ex)
         {
             AppLog.Error("Pencere arka planı denetlenemedi", ex);
         }
+    }
+
+    /// <summary>
+    /// Puts the window's own background brush back when nothing else is painting the
+    /// client area.
+    /// </summary>
+    /// <remarks>
+    /// A fully transparent brush here is the failure being repaired, not a choice: it
+    /// is what the backdrop path leaves behind, and a window carrying it while nobody
+    /// draws the material is the see-through hole this whole file guards against.
+    /// </remarks>
+    private void RestoreOpaqueBackground()
+    {
+        if (Background is null or SolidColorBrush { Color.A: 0 })
+        {
+            SetResourceReference(BackgroundProperty, "AppWindowBackgroundBrush");
+        }
+    }
+
+    /// <summary>Unhooks the subscriptions this window owns. Safe to call twice.</summary>
+    private void Detach()
+    {
+        if (_detached)
+        {
+            return;
+        }
+
+        _detached = true;
+
+        if (_theme is not null)
+        {
+            _theme.ThemeChanged -= OnThemeChanged;
+            _theme.PersonalisationChanged -= OnPersonalisationChanged;
+        }
+
+        Loaded -= OnWindowLoaded;
+        CompositionTarget.Rendering -= OnComposition;
+        ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged -= OnLogLinesChanged;
     }
 
     private void OnThemeChanged(bool isDark)
@@ -140,6 +400,9 @@ public partial class MainWindow : Window
 
         if (!_micaApplied)
         {
+            // Re-pointed rather than left alone: the backdrop path replaces this with a
+            // local transparent brush, and a window that came back from it has no
+            // dynamic reference left to follow the new palette.
             SetResourceReference(BackgroundProperty, "AppWindowBackgroundBrush");
         }
     }
@@ -256,13 +519,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_theme is not null)
-        {
-            _theme.ThemeChanged -= OnThemeChanged;
-            _theme.PersonalisationChanged -= OnPersonalisationChanged;
-        }
-
-        ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged -= OnLogLinesChanged;
+        Detach();
         base.OnClosing(e);
 
         if (!_exiting)

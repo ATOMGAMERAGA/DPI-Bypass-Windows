@@ -1214,21 +1214,32 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Reads and reconciles the logon task, off the UI thread from the first line.
+    /// </summary>
+    /// <remarks>
+    /// Started from the constructor, which runs before the window has drawn anything,
+    /// so the part of it that executes synchronously matters. Every step here shells out
+    /// to <c>schtasks.exe</c>, and launching a process is synchronous work up to the
+    /// first await - on a machine still busy with the installer that started this one,
+    /// that is real time spent in front of the first frame for a checkbox nobody is
+    /// looking at yet. Handed to the thread pool so none of it is.
+    /// </remarks>
     private async Task LoadAutoStartStateAsync()
     {
         try
         {
-            var enabled = await _autoStart.IsEnabledAsync().ConfigureAwait(true);
+            var enabled = await Task.Run(() => _autoStart.IsEnabledAsync()).ConfigureAwait(true);
 
             // Reconcile: the setting says it should be on but the task is missing (for
             // example after the app folder moved), so put it back.
             if (_service.Settings.StartWithWindows && !enabled)
             {
-                await _autoStart.EnableAsync(_service.Settings.StartMinimised).ConfigureAwait(true);
+                await Task.Run(() => _autoStart.EnableAsync(_service.Settings.StartMinimised)).ConfigureAwait(true);
             }
             else if (!_service.Settings.StartWithWindows && enabled)
             {
-                await _autoStart.DisableAsync().ConfigureAwait(true);
+                await Task.Run(() => _autoStart.DisableAsync()).ConfigureAwait(true);
             }
         }
         catch (Exception ex)

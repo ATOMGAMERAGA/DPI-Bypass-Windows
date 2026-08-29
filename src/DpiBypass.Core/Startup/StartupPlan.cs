@@ -88,7 +88,16 @@ public sealed record StartupPlan(StartupVisibility Visibility, string Reason)
         return new StartupPlan(StartupVisibility.StartHidden, "tepside başlatıldı");
     }
 
-    private static bool HasSwitch(IReadOnlyList<string>? arguments, string name)
+    /// <summary>
+    /// Whether a switch is present, in any of the spellings the shell may hand over.
+    /// </summary>
+    /// <remarks>
+    /// The scheduled task, the Run key, the installer and a hand written shortcut all
+    /// spell switches differently - one leading dash, two, or a slash - and a switch
+    /// that is not recognised turns a tray start into a window on every logon, or the
+    /// other way round.
+    /// </remarks>
+    public static bool HasSwitch(IReadOnlyList<string>? arguments, string name)
     {
         if (arguments is null)
         {
