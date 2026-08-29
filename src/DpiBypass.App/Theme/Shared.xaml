@@ -319,10 +319,6 @@
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
                         </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
-                            <Setter Property="Opacity" Value="0.85" />
-                        </Trigger>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
                             <Setter TargetName="Pill" Property="Background" Value="{DynamicResource AppAccentBrush}" />
