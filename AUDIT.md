@@ -2,6 +2,10 @@
 
 Denetim tarihi: 2026-08-28 (America/Los_Angeles)
 
+> Gecikme ("Ping düşürme") alt sisteminin ayrı denetimi için
+> **[LATENCY-AUDIT.md](LATENCY-AUDIT.md)**, dayandığı resmî kaynaklar için
+> **[LATENCY-RESEARCH.md](LATENCY-RESEARCH.md)**.
+
 ## Kapsam
 
 Denetim; paket yakalama/yeniden yazma, IPv4/IPv6 ayristirma, QUIC siniflandirma, DNS/DoH, IPC, eszamanlilik, kaynak sinirlari, hata durumlari, testler ve paketleme akisina odaklandi. Kullanici talebi uzerine guvenlik korumasi/ACL sertlestirmesi incelenmedi ve uygulanmadi. Operator kota/Hotspot TTL ozelligi de davranissal degisiklik yapilmadan ayri tutuldu.

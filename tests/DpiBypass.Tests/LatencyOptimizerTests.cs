@@ -917,6 +917,30 @@ public sealed class LatencyOptimizerTests
         Assert.NotEmpty(second.Controller.Applied);
     }
 
+    /// <summary>
+    /// A driver offering many candidates on a link that never settles must not be able to
+    /// hold the user for half an hour. What was verified is still committed.
+    /// </summary>
+    [Fact]
+    public async Task ARunStopsMeasuringOnceItHasSpentItsWholeBudget()
+    {
+        var controller = new FakeController
+        {
+            PowerProperties = ["SelectiveSuspend", "D0PacketCoalescing"],
+        };
+        var scenario = new LatencyScenario(
+            controller,
+            FakeProbe.Flat(controller),
+            new LatencyOptimizerOptions { MinimumCycles = 2, MaximumCycles = 3, TotalBudget = TimeSpan.Zero });
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("budget"));
+
+        Assert.Empty(controller.Applied);
+        Assert.Empty(result.Verdicts);
+        Assert.Contains(scenario.Logs, line => line.Contains("latency.run.budget", StringComparison.Ordinal));
+        Assert.Contains(result.Notices, notice => notice.Contains("Süre sınırı", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task AProfileOlderThanAMonthIsMeasuredAgain()
     {

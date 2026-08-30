@@ -76,4 +76,61 @@ public sealed class UiMarkupTests
 
         Assert.DoesNotContain("Vodafone sınırsız modu&quot; (hotspot TTL yeniden yazımı) kaldırıldı", markup, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// The latency card has to offer every control the feature actually has, because a
+    /// capability with no way to reach it is the same as one that does not exist.
+    /// </summary>
+    [Fact]
+    public void TheLatencyCardExposesTheTargetPickerTheTestsAndTheGuard()
+    {
+        var markup = XDocument.Load(FindMainWindow()).ToString(SaveOptions.DisableFormatting);
+
+        foreach (var binding in new[]
+        {
+            "{Binding LowLatencyMode, Mode=TwoWay}",
+            "{Binding LatencyTargetOptions}",
+            "{Binding SelectedLatencyTarget, Mode=TwoWay}",
+            "{Binding LatencyCustomTarget, Mode=TwoWay, UpdateSourceTrigger=LostFocus}",
+            "{Binding LatencyProcesses}",
+            "{Binding SelectedLatencyProcess, Mode=TwoWay}",
+            "{Binding RefreshLatencyProcessesCommand}",
+            "{Binding LatencyTestCommand}",
+            "{Binding LatencyDeepTestCommand}",
+            "{Binding LatencyRetestCommand}",
+            "{Binding LatencyRestoreCommand}",
+            "{Binding LatencyClearProfilesCommand}",
+            "{Binding LatencyHeadline}",
+            "{Binding LatencyTargetSummary}",
+            "{Binding LatencyIdleSummary}",
+            "{Binding LatencyUploadSummary}",
+            "{Binding LatencyDownloadSummary}",
+            "{Binding LatencyPathSummary}",
+            "{Binding LatencyAppliedChanges}",
+            "{Binding LatencyRejectedChanges}",
+            "{Binding TrafficGuardEnabled, Mode=TwoWay}",
+            "{Binding LatencyGuardSummary}",
+        })
+        {
+            Assert.Contains(binding, markup, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The card is where a user learns that idle ping, loaded latency and route delay are
+    /// different things, so the wording that says so is part of the contract.
+    /// </summary>
+    [Fact]
+    public void TheLatencyCardSeparatesIdleLoadedAndRouteDelayInWords()
+    {
+        var markup = XDocument.Load(FindMainWindow()).ToString(SaveOptions.DisableFormatting);
+
+        Assert.Contains("Boştaki ping, yük altındaki gecikme, jitter, paket kaybı", markup, StringComparison.Ordinal);
+        Assert.Contains("ISP/WAN rota gecikmesi ayrı şeylerdir", markup, StringComparison.Ordinal);
+        Assert.Contains("Yük altında derin test", markup, StringComparison.Ordinal);
+
+        // The QoS namespace is named where the user can see it, because the promise that
+        // nothing else is touched is only worth anything if it is checkable.
+        Assert.Contains("DPIBypass.Latency.", markup, StringComparison.Ordinal);
+    }
 }

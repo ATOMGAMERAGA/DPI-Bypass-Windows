@@ -37,6 +37,134 @@ public sealed class ProtectionServiceLatencyRecoveryTests
         Assert.Equal(["SelectiveSuspend"], controller.Restored);
         Assert.Null(snapshots.Value);
     }
+
+    /// <summary>
+    /// A run that found nothing locally fixable leaves the mode on and watching. Turning
+    /// the switch off behind the user's back would misdescribe their own settings back to
+    /// them and invite them to keep switching it on to no effect.
+    /// </summary>
+    [Fact]
+    public async Task ARunThatFoundNothingLeavesTheModeOnAndSaysItIsMonitoring()
+    {
+        using var harness = new LatencyServiceHarness();
+
+        var result = await harness.Service.SetLowLatencyModeAsync(true);
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.True(harness.Service.Settings.LowLatencyMode);
+
+        var status = harness.Service.LatencyStatus;
+        Assert.Equal(LatencyModeState.NoLocalGain, status.State);
+        Assert.True(status.ModeEnabled);
+        Assert.NotEqual(LatencyModeState.Off, status.State);
+    }
+
+    [Fact]
+    public async Task TurningTheModeOffRemovesEveryPolicyThisApplicationOwns()
+    {
+        using var harness = new LatencyServiceHarness();
+        await harness.Qos.CreateAsync(new QosPolicyRequest { Name = "DPIBypass.Latency.bulk.x" });
+
+        await harness.Service.SetLowLatencyModeAsync(false);
+
+        Assert.Empty(harness.Qos.Policies);
+        Assert.False(harness.Service.Settings.LowLatencyMode);
+        Assert.Equal(LatencyModeState.Off, harness.Service.LatencyStatus.State);
+    }
+
+    [Fact]
+    public async Task RestoringLatencyAlsoRemovesThisApplicationsPolicies()
+    {
+        using var harness = new LatencyServiceHarness();
+        await harness.Qos.CreateAsync(new QosPolicyRequest { Name = "DPIBypass.Latency.bulk.y" });
+
+        await harness.Service.RestoreLatencyAsync();
+
+        Assert.Empty(harness.Qos.Policies);
+    }
+
+    /// <summary>
+    /// A policy created by a build that died before it could record one has nothing left
+    /// pointing at it, so startup with the mode off sweeps the whole namespace.
+    /// </summary>
+    [Fact]
+    public async Task StartupWithTheModeOffSweepsOrphanedPolicies()
+    {
+        using var harness = new LatencyServiceHarness();
+        await harness.Qos.CreateAsync(new QosPolicyRequest { Name = "DPIBypass.Latency.bulk.orphan" });
+
+        await harness.Service.StartIndependentFeaturesAsync();
+
+        Assert.Empty(harness.Qos.Policies);
+    }
+
+    [Fact]
+    public async Task ChangingTheTargetIsPersistedAndReachesTheOptimizer()
+    {
+        using var harness = new LatencyServiceHarness();
+
+        harness.Service.SetLatencyPreferences(harness.Service.Settings.Latency with
+        {
+            TargetKind = LatencyTargetKind.Custom,
+            TargetHost = "mc.example.com",
+            TargetPort = 25565,
+            TargetProtocol = LatencyProtocol.Tcp,
+        });
+
+        var reloaded = harness.Store.Load();
+
+        Assert.Equal(LatencyTargetKind.Custom, reloaded.Latency.TargetKind);
+        Assert.Equal("mc.example.com", reloaded.Latency.TargetHost);
+        Assert.Equal(25565, reloaded.Latency.TargetPort);
+        Assert.Contains("25565", harness.Service.LatencyStatus.Target + reloaded.Latency.ToSpec().Describe());
+    }
+
+    /// <summary>Wires one service up with doubles for both latency lanes.</summary>
+    private sealed class LatencyServiceHarness : IDisposable
+    {
+        private readonly TempDirectory _directory = new("dpibypass-latency-service");
+
+        public LatencyServiceHarness()
+        {
+            Store = new ConfigStore(_directory.File("settings.json"), _directory.File("networks.json"));
+            Controller = new FakeController();
+            Qos = new FakeQosController();
+
+            var optimizer = new LatencyOptimizer(
+                Controller,
+                FakeProbe.Flat(Controller),
+                new FakeSnapshotStore(),
+                profiles: new FakeProfileStore(),
+                targets: new FakeTargetResolver(),
+                environmentSampler: new FakeEnvironmentSampler(),
+                resourceRestorers: [],
+                delay: (_, _) => Task.CompletedTask);
+
+            Service = new ProtectionService(
+                Store,
+                new LearnedDomainStore(_directory.File("learned.json")),
+                optimizer,
+                loadedLatency: new LoadedLatencyLane(
+                    qos: Qos,
+                    snapshots: new FakeSnapshotStore(),
+                    capture: () => Fake.Network("service"),
+                    log: _ => { }));
+        }
+
+        public ConfigStore Store { get; }
+
+        public FakeController Controller { get; }
+
+        public FakeQosController Qos { get; }
+
+        public ProtectionService Service { get; }
+
+        public void Dispose()
+        {
+            Service.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            _directory.Dispose();
+        }
+    }
 }
 
 /// <summary>

@@ -32,6 +32,17 @@ public sealed record LatencyOptimizerOptions
     /// <summary>Wall-clock ceiling for one candidate's experiment.</summary>
     public TimeSpan CandidateBudget { get; init; } = TimeSpan.FromMinutes(4);
 
+    /// <summary>
+    /// Wall-clock ceiling for a whole run, across every candidate.
+    /// </summary>
+    /// <remarks>
+    /// A driver offering seven candidates on a link that never settles could otherwise
+    /// spend half an hour proving nothing. Candidates not reached inside the budget are
+    /// simply not measured this time; the run still commits whatever it did verify, and
+    /// the rest are tried again on the next pass.
+    /// </remarks>
+    public TimeSpan TotalBudget { get; init; } = TimeSpan.FromMinutes(12);
+
     /// <summary>Sample size an inconclusive experiment grows to before giving up.</summary>
     public int AdaptiveProbeCount { get; init; } = LatencyProbeRequest.Deep.ProbeCount;
 
@@ -87,6 +98,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private string? _lastNetworkKey;
     private bool _enabled;
     private bool _disposed;
+    private bool _ignoreCacheOnce;
 
     public LatencyOptimizer(
         ILatencyAdapterController? controller = null,
@@ -119,6 +131,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         _monitorFactory = monitorFactory ?? (() => new NetworkMonitor(log: _log));
         _options = options ?? LatencyOptimizerOptions.Default;
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        Target = _options.Target;
     }
 
     public LatencyOptimizationResult Current { get; private set; } = new()
@@ -133,8 +146,11 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         or LatencyOptimizationStatus.LoadTesting
         or LatencyOptimizationStatus.Restoring;
 
-    /// <summary>What the last run measured, so the loaded lane can reuse the same target.</summary>
-    public LatencyTargetSpec Target => _options.Target;
+    /// <summary>
+    /// What to measure. Changing it invalidates nothing by itself; the profile cache is
+    /// keyed on the target, so the next run simply finds no saved answer for the new one.
+    /// </summary>
+    public LatencyTargetSpec Target { get; set; }
 
     public event Action<LatencyOptimizationResult>? Changed;
 
@@ -166,6 +182,27 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         _enabled = true;
         return RunForNetworkAsync(network, force: true, cancellationToken);
     }
+
+    /// <summary>
+    /// Runs again from scratch, ignoring anything already saved for this network.
+    /// </summary>
+    /// <remarks>
+    /// The cache exists so a returning user does not wait through a benchmark they have
+    /// already paid for. It is also the one thing that can hide a change in conditions
+    /// the app did not notice, so there has to be a way to say "measure it again anyway".
+    /// </remarks>
+    public Task<LatencyOptimizationResult> RetestAsync(
+        NetworkFingerprint network,
+        CancellationToken cancellationToken = default)
+    {
+        _ignoreCacheOnce = true;
+        _lastNetworkKey = null;
+        return OptimizeAsync(network, cancellationToken);
+    }
+
+    /// <summary>Forgets the saved answer for one network and adapter.</summary>
+    public Task ForgetProfileAsync(string networkKey, string adapterId, CancellationToken cancellationToken = default)
+        => _profiles.RemoveAsync(networkKey, adapterId, cancellationToken);
 
     internal Task<LatencyOptimizationResult> OptimizeNetworkChangeAsync(
         NetworkFingerprint network,
@@ -359,7 +396,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             };
         }
 
-        var spec = target ?? _options.Target;
+        var spec = target ?? Target;
         var resolution = await _targets.ResolveAsync(spec, cancellationToken).ConfigureAwait(false);
         if (!resolution.Succeeded)
         {
@@ -557,7 +594,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             });
         }
 
-        var resolution = await _targets.ResolveAsync(_options.Target, token).ConfigureAwait(false);
+        var resolution = await _targets.ResolveAsync(Target, token).ConfigureAwait(false);
         if (!resolution.Succeeded)
         {
             return Publish(new LatencyOptimizationResult
@@ -566,7 +603,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 StatusLine = resolution.Failure ?? "Ölçüm hedefi çözümlenemedi; hiçbir NIC ayarı değiştirilmedi.",
                 AdapterName = adapter.AdapterName,
                 NetworkKey = network.Key,
-                TargetLabel = _options.Target.Describe(),
+                TargetLabel = Target.Describe(),
             });
         }
 
@@ -595,8 +632,19 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         _log?.Invoke($"latency.baseline.completed: {LatencyReport.Compact(baseline)} · {path.Bottleneck}");
 
         var environment = _environmentSampler.Sample(network);
-        var context = LatencyProfileContext.From(_options.Target, environment, loadedEvidence: false, qosAvailable: false);
-        var profile = await LoadUsableProfileAsync(network, adapter, context, token).ConfigureAwait(false);
+        var context = LatencyProfileContext.From(Target, environment, loadedEvidence: false, qosAvailable: false);
+
+        var ignoreCache = _ignoreCacheOnce;
+        _ignoreCacheOnce = false;
+        if (ignoreCache)
+        {
+            _log?.Invoke("latency.profile: kullanıcı yeniden ölçüm istedi; kayıtlı sonuçlar atlanıyor.");
+            await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
+        }
+
+        var profile = ignoreCache
+            ? null
+            : await LoadUsableProfileAsync(network, adapter, context, token).ConfigureAwait(false);
 
         // A profile verified here, on this adapter, against this driver is worth
         // re-applying rather than re-earning: a full paired benchmark on every logon
@@ -678,9 +726,21 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             notices.Add(resolution.Notice);
         }
 
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+
         for (var index = 0; index < candidates.Count; index++)
         {
             token.ThrowIfCancellationRequested();
+
+            if (elapsed.Elapsed > _options.TotalBudget)
+            {
+                _log?.Invoke(
+                    $"latency.run.budget: süre sınırına ulaşıldı; kalan {candidates.Count - index} aday "
+                    + "bu turda ölçülmedi.");
+                notices.Add($"Süre sınırı nedeniyle {candidates.Count - index} aday bu turda ölçülmedi.");
+                break;
+            }
+
             var candidate = candidates[index];
 
             SetCurrent(new LatencyOptimizationResult

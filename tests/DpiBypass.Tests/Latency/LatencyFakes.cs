@@ -252,6 +252,9 @@ internal sealed class FakeProbe : ILatencyProbe
 
     public List<string> Requests { get; } = [];
 
+    /// <summary>The sample size each measurement was asked for, so growth can be asserted.</summary>
+    public List<int> ProbeCounts { get; } = [];
+
     public int Measurements { get; private set; }
 
     public LatencyConnectivity Connectivity { get; init; } = new(true, true);
@@ -266,6 +269,7 @@ internal sealed class FakeProbe : ILatencyProbe
     {
         cancellationToken.ThrowIfCancellationRequested();
         Requests.Add(request.RemoteEndpoint ?? "(survey)");
+        ProbeCounts.Add(request.ProbeCount);
 
         var measurement = _measure(_controller.Live, Measurements);
         Measurements++;
@@ -448,5 +452,191 @@ internal sealed class LatencyScenario
     {
         var controller = new FakeController();
         return new LatencyScenario(controller, FakeProbe.Improves(controller, gain: gain));
+    }
+}
+
+/// <summary>An in-memory QoS store that behaves like the Windows one, minus Windows.</summary>
+internal sealed class FakeQosController : IQosController
+{
+    public Dictionary<string, QosPolicyRequest> Policies { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Policies somebody else owns. Must never be touched.</summary>
+    public List<string> ForeignPolicies { get; init; } = [];
+
+    public List<string> CompetingPolicies { get; init; } = [];
+
+    public bool Available { get; init; } = true;
+
+    public string? RefuseCreateReason { get; init; }
+
+    public List<string> Removed { get; } = [];
+
+    public Task<QosCapability> DetectAsync(CancellationToken cancellationToken = default)
+        => Task.FromResult(Available
+            ? new QosCapability
+            {
+                Available = true,
+                OwnedPolicies = [.. Policies.Keys],
+                ForeignPolicies = ForeignPolicies,
+                CompetingPolicies = CompetingPolicies,
+            }
+            : QosCapability.Unavailable);
+
+    public Task<QosApplyResult> CreateAsync(QosPolicyRequest request, CancellationToken cancellationToken = default)
+    {
+        if (!WindowsQosController.IsOwnedName(request.Name))
+        {
+            throw new InvalidOperationException("foreign policy name");
+        }
+
+        if (RefuseCreateReason is not null)
+        {
+            return Task.FromResult(new QosApplyResult(false, RefuseCreateReason));
+        }
+
+        Policies[request.Name] = request;
+        return Task.FromResult(new QosApplyResult(true));
+    }
+
+    public Task<LatencyRestoreOutcome> RemoveAsync(
+        string name,
+        string policyStore,
+        CancellationToken cancellationToken = default)
+    {
+        if (!WindowsQosController.IsOwnedName(name))
+        {
+            throw new InvalidOperationException($"'{name}' is not ours");
+        }
+
+        Removed.Add(name);
+        return Task.FromResult(Policies.Remove(name)
+            ? LatencyRestoreOutcome.Restored
+            : LatencyRestoreOutcome.AlreadyOriginal);
+    }
+
+    public async Task<int> RemoveAllOwnedAsync(CancellationToken cancellationToken = default)
+    {
+        var owned = Policies.Keys.ToArray();
+        foreach (var name in owned)
+        {
+            await RemoveAsync(name, QosPolicyStores.Active, cancellationToken);
+        }
+
+        return owned.Length;
+    }
+}
+
+/// <summary>A load experiment that replays a script of results, in call order.</summary>
+internal sealed class FakeLoadExperiment : ILoadExperiment
+{
+    private readonly Queue<LoadExperimentResult> _results;
+
+    public FakeLoadExperiment(params LoadExperimentResult[] results)
+        => _results = new Queue<LoadExperimentResult>(results);
+
+    public int Calls { get; private set; }
+
+    public string Instruction(LoadDirection direction) => "start a transfer";
+
+    public Task<LoadExperimentResult> RunAsync(
+        NetworkFingerprint network,
+        LoadExperimentRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        Calls++;
+
+        return Task.FromResult(_results.Count switch
+        {
+            0 => LoadExperimentResult.Failed(request.Direction, "no scripted result"),
+            1 => _results.Peek(),
+            _ => _results.Dequeue(),
+        });
+    }
+
+    /// <summary>A successful upload experiment with the given idle and loaded medians.</summary>
+    public static LoadExperimentResult Upload(
+        double idleMedian,
+        double loadedMedian,
+        double uplinkKbps = 20_000,
+        double loadedLoss = 0) => new()
+        {
+            Direction = LoadDirection.Upload,
+            Idle = Fake.Measurement(idleMedian, load: LatencyLoadState.Idle),
+            Loaded = Fake.Measurement(loadedMedian, load: LatencyLoadState.UplinkLoaded, loss: loadedLoss),
+            ObservedLoad = new NetworkLoadSample
+            {
+                State = LatencyLoadState.UplinkLoaded,
+                UplinkKbps = uplinkKbps,
+                DownlinkKbps = 40,
+            },
+            Capacity = new LinkCapacityEstimate { UplinkKbps = uplinkKbps },
+        };
+}
+
+/// <summary>Counts the settling pauses an experiment asked for.</summary>
+internal sealed class RecordingDelay
+{
+    public List<TimeSpan> Waits { get; } = [];
+
+    public Task WaitAsync(TimeSpan duration, CancellationToken cancellationToken)
+    {
+        Waits.Add(duration);
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// An experiment arm that records what happened to it.
+/// </summary>
+/// <remarks>
+/// When given a controller it also drives that controller's live set, so a probe whose
+/// answer depends on what is applied sees the arm's effect - which is the only way an
+/// experiment over test doubles measures anything at all.
+/// </remarks>
+internal sealed class RecordingArm : ILatencyExperimentArm
+{
+    private readonly FakeController? _controller;
+    private readonly string _property;
+
+    public RecordingArm(FakeController? controller = null, string property = "SelectiveSuspend")
+    {
+        _controller = controller;
+        _property = property;
+    }
+
+    public List<string> Events { get; } = [];
+
+    public bool Applied { get; private set; }
+
+    public bool RefuseApply { get; init; }
+
+    public bool BreakLink { get; init; }
+
+    public Task<bool> ApplyAsync(CancellationToken cancellationToken = default)
+    {
+        Events.Add("apply");
+
+        if (RefuseApply)
+        {
+            return Task.FromResult(false);
+        }
+
+        Applied = true;
+        _controller?.Live.Add(_property);
+        return Task.FromResult(true);
+    }
+
+    public Task RestoreAsync(CancellationToken cancellationToken = default)
+    {
+        Events.Add("restore");
+        Applied = false;
+        _controller?.Live.Remove(_property);
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> IsUsableAsync(CancellationToken cancellationToken = default)
+    {
+        Events.Add("check");
+        return Task.FromResult(!BreakLink);
     }
 }

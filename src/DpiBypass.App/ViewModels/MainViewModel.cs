@@ -10,6 +10,7 @@ using DpiBypass.Core.Apps;
 using DpiBypass.Core.Diagnostics;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
+using DpiBypass.Core.Interop;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
@@ -50,6 +51,15 @@ public sealed record DomainEntry(string Domain, DomainOrigin Origin)
 }
 
 public sealed record VodafoneNetworkEntry(string Key, string Display);
+
+/// <summary>One choice in the latency target picker.</summary>
+public sealed record LatencyTargetOption(LatencyTargetKind Kind, string Display, string Description)
+{
+    public override string ToString() => Display;
+}
+
+/// <summary>A change that was measured and put back, with the reason it was.</summary>
+public sealed record LatencyRejectionEntry(string Change, string Reason);
 
 public sealed record RecheckOption(int Seconds, string Display)
 {
@@ -103,6 +113,18 @@ public sealed class MainViewModel : ObservableObject
     private bool _lowLatencyMode;
     private bool _isLatencyBusy;
     private string _latencyStatusLine = "Kapalı.";
+    private string _latencyHeadline = "Kapalı";
+    private string _latencyStatusSeverity = "off";
+    private string _latencyTargetSummary = "Genel internet referansı — oyun sunucusu değildir";
+    private string _latencyIdleSummary = "Henüz ölçülmedi.";
+    private string _latencyUploadSummary = "Yük altında derin test yapılmadı.";
+    private string _latencyDownloadSummary = "Yük altında derin test yapılmadı.";
+    private string _latencyPathSummary = string.Empty;
+    private string _latencyGuardSummary = "Traffic Guard kapalı.";
+    private LatencyTargetOption _selectedLatencyTarget;
+    private string _latencyCustomTarget = string.Empty;
+    private string? _selectedLatencyProcess;
+    private string _latencyTargetError = string.Empty;
     private string _domainStatus = string.Empty;
     private string _domainStatusSeverity = string.Empty;
     private string _domainFilter = string.Empty;
@@ -192,15 +214,44 @@ public sealed class MainViewModel : ObservableObject
         _selectedScope = ScopeOptions.FirstOrDefault(o => o.Scope == _service.Settings.Scope) ?? ScopeOptions[1];
         _selectedRecheck = RecheckOptions.FirstOrDefault(o => o.Seconds == _service.Settings.RecheckIntervalSeconds)
             ?? RecheckOptions[2];
+        LatencyTargetOptions =
+        [
+            new LatencyTargetOption(
+                LatencyTargetKind.Reference,
+                "Genel internet referansı",
+                "1.1.1.1 · 8.8.8.8 · 9.9.9.9. Genel bağlantı sağlığını gösterir; oyun sunucunuz değildir."),
+            new LatencyTargetOption(
+                LatencyTargetKind.Application,
+                "Çalışan oyun / uygulama",
+                "Seçilen programın açık TCP bağlantısındaki gerçek uzak uç ölçülür. "
+                    + "Yalnız UDP kullanan oyunlarda Windows uzak adresi bildirmez."),
+            new LatencyTargetOption(
+                LatencyTargetKind.Custom,
+                "Özel sunucu (host / IP / port)",
+                "Örnek: mc.sunucu.com:25565 · tcp://1.2.3.4:443 · udp://1.2.3.4:7777 (rota referansı)"),
+        ];
+
         _lowLatencyMode = _service.Settings.LowLatencyMode;
         _latencyStatusLine = _service.LatencyResult.StatusLine;
+
+        var latency = _service.Settings.Latency;
+        _selectedLatencyTarget = LatencyTargetOptions.FirstOrDefault(option => option.Kind == latency.TargetKind)
+            ?? LatencyTargetOptions[0];
+        _latencyCustomTarget = latency.TargetPort is { } port
+            ? $"{latency.TargetHost}:{port}"
+            : latency.TargetHost ?? string.Empty;
+        _selectedLatencyProcess = latency.TargetProcess;
 
         ToggleCommand = new AsyncRelayCommand(ToggleAsync);
         TestCommand = new AsyncRelayCommand(TestAsync);
         RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !IsTuning);
         TestAllCommand = new AsyncRelayCommand(TestAllAsync);
         LatencyTestCommand = new AsyncRelayCommand(TestLatencyAsync, () => !_isLatencyBusy);
+        LatencyDeepTestCommand = new AsyncRelayCommand(RunLatencyDeepTestAsync, () => !_isLatencyBusy);
+        LatencyRetestCommand = new AsyncRelayCommand(RetestLatencyAsync, () => !_isLatencyBusy);
         LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
+        LatencyClearProfilesCommand = new RelayCommand(ClearLatencyProfiles);
+        RefreshLatencyProcessesCommand = new AsyncRelayCommand(RefreshLatencyProcessesAsync);
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
         AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
@@ -222,6 +273,7 @@ public sealed class MainViewModel : ObservableObject
         RefreshDomains();
         RefreshVodafoneNetworks();
         RefreshHotspotStatus();
+        ApplyLatencyStatus(_service.LatencyStatus);
 
         foreach (var entry in AppLog.Snapshot())
         {
@@ -268,7 +320,24 @@ public sealed class MainViewModel : ObservableObject
 
     public AsyncRelayCommand LatencyTestCommand { get; }
 
+    public AsyncRelayCommand LatencyDeepTestCommand { get; }
+
+    public AsyncRelayCommand LatencyRetestCommand { get; }
+
     public AsyncRelayCommand LatencyRestoreCommand { get; }
+
+    public RelayCommand LatencyClearProfilesCommand { get; }
+
+    public AsyncRelayCommand RefreshLatencyProcessesCommand { get; }
+
+    public ObservableCollection<LatencyTargetOption> LatencyTargetOptions { get; }
+
+    /// <summary>Programs with a live remote connection, refreshed on demand.</summary>
+    public ObservableCollection<string> LatencyProcesses { get; } = [];
+
+    public ObservableCollection<string> LatencyAppliedChanges { get; } = [];
+
+    public ObservableCollection<LatencyRejectionEntry> LatencyRejectedChanges { get; } = [];
 
     public RelayCommand OpenLogFolderCommand { get; }
 
@@ -539,6 +608,8 @@ public sealed class MainViewModel : ObservableObject
             if (Set(ref _isLatencyBusy, value))
             {
                 LatencyTestCommand.RaiseCanExecuteChanged();
+                LatencyDeepTestCommand.RaiseCanExecuteChanged();
+                LatencyRetestCommand.RaiseCanExecuteChanged();
                 LatencyRestoreCommand.RaiseCanExecuteChanged();
             }
         }
@@ -550,6 +621,356 @@ public sealed class MainViewModel : ObservableObject
         private set => Set(ref _latencyStatusLine, value);
     }
 
+    /// <summary>
+    /// The one line that says what the mode is doing.
+    /// </summary>
+    /// <remarks>
+    /// Never "off" while the switch is on. A run that found nothing locally fixable is a
+    /// mode that is on and watching, and saying otherwise would misdescribe the user's
+    /// own settings back to them.
+    /// </remarks>
+    public string LatencyHeadline
+    {
+        get => _latencyHeadline;
+        private set => Set(ref _latencyHeadline, value);
+    }
+
+    /// <summary>"off", "ok", "warn" or "info" - colour only; the wording carries meaning.</summary>
+    public string LatencyStatusSeverity
+    {
+        get => _latencyStatusSeverity;
+        private set => Set(ref _latencyStatusSeverity, value);
+    }
+
+    public string LatencyTargetSummary
+    {
+        get => _latencyTargetSummary;
+        private set => Set(ref _latencyTargetSummary, value);
+    }
+
+    public string LatencyIdleSummary
+    {
+        get => _latencyIdleSummary;
+        private set => Set(ref _latencyIdleSummary, value);
+    }
+
+    public string LatencyUploadSummary
+    {
+        get => _latencyUploadSummary;
+        private set => Set(ref _latencyUploadSummary, value);
+    }
+
+    public string LatencyDownloadSummary
+    {
+        get => _latencyDownloadSummary;
+        private set => Set(ref _latencyDownloadSummary, value);
+    }
+
+    /// <summary>Where the measurements say the delay is, in the user's own words.</summary>
+    public string LatencyPathSummary
+    {
+        get => _latencyPathSummary;
+        private set => Set(ref _latencyPathSummary, value);
+    }
+
+    public string LatencyGuardSummary
+    {
+        get => _latencyGuardSummary;
+        private set => Set(ref _latencyGuardSummary, value);
+    }
+
+    public string LatencyTargetError
+    {
+        get => _latencyTargetError;
+        private set => Set(ref _latencyTargetError, value);
+    }
+
+    /// <summary>What the user has to do before the deep test has anything to measure.</summary>
+    public string LatencyLoadInstruction => _service.LatencyLoadInstruction(LoadDirection.Upload);
+
+    public LatencyTargetOption SelectedLatencyTarget
+    {
+        get => _selectedLatencyTarget;
+        set
+        {
+            if (value is null || !Set(ref _selectedLatencyTarget, value))
+            {
+                return;
+            }
+
+            Raise(nameof(IsCustomLatencyTarget));
+            Raise(nameof(IsApplicationLatencyTarget));
+
+            if (value.Kind == LatencyTargetKind.Application)
+            {
+                _ = RefreshLatencyProcessesAsync();
+            }
+
+            PersistLatencyPreferences();
+        }
+    }
+
+    /// <summary>Whether the host/port box applies to the current choice.</summary>
+    public bool IsCustomLatencyTarget => _selectedLatencyTarget.Kind == LatencyTargetKind.Custom;
+
+    public bool IsApplicationLatencyTarget => _selectedLatencyTarget.Kind == LatencyTargetKind.Application;
+
+    public string LatencyCustomTarget
+    {
+        get => _latencyCustomTarget;
+        set
+        {
+            if (Set(ref _latencyCustomTarget, value))
+            {
+                PersistLatencyPreferences();
+            }
+        }
+    }
+
+    public string? SelectedLatencyProcess
+    {
+        get => _selectedLatencyProcess;
+        set
+        {
+            if (Set(ref _selectedLatencyProcess, value))
+            {
+                PersistLatencyPreferences();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the loaded-latency lane may create a send-rate limit.
+    /// </summary>
+    /// <remarks>
+    /// Off unless the user turns it on, because it creates a Windows QoS policy. One that
+    /// appeared without being asked for is exactly what a user should never find.
+    /// </remarks>
+    public bool TrafficGuardEnabled
+    {
+        get => _service.Settings.Latency.TrafficGuardEnabled;
+        set
+        {
+            if (_service.Settings.Latency.TrafficGuardEnabled == value)
+            {
+                return;
+            }
+
+            _service.SetLatencyPreferences(_service.Settings.Latency with { TrafficGuardEnabled = value });
+            Raise();
+        }
+    }
+
+    /// <summary>The one executable whose bulk sending may be paced. Never guessed.</summary>
+    public string TrafficGuardApplication
+    {
+        get => _service.Settings.Latency.TrafficGuardApplication ?? string.Empty;
+        set
+        {
+            var trimmed = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+            if (string.Equals(_service.Settings.Latency.TrafficGuardApplication, trimmed, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _service.SetLatencyPreferences(_service.Settings.Latency with { TrafficGuardApplication = trimmed });
+            Raise();
+        }
+    }
+
+    /// <summary>Uplink capacity in Mbit/s, when the user knows it better than a measurement.</summary>
+    public string ManualUplinkMbps
+    {
+        get => _service.Settings.Latency.ManualUplinkMbps?.ToString("0.##", System.Globalization.CultureInfo.CurrentCulture)
+            ?? string.Empty;
+        set
+        {
+            double? parsed = double.TryParse(
+                value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.CurrentCulture,
+                out var number) && number > 0
+                ? number
+                : null;
+
+            _service.SetLatencyPreferences(_service.Settings.Latency with { ManualUplinkMbps = parsed });
+            Raise();
+        }
+    }
+
+    /// <summary>
+    /// Writes the target choice through to the service, rejecting anything unparseable.
+    /// </summary>
+    /// <remarks>
+    /// A malformed host is reported next to the box rather than silently falling back to
+    /// the reference target, which would leave the user measuring something they did not
+    /// ask for and being told nothing about it.
+    /// </remarks>
+    private void PersistLatencyPreferences()
+    {
+        var preferences = _service.Settings.Latency with
+        {
+            TargetKind = _selectedLatencyTarget.Kind,
+            TargetProcess = _selectedLatencyProcess,
+        };
+
+        LatencyTargetError = string.Empty;
+
+        if (_selectedLatencyTarget.Kind == LatencyTargetKind.Custom)
+        {
+            if (string.IsNullOrWhiteSpace(_latencyCustomTarget))
+            {
+                LatencyTargetError = "Ölçülecek bir ana bilgisayar veya IP girin.";
+                return;
+            }
+
+            if (!LatencyTargetSpec.TryParse(_latencyCustomTarget, out var spec, out var error))
+            {
+                LatencyTargetError = error ?? "Hedef ayrıştırılamadı.";
+                return;
+            }
+
+            preferences = preferences with
+            {
+                TargetHost = spec.Host,
+                TargetPort = spec.Port,
+                TargetProtocol = spec.Protocol,
+            };
+        }
+
+        if (_selectedLatencyTarget.Kind == LatencyTargetKind.Application
+            && string.IsNullOrWhiteSpace(_selectedLatencyProcess))
+        {
+            LatencyTargetError = "Ölçülecek çalışan bir uygulama seçin.";
+            return;
+        }
+
+        _service.SetLatencyPreferences(preferences);
+        LatencyTargetSummary = preferences.ToSpec().Describe();
+    }
+
+    /// <summary>
+    /// Fills the application picker from the live connection table.
+    /// </summary>
+    /// <remarks>
+    /// Reading the process list and the TCP table takes long enough to be noticed, so the
+    /// work happens off the UI thread and only the collection update comes back to it.
+    /// </remarks>
+    private async Task RefreshLatencyProcessesAsync()
+    {
+        try
+        {
+            var running = await _service.ListConnectedProcessesAsync().ConfigureAwait(true);
+
+            LatencyProcesses.Clear();
+            foreach (var name in running)
+            {
+                LatencyProcesses.Add(name);
+            }
+
+            if (_selectedLatencyProcess is { Length: > 0 } && !LatencyProcesses.Contains(_selectedLatencyProcess))
+            {
+                LatencyProcesses.Insert(0, _selectedLatencyProcess);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Çalışan uygulama listesi okunamadı", ex);
+            LatencyTargetError = "Çalışan uygulamalar okunamadı.";
+        }
+    }
+
+    private void ClearLatencyProfiles()
+    {
+        LatencyStatusLine = _service.ClearLatencyProfiles()
+            ? "Kayıtlı gecikme sonuçları silindi; sonraki ölçüm baştan yapılacak."
+            : "Silinecek kayıtlı gecikme sonucu yoktu.";
+    }
+
+    private async Task RunLatencyDeepTestAsync()
+    {
+        IsLatencyBusy = true;
+        LatencyHeadline = "Açık · yük altında derin test yapılıyor";
+        LatencyStatusLine = LatencyLoadInstruction;
+
+        try
+        {
+            var result = await _service.RunLoadedLatencyTestAsync().ConfigureAwait(true);
+            ApplyLatencyStatus(_service.LatencyStatus);
+            LatencyStatusLine = result.StatusLine;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Yük altında gecikme ölçümü başarısız", ex);
+            LatencyStatusLine = $"Yük altında ölçüm yapılamadı: {ex.Message}";
+        }
+        finally
+        {
+            IsLatencyBusy = false;
+        }
+    }
+
+    private async Task RetestLatencyAsync()
+    {
+        IsLatencyBusy = true;
+        LatencyStatusLine = "Kayıtlı sonuç yok sayılarak baştan ölçülüyor…";
+
+        try
+        {
+            await _service.RetestLatencyAsync().ConfigureAwait(true);
+            ApplyLatencyStatus(_service.LatencyStatus);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Gecikme yeniden ölçülemedi", ex);
+            LatencyStatusLine = $"Yeniden ölçüm başarısız: {ex.Message}";
+        }
+        finally
+        {
+            IsLatencyBusy = false;
+        }
+    }
+
+    /// <summary>Copies one structured status into the properties the card binds to.</summary>
+    private void ApplyLatencyStatus(LatencyStatusView status)
+    {
+        LatencyHeadline = status.Headline;
+        LatencyStatusSeverity = status.Severity;
+        LatencyStatusLine = string.IsNullOrWhiteSpace(status.Detail) ? status.Headline : status.Detail;
+        LatencyTargetSummary = string.IsNullOrWhiteSpace(status.Target)
+            ? _service.Settings.Latency.ToSpec().Describe()
+            : $"{status.Target} ({status.Protocol})"
+                + (status.RouteReferenceOnly ? " · rota referansı, uygulamanın kendi RTT'si değil" : string.Empty);
+
+        LatencyIdleSummary = Describe(status.Idle, "Boşta");
+        LatencyUploadSummary = status.UploadLoaded is null
+            ? "Gönderim sırasında ölçülmedi — \"Yük altında derin test\" çalıştırın."
+            : Describe(status.UploadLoaded, "Gönderim sırasında");
+        LatencyDownloadSummary = status.DownloadLoaded is null
+            ? "İndirme sırasında ölçülmedi — \"Yük altında derin test\" çalıştırın."
+            : Describe(status.DownloadLoaded, "İndirme sırasında");
+        LatencyPathSummary = status.Path?.Summary ?? string.Empty;
+        LatencyGuardSummary = status.TrafficGuard?.Summary ?? "Traffic Guard kapalı.";
+
+        LatencyAppliedChanges.Clear();
+        foreach (var change in status.Applied)
+        {
+            LatencyAppliedChanges.Add(change);
+        }
+
+        LatencyRejectedChanges.Clear();
+        foreach (var rejection in status.Rejected)
+        {
+            LatencyRejectedChanges.Add(new LatencyRejectionEntry(rejection.Change, rejection.Reason));
+        }
+
+        static string Describe(LatencyMeasurement? measurement, string title) => measurement is null
+            ? $"{title}: ölçülmedi."
+            : $"{title}: median {measurement.MedianRttMs:F1} ms · p95 {measurement.P95RttMs:F1} ms · "
+                + $"jitter {measurement.JitterMs:F1} ms · kayıp %{measurement.PacketLossPercent:F1}"
+                + (measurement.RemoteReplies >= 100 ? $" · p99 {measurement.P99RttMs:F1} ms" : " · p99 için örnek yetersiz");
+    }
+
     private async Task ApplyLowLatencyModeAsync(bool enabled)
     {
         IsLatencyBusy = true;
@@ -559,8 +980,8 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            var result = await _service.SetLowLatencyModeAsync(enabled).ConfigureAwait(true);
-            LatencyStatusLine = result.StatusLine;
+            await _service.SetLowLatencyModeAsync(enabled).ConfigureAwait(true);
+            ApplyLatencyStatus(_service.LatencyStatus);
         }
         catch (Exception ex)
         {
@@ -582,8 +1003,8 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            var result = await _service.TestLatencyAsync().ConfigureAwait(true);
-            LatencyStatusLine = result.StatusLine;
+            await _service.TestLatencyAsync().ConfigureAwait(true);
+            ApplyLatencyStatus(_service.LatencyStatus);
         }
         catch (Exception ex)
         {
@@ -1144,8 +1565,10 @@ public sealed class MainViewModel : ObservableObject
         RefreshHotspotStatus();
         _lowLatencyMode = _service.Settings.LowLatencyMode;
         Raise(nameof(LowLatencyMode));
-        LatencyStatusLine = _service.LatencyResult.StatusLine;
+        ApplyLatencyStatus(_service.LatencyStatus);
         IsLatencyBusy = _service.IsLatencyBusy;
+        Raise(nameof(TrafficGuardEnabled));
+        Raise(nameof(TrafficGuardApplication));
         StateChanged?.Invoke();
     }
 

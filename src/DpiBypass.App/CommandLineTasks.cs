@@ -148,7 +148,7 @@ internal static class CommandLineTasks
                 return await SendAsync(ResolveVodafoneCommand(argument)).ConfigureAwait(false);
 
             case "latency":
-                return await RunLatencyAsync(argument).ConfigureAwait(false);
+                return await RunLatencyAsync(args).ConfigureAwait(false);
 
             // --minimized and anything else fall through to the window.
             default:
@@ -181,9 +181,20 @@ internal static class CommandLineTasks
         _ => ControlProtocol.Commands.VodafoneStatus,
     };
 
-    private static async Task<bool> RunLatencyAsync(string? argument)
+    /// <summary>
+    /// The <c>latency</c> verb family.
+    /// </summary>
+    /// <remarks>
+    /// Every command that existed before still means exactly what it did. The additions
+    /// are new sub-verbs and flags, so a script written against the old surface keeps
+    /// working without change.
+    /// </remarks>
+    private static async Task<bool> RunLatencyAsync(string[] args)
     {
-        switch (argument?.Trim().ToLowerInvariant())
+        var sub = args.Length > 1 ? args[1].Trim().ToLowerInvariant() : string.Empty;
+        var flags = args.Skip(2).Select(value => value.Trim()).ToArray();
+
+        switch (sub)
         {
             case "on":
             case "ac":
@@ -195,36 +206,170 @@ internal static class CommandLineTasks
                 return await SendAsync(ControlProtocol.Commands.LatencyOff).ConfigureAwait(false);
 
             case "test":
-            {
-                var network = NetworkFingerprint.Capture();
-                if (!network.IsOnline)
-                {
-                    WriteConsole("Aktif internet bağlantısı bulunamadı.");
-                    return true;
-                }
+                return await RunLatencyMeasurementAsync(TargetFlag(flags)).ConfigureAwait(false);
 
-                // Survey first so the benchmark pass and any later comparison all use
-                // the one target that actually answers on this network.
-                var probe = new LatencyProbe();
-                var survey = await probe
-                    .MeasureAsync(network, LatencyProbeRequest.Survey)
+            case "optimize":
+                return await SendAsync(HasFlag(flags, "--deep")
+                    ? ControlProtocol.Commands.LatencyDeepTest
+                    : ControlProtocol.Commands.LatencyQuickTest).ConfigureAwait(false);
+
+            case "loaded-test":
+            case "deep-test":
+                return await SendAsync(ControlProtocol.Commands.LatencyDeepTest).ConfigureAwait(false);
+
+            case "retest":
+                return await SendAsync(ControlProtocol.Commands.LatencyRetest).ConfigureAwait(false);
+
+            case "report":
+                return await SendAsync(ControlProtocol.Commands.LatencyReport).ConfigureAwait(false);
+
+            case "target":
+                return await SendAsync(ControlProtocol.Commands.LatencyTarget, TargetFlag(flags) ?? args.ElementAtOrDefault(2))
                     .ConfigureAwait(false);
-                var measurement = survey.HasRemoteConnectivity
-                    ? await probe
-                        .MeasureAsync(network, LatencyProbeRequest.Benchmark.For(survey.RemoteEndpoint))
-                        .ConfigureAwait(false)
-                    : survey;
 
-                WriteConsole(LatencyReport.Measurement(network, measurement, LatencyPathAnalysis.Describe(measurement)));
-                return true;
-            }
+            case "profiles":
+                return await RunLatencyProfilesAsync(flags).ConfigureAwait(false);
 
             case "restore":
                 return await RestoreLatencyAsync().ConfigureAwait(false);
 
+            case "status":
             default:
-                return await SendAsync(ControlProtocol.Commands.LatencyStatus).ConfigureAwait(false);
+                return await SendAsync(HasFlag(flags, "--json")
+                    ? ControlProtocol.Commands.LatencyStatusJson
+                    : ControlProtocol.Commands.LatencyStatus).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>Reads <c>--target host[:port]</c>, or a bare value after the sub-verb.</summary>
+    private static string? TargetFlag(IReadOnlyList<string> flags)
+    {
+        for (var index = 0; index < flags.Count; index++)
+        {
+            if (string.Equals(flags[index], "--target", StringComparison.OrdinalIgnoreCase)
+                && index + 1 < flags.Count)
+            {
+                return flags[index + 1];
+            }
+
+            if (flags[index].StartsWith("--target=", StringComparison.OrdinalIgnoreCase))
+            {
+                return flags[index]["--target=".Length..];
+            }
+        }
+
+        return flags.FirstOrDefault(flag => !flag.StartsWith("--", StringComparison.Ordinal));
+    }
+
+    private static bool HasFlag(IReadOnlyList<string> flags, string name)
+        => flags.Any(flag => string.Equals(flag, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Measures without a running instance, because measuring changes nothing.
+    /// </summary>
+    /// <remarks>
+    /// Every other latency verb goes through the running copy, which owns the adapter
+    /// state. This one deliberately does not: a user diagnosing a connection should not
+    /// have to start the app first to find out what their ping is.
+    /// </remarks>
+    private static async Task<bool> RunLatencyMeasurementAsync(string? target)
+    {
+        var network = NetworkFingerprint.Capture();
+        if (!network.IsOnline)
+        {
+            WriteConsole("Aktif internet bağlantısı bulunamadı.");
+            return true;
+        }
+
+        var spec = LatencyTargetSpec.Reference;
+        if (!string.IsNullOrWhiteSpace(target)
+            && !LatencyTargetSpec.TryParse(target, out spec, out var error))
+        {
+            WriteConsole(error ?? "Hedef ayrıştırılamadı.");
+            return true;
+        }
+
+        var resolver = new LatencyTargetResolver(log: AppLog.InfoSink);
+        var resolution = await resolver.ResolveAsync(spec).ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            WriteConsole(resolution.Failure ?? "Ölçüm hedefi çözümlenemedi.");
+            return true;
+        }
+
+        // Survey first so the benchmark pass and any later comparison all use the one
+        // endpoint that actually answers on this network.
+        var probe = new LatencyProbe();
+        LatencyEndpoint endpoint = resolution.Endpoints[0];
+        LatencyMeasurement? survey = null;
+
+        foreach (var candidate in resolution.Endpoints)
+        {
+            survey = await probe
+                .MeasureAsync(network, LatencyProbeRequest.Survey.For(candidate))
+                .ConfigureAwait(false);
+            endpoint = candidate;
+
+            if (survey.HasRemoteConnectivity)
+            {
+                break;
+            }
+        }
+
+        var measurement = survey is { HasRemoteConnectivity: true }
+            ? await probe
+                .MeasureAsync(network, LatencyProbeRequest.Benchmark.For(endpoint))
+                .ConfigureAwait(false)
+            : survey!;
+
+        WriteConsole(LatencyReport.Measurement(
+            network,
+            measurement,
+            LatencyPathAnalysis.Describe(measurement),
+            endpoint,
+            resolution.Notice));
+
+        return true;
+    }
+
+    private static async Task<bool> RunLatencyProfilesAsync(IReadOnlyList<string> flags)
+    {
+        if (!flags.Any(flag => string.Equals(flag, "clear", StringComparison.OrdinalIgnoreCase)))
+        {
+            WriteConsole("Kullanım: DpiBypass.exe latency profiles clear");
+            return true;
+        }
+
+        var response = await ControlClient.SendAsync(
+            new ControlRequest { Command = ControlProtocol.Commands.LatencyProfilesClear },
+            TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+
+        if (response is not null)
+        {
+            WriteConsole(response.Text);
+            return true;
+        }
+
+        // No running copy: the cache is a plain file, and removing it can never leave a
+        // machine in a changed state, so it is safe to do from here.
+        try
+        {
+            if (File.Exists(AppPaths.LatencyProfilesFile))
+            {
+                File.Delete(AppPaths.LatencyProfilesFile);
+                WriteConsole("Kayıtlı gecikme sonuçları silindi.");
+            }
+            else
+            {
+                WriteConsole("Silinecek kayıtlı gecikme sonucu yoktu.");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            WriteConsole($"Kayıtlı sonuçlar silinemedi: {ex.Message}");
+        }
+
+        return true;
     }
 
     private static async Task<bool> RestoreLatencyAsync()
@@ -249,17 +394,37 @@ internal static class CommandLineTasks
 
         await using var optimizer = new LatencyOptimizer(log: AppLog.InfoSink);
         var result = await optimizer.RestoreAsync().ConfigureAwait(false);
-        WriteConsole(result.StatusLine);
+
+        // The snapshot covers everything a completed run recorded. The sweep covers the
+        // one case it cannot: a policy created by a build that died before it could
+        // write the record. During uninstall there is no second chance to notice.
+        var removed = await new LoadedLatencyLane(log: AppLog.InfoSink)
+            .ClearOwnedPoliciesAsync()
+            .ConfigureAwait(false);
+
+        WriteConsole(removed > 0
+            ? $"{result.StatusLine}{Environment.NewLine}{removed} QoS ilkesi kaldırıldı."
+            : result.StatusLine);
+
         return true;
     }
 
     private static async Task<bool> SendAsync(string command, string? argument = null)
     {
         // Searching and re-tuning run real handshakes, so allow for them.
-        var timeout = command is ControlProtocol.Commands.Search or ControlProtocol.Commands.Test
-                or ControlProtocol.Commands.LatencyOn or ControlProtocol.Commands.LatencyOff
-            ? TimeSpan.FromSeconds(90)
-            : TimeSpan.FromSeconds(10);
+        // The deep test waits for the user to start a transfer, so it gets the longest
+        // budget of anything here; the others only have to outlast a benchmark.
+        var timeout = command switch
+        {
+            ControlProtocol.Commands.LatencyDeepTest => TimeSpan.FromMinutes(6),
+            ControlProtocol.Commands.Search
+                or ControlProtocol.Commands.Test
+                or ControlProtocol.Commands.LatencyOn
+                or ControlProtocol.Commands.LatencyOff
+                or ControlProtocol.Commands.LatencyQuickTest
+                or ControlProtocol.Commands.LatencyRetest => TimeSpan.FromMinutes(4),
+            _ => TimeSpan.FromSeconds(10),
+        };
 
         var response = await ControlClient
             .SendAsync(new ControlRequest { Command = command, Argument = argument }, timeout)
@@ -291,9 +456,20 @@ internal static class CommandLineTasks
           DpiBypass.exe hotspot diagnose    mobil paylaşım bağlantısını incele (hiçbir şeyi değiştirmez)
           DpiBypass.exe hotspot cleanup     yalnız eski TTL alt özelliğini temizle
           DpiBypass.exe hotspot             hotspot durumunu göster
-          DpiBypass.exe latency status      düşük-gecikme durumunu göster
+          DpiBypass.exe latency status [--json]
+                                            düşük-gecikme durumunu göster (--json: kararlı şema)
           DpiBypass.exe latency on | off    ölçümlü düşük-gecikme modunu aç / kapat
-          DpiBypass.exe latency test        hiçbir ayar değiştirmeden RTT/jitter ölç
+          DpiBypass.exe latency test [--target ana_bilgisayar[:port]]
+                                            hiçbir ayar değiştirmeden RTT/jitter ölç
+          DpiBypass.exe latency target <hedef>
+                                            ölçüm hedefini kalıcı olarak ayarla (boş: genel referans)
+          DpiBypass.exe latency optimize --quick | --deep
+                                            hızlı ölçüm ya da yük altında derin test
+          DpiBypass.exe latency loaded-test yük altında derin test (siz indirme/gönderim başlatın)
+          DpiBypass.exe latency retest      kayıtlı sonucu yok sayıp baştan ölç
+          DpiBypass.exe latency report      son tam raporu yazdır
+          DpiBypass.exe latency profiles clear
+                                            kayıtlı per-ağ sonuçlarını sil
           DpiBypass.exe latency restore     özgün NIC ayarlarını kurtar
           DpiBypass.exe restore-dns         DNS ayarlarını geri yükle
           DpiBypass.exe version             sürüm
