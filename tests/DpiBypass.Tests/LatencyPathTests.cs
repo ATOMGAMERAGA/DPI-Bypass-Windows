@@ -93,6 +93,8 @@ public sealed class LatencyPathTests
 
         Assert.Equal(LatencyBottleneck.Unknown, path.Bottleneck);
         Assert.Null(path.LocalLinkMs);
+        Assert.False(path.LocallyImprovable);
+        Assert.Contains("varsayılmaz", path.Summary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -168,7 +170,7 @@ public sealed class NetworkLoadTests
     }
 
     [Fact]
-    public void OnlyWindowsInTheSameStateAreComparable()
+    public void IdleWindowsAreComparableButUnknownIsNotEvidence()
     {
         var idle = Fake.Load(LatencyLoadState.Idle);
         var busy = Fake.Load(LatencyLoadState.DownlinkLoaded);
@@ -176,13 +178,50 @@ public sealed class NetworkLoadTests
         Assert.True(idle.ComparableWith(idle));
         Assert.False(idle.ComparableWith(busy));
 
-        // Nothing known about one side is not a disagreement.
-        Assert.True(NetworkLoadSample.Unknown.ComparableWith(busy));
-        Assert.True(busy.ComparableWith(NetworkLoadSample.Unknown));
+        Assert.False(NetworkLoadSample.Unknown.ComparableWith(busy));
+        Assert.False(busy.ComparableWith(NetworkLoadSample.Unknown));
+        Assert.False(NetworkLoadSample.Unknown.ComparableWith(NetworkLoadSample.Unknown));
+    }
+
+    [Theory]
+    [InlineData(LatencyLoadState.UplinkLoaded, 5_000, 40, 5_500, 60, true)]
+    [InlineData(LatencyLoadState.UplinkLoaded, 300, 40, 50_000, 60, false)]
+    [InlineData(LatencyLoadState.DownlinkLoaded, 40, 8_000, 60, 9_500, true)]
+    [InlineData(LatencyLoadState.DownlinkLoaded, 40, 300, 60, 80_000, false)]
+    public void SameDirectionLoadAlsoRequiresSimilarMagnitude(
+        LatencyLoadState state,
+        double firstUp,
+        double firstDown,
+        double secondUp,
+        double secondDown,
+        bool expected)
+    {
+        var first = Load(state, firstUp, firstDown);
+        var second = Load(state, secondUp, secondDown);
+
+        Assert.Equal(expected, first.ComparableWith(second));
+        Assert.Equal(expected, second.ComparableWith(first));
+    }
+
+    [Fact]
+    public void BidirectionalLoadRequiresBothDirectionsToHaveSimilarMagnitude()
+    {
+        var baseline = Load(LatencyLoadState.BidirectionalLoaded, 5_000, 20_000);
+
+        Assert.True(baseline.ComparableWith(Load(LatencyLoadState.BidirectionalLoaded, 5_500, 18_000)));
+        Assert.False(baseline.ComparableWith(Load(LatencyLoadState.BidirectionalLoaded, 5_500, 80_000)));
+        Assert.False(baseline.ComparableWith(Load(LatencyLoadState.BidirectionalLoaded, 30_000, 18_000)));
     }
 
     private static NetworkLoadSample Sample(long sentBytes, long receivedBytes, double seconds)
         => NetworkLoadSample.Between(
             new NetworkCounters(1_000, 2_000, Start),
             new NetworkCounters(1_000 + sentBytes, 2_000 + receivedBytes, Start + TimeSpan.FromSeconds(seconds)));
+
+    private static NetworkLoadSample Load(LatencyLoadState state, double uplink, double downlink) => new()
+    {
+        State = state,
+        UplinkKbps = uplink,
+        DownlinkKbps = downlink,
+    };
 }

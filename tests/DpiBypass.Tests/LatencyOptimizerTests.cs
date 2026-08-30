@@ -201,7 +201,7 @@ public sealed class LatencyOptimizerTests
         Assert.True(result.HasVerifiedGain);
         Assert.Equal(["Seçmeli askıya alma kapalı"], result.AppliedChanges);
 
-        // The number the user is shown is the one the paired cycles measured.
+        // The number the user is shown is the observed original-to-final difference.
         Assert.NotNull(result.VerifiedImprovement);
         Assert.Equal(5, result.VerifiedImprovement!.MedianMs, precision: 3);
         Assert.Contains("Doğrulanmış iyileşme", result.StatusLine, StringComparison.Ordinal);
@@ -211,6 +211,35 @@ public sealed class LatencyOptimizerTests
         Assert.Contains("SelectiveSuspend", scenario.Controller.Live);
         Assert.NotNull(scenario.Snapshots.Value);
         Assert.Equal(LatencyTransactionState.Committed, scenario.Snapshots.Value!.State);
+    }
+
+    [Fact]
+    public async Task TheHeadlineGainComesFromBaselineToFinalRatherThanSummedCandidateDeltas()
+    {
+        var controller = new FakeController
+        {
+            PowerProperties = ["SelectiveSuspend", "DeviceSleepOnDisconnect"],
+        };
+        var probe = new FakeProbe(controller, (live, call) =>
+        {
+            if (live.Contains("SelectiveSuspend") && live.Contains("DeviceSleepOnDisconnect"))
+            {
+                // Paired B cycles see 32 ms (a 3 ms incremental gain), while the
+                // independent final state measures 34 ms.
+                return Fake.Measurement(call >= 10 ? 34 : 32);
+            }
+
+            return live.Contains("SelectiveSuspend") ? Fake.Measurement(35) : Fake.Measurement(40);
+        });
+        var scenario = new LatencyScenario(controller, probe);
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("end-to-end"));
+
+        Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
+        Assert.Equal(6, result.VerifiedImprovement!.MedianMs);
+        Assert.Equal(8, result.Verdicts.Where(verdict => verdict.Accepted).Sum(verdict => verdict.Delta.MedianMs));
+        Assert.Equal(40, result.Before!.MedianRttMs);
+        Assert.Equal(34, result.After!.MedianRttMs);
     }
 
     [Fact]
@@ -388,6 +417,24 @@ public sealed class LatencyOptimizerTests
         Assert.Equal(["SelectiveSuspend"], controller.Restored);
         Assert.Empty(controller.Live);
         Assert.Null(scenario.Snapshots.Value);
+    }
+
+    [Fact]
+    public async Task ConnectivityRollbackFailureIsReportedAndPreservesTheSnapshot()
+    {
+        var controller = new FakeController { RestoreOutcome = LatencyRestoreOutcome.Failed };
+        var probe = new FakeProbe(controller, (_, _) => Fake.Measurement(30))
+        {
+            BreaksConnectivity = "SelectiveSuspend",
+        };
+        var scenario = new LatencyScenario(controller, probe);
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("dead-rollback-failure"));
+
+        Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
+        Assert.Contains("snapshot", result.StatusLine, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("SelectiveSuspend", controller.Live);
+        Assert.NotNull(scenario.Snapshots.Value);
     }
 
     [Fact]
@@ -649,6 +696,167 @@ public sealed class LatencyOptimizerTests
         Assert.Equal(["SelectiveSuspend"], profile.AcceptedProperties);
         Assert.NotNull(profile.Baseline);
         Assert.NotNull(profile.Optimized);
+    }
+
+    [Fact]
+    public async Task ACachedProfileIsKeptOnlyWhenFreshMeasurementsStillShowBenefit()
+    {
+        var network = Fake.Network("profile-beneficial");
+        var first = LatencyScenario.WithImprovement(gain: 6);
+        await first.Optimizer.OptimizeAsync(network);
+
+        var controller = new FakeController();
+        var replay = new LatencyScenario(controller, FakeProbe.Improves(controller, gain: 6), profiles: first.Profiles);
+        var result = await replay.Optimizer.OptimizeAsync(network);
+
+        Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
+        Assert.Equal(6, result.VerifiedImprovement!.MedianMs);
+        Assert.Contains("SelectiveSuspend", controller.Live);
+        Assert.Single(controller.Applied);
+    }
+
+    [Fact]
+    public async Task ACachedProfileWithZeroCurrentBenefitIsRestoredAndDowngraded()
+    {
+        var network = Fake.Network("profile-flat");
+        var first = LatencyScenario.WithImprovement(gain: 6);
+        await first.Optimizer.OptimizeAsync(network);
+
+        var controller = new FakeController();
+        var replay = new LatencyScenario(controller, FakeProbe.Flat(controller), profiles: first.Profiles);
+        var result = await replay.Optimizer.OptimizeAsync(network);
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Empty(controller.Live);
+        Assert.Contains("SelectiveSuspend", controller.Restored);
+        var refreshed = Assert.Single(first.Profiles.Profiles);
+        Assert.Empty(refreshed.AcceptedProperties);
+        Assert.Equal(["SelectiveSuspend"], refreshed.RejectedProperties);
+    }
+
+    [Fact]
+    public async Task ACachedProfileThatBecameWorseIsRestored()
+    {
+        var network = Fake.Network("profile-worse");
+        var first = LatencyScenario.WithImprovement(gain: 6);
+        await first.Optimizer.OptimizeAsync(network);
+
+        var controller = new FakeController();
+        var probe = new FakeProbe(controller, (live, _) =>
+            live.Contains("SelectiveSuspend") ? Fake.Measurement(35) : Fake.Measurement(25));
+        var replay = new LatencyScenario(controller, probe, profiles: first.Profiles);
+
+        var result = await replay.Optimizer.OptimizeAsync(network);
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Empty(controller.Live);
+        Assert.Contains("SelectiveSuspend", controller.Restored);
+    }
+
+    [Fact]
+    public async Task ACachedProfileThatBreaksConnectivityIsRestoredAndInvalidated()
+    {
+        var network = Fake.Network("profile-connectivity");
+        var first = LatencyScenario.WithImprovement(gain: 6);
+        await first.Optimizer.OptimizeAsync(network);
+
+        var controller = new FakeController();
+        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+            ? Fake.Measurement(20)
+            : Fake.Measurement(26))
+        {
+            BreaksConnectivity = "SelectiveSuspend",
+        };
+        var replay = new LatencyScenario(controller, probe, profiles: first.Profiles);
+
+        var result = await replay.Optimizer.OptimizeAsync(network);
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Empty(controller.Live);
+        Assert.Empty(first.Profiles.Profiles);
+    }
+
+    [Fact]
+    public async Task AStaleCpuSensitiveCachedSettingIsRestoredWhenItsBenefitDisappears()
+    {
+        var network = Fake.Network("profile-cpu");
+        AdapterLatencyCapability Capability(NetworkFingerprint fingerprint) => Fake.Capability(fingerprint) with
+        {
+            PowerManagement = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase),
+            AdvancedProperties =
+            [
+                new AdapterAdvancedPropertyCapability
+                {
+                    RegistryKeyword = "*InterruptModeration",
+                    RegistryValues = ["1"],
+                    ValidRegistryValues = ["0", "1"],
+                },
+            ],
+        };
+
+        var firstController = new FakeController { Detect = Capability };
+        var first = new LatencyScenario(
+            firstController,
+            FakeProbe.Improves(firstController, "*InterruptModeration", median: 40, gain: 10));
+        await first.Optimizer.OptimizeAsync(network);
+
+        var replayController = new FakeController { Detect = Capability };
+        var replay = new LatencyScenario(
+            replayController,
+            FakeProbe.Flat(replayController, median: 40),
+            profiles: first.Profiles);
+
+        var result = await replay.Optimizer.OptimizeAsync(network);
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Empty(replayController.Live);
+        Assert.Contains("*InterruptModeration", replayController.Restored);
+    }
+
+    [Fact]
+    public async Task SuccessfulReplayRefreshesTheProfilesCurrentMeasurementsAndAge()
+    {
+        var network = Fake.Network("profile-refresh");
+        var firstAt = new DateTimeOffset(2026, 8, 1, 12, 0, 0, TimeSpan.Zero);
+        var refreshedAt = firstAt + TimeSpan.FromDays(10);
+        var firstController = new FakeController();
+        var first = new LatencyScenario(
+            firstController,
+            FakeProbe.Improves(firstController, gain: 5),
+            now: () => firstAt);
+        await first.Optimizer.OptimizeAsync(network);
+
+        var replayController = new FakeController();
+        var replay = new LatencyScenario(
+            replayController,
+            FakeProbe.Improves(replayController, median: 32, gain: 7),
+            profiles: first.Profiles,
+            now: () => refreshedAt);
+        await replay.Optimizer.OptimizeAsync(network);
+
+        var profile = Assert.Single(first.Profiles.Profiles);
+        Assert.Equal(refreshedAt, profile.VerifiedAt);
+        Assert.Equal(32, profile.Baseline!.MedianRttMs);
+        Assert.Equal(25, profile.Optimized!.MedianRttMs);
+    }
+
+    [Fact]
+    public async Task ReplayRollbackFailureStopsFurtherTuningAndPreservesRecoveryData()
+    {
+        var network = Fake.Network("profile-rollback-failure");
+        var first = LatencyScenario.WithImprovement(gain: 6);
+        await first.Optimizer.OptimizeAsync(network);
+
+        var controller = new FakeController { RestoreOutcome = LatencyRestoreOutcome.Failed };
+        var replay = new LatencyScenario(controller, FakeProbe.Flat(controller), profiles: first.Profiles);
+
+        var result = await replay.Optimizer.OptimizeAsync(network);
+
+        Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
+        Assert.Contains("snapshot", result.StatusLine, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(replay.Snapshots.Value);
+        Assert.Contains("SelectiveSuspend", controller.Live);
+        Assert.Empty(first.Profiles.Profiles);
     }
 
     [Fact]

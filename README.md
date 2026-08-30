@@ -140,16 +140,19 @@ Arayüzdeki **Kapsam** sekmesinde dört seçenek var:
 ## Mobil hotspot uyumluluğu ve tanılama
 
 **DNS ve ayarlar → Mobil hotspot uyumluluğu ve tanılama** kartı, telefon
-paylaşımı ve mobil veri bağlantılarını **hiçbir şeyi değiştirmeden** inceler:
+paylaşımı ve mobil veri bağlantılarını **kalıcı ağ ayarı değiştirmeden** inceler:
+
+Tanılama kalıcı ağ ayarı veya trafik sınıflandırma kuralı değiştirmez; ölçüm için
+sıradan ICMP, DNS ve bağlantı denetimi paketleri gönderir.
 
 - IPv4 ve IPv6 adresi var mı, trafik geçiyor mu;
 - ad çözümleme (DNS) çalışıyor mu;
 - median / p95 RTT ve paket kaybı;
-- 1500 baytlık paketler geçiyor mu (MTU sorunu, "sayfa yarım yükleniyor"in
-  en sık sebebi);
-- adres operatör NAT'ı (100.64/10) aralığında mı — gelen bağlantı ve port
-  yönlendirme çalışmaz;
-- etkin bir VPN/tünel bağdaştırıcısı var mı.
+- parçalanmadan geçen en büyük IPv4 ICMP yükü (MTU sorunu, "sayfa yarım
+  yükleniyor"un sık sebeplerinden biri);
+- yerel bağdaştırıcı adresi 100.64/10 paylaşılan adres alanında mı (bu gözlem
+  telefonun veya operatörün yukarısındaki CGNAT'ı tek başına kanıtlamaz);
+- etkin olabilecek bir VPN/tünel bağdaştırıcısı var mı (en iyi çaba tespiti).
 
 ```powershell
 DpiBypass.exe hotspot            # durum
@@ -488,7 +491,7 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
 | Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
 | DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
-| Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Mobil hotspot uyumluluğu ve tanılama** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor bunu ve önerilen MTU'yu söyler |
+| Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Mobil hotspot uyumluluğu ve tanılama** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor ölçülen parçalanmasız sınırı söyler; yalnızca belirti varsa bu sınıra yakın bir MTU denenip yeniden doğrulanmalıdır |
 | "Vodafone sınırsız modu" nereye gitti | Kaldırıldı. Eski ayar dosyanız her açılışta otomatik temizlenir; `DpiBypass.exe vodafone off` de aynı temizliği yapar. Yerine gelen tanılama bağlantıyı değiştirmeden inceler |
 | Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 

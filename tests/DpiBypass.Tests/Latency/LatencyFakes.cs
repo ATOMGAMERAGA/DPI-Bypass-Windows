@@ -45,13 +45,15 @@ internal static class Fake
         double loss = 0,
         string endpoint = "1.1.1.1",
         LatencyLoadState load = LatencyLoadState.Idle,
-        double gateway = 1.2) => new()
+        double gateway = 1.2,
+        int attempts = 24,
+        NetworkLoadSample? loadSample = null) => new()
         {
             MeasuredAt = DateTimeOffset.UtcNow,
             RemoteEndpoint = endpoint,
             Protocol = "ICMP",
-            RemoteAttempts = 24,
-            RemoteReplies = (int)Math.Round(24 * (100 - loss) / 100),
+            RemoteAttempts = attempts,
+            RemoteReplies = (int)Math.Round(attempts * (100 - loss) / 100),
             GatewayAttempts = 8,
             GatewayReplies = 8,
             MinimumRttMs = Math.Max(0.1, median - 3),
@@ -62,7 +64,7 @@ internal static class Fake
             PacketLossPercent = loss,
             GatewayMedianRttMs = gateway,
             GatewayP95RttMs = gateway + 0.5,
-            Load = Load(load),
+            Load = loadSample ?? Load(load),
         };
 
     public static NetworkLoadSample Load(LatencyLoadState state) => state switch

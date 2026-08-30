@@ -73,6 +73,18 @@ public sealed class LatencyComparisonTests
         Assert.Equal(LatencyVerdictOutcome.Accepted, Evaluate(pairs).Outcome);
     }
 
+    [Fact]
+    public void AConsistentP95GainIsAccepted()
+        => Assert.Equal(LatencyVerdictOutcome.Accepted, Evaluate(P95Pairs(8, 7, 9)).Outcome);
+
+    [Fact]
+    public void AConsistentP99GainIsAccepted()
+        => Assert.Equal(LatencyVerdictOutcome.Accepted, Evaluate(P99Pairs(10, 9, 11)).Outcome);
+
+    [Fact]
+    public void AConsistentJitterGainIsAccepted()
+        => Assert.Equal(LatencyVerdictOutcome.Accepted, Evaluate(JitterPairs(3, 2.8, 3.2)).Outcome);
+
     // --- rejection ------------------------------------------------------------------
 
     [Fact]
@@ -106,6 +118,26 @@ public sealed class LatencyComparisonTests
     }
 
     [Fact]
+    public void ANoisyP95OnlyApparentGainIsRejected()
+        => Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(P95Pairs(12, 6, 1)).Outcome);
+
+    [Fact]
+    public void ANoisyP99OnlyApparentGainIsRejected()
+        => Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(P99Pairs(18, 8, 1)).Outcome);
+
+    [Fact]
+    public void ANoisyJitterOnlyApparentGainIsRejected()
+        => Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(JitterPairs(6, 2, 0.1)).Outcome);
+
+    [Fact]
+    public void ContradictoryCyclesAreRejected()
+        => Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(P95Pairs(12, -8, 12)).Outcome);
+
+    [Fact]
+    public void ATypicalGainSmallerThanMeasurementNoiseIsRejected()
+        => Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(Fake.Pairs((40, 32), (40, 37), (40, 39.5))).Outcome);
+
+    [Fact]
     public void AMedianRegressionIsRejectedEvenWhenTheTailImproves()
     {
         var pairs = new[]
@@ -125,8 +157,8 @@ public sealed class LatencyComparisonTests
     {
         var pairs = new[]
         {
-            Pair(Fake.Measurement(30, p95: 36, p99: 40), Fake.Measurement(24, p95: 70, p99: 42)),
-            Pair(Fake.Measurement(30, p95: 36, p99: 40), Fake.Measurement(24, p95: 70, p99: 42)),
+            Pair(Fake.Measurement(30, p95: 36, p99: 40), Fake.Measurement(24, p95: 70, p99: 72)),
+            Pair(Fake.Measurement(30, p95: 36, p99: 40), Fake.Measurement(24, p95: 70, p99: 72)),
         };
 
         var verdict = Evaluate(pairs);
@@ -165,6 +197,35 @@ public sealed class LatencyComparisonTests
         Assert.Contains("paket kaybı", verdict.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void IntermittentPacketLossCannotBeAveragedAwayByCleanCycles()
+    {
+        var pairs = new[]
+        {
+            Pair(Fake.Measurement(42), Fake.Measurement(30, loss: 12.5)),
+            Pair(Fake.Measurement(42), Fake.Measurement(30)),
+            Pair(Fake.Measurement(42), Fake.Measurement(30)),
+        };
+
+        Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(pairs).Outcome);
+    }
+
+    [Fact]
+    public void AnIntermittentTailRegressionCannotBeAveragedAwayByOtherCycles()
+    {
+        var pairs = new[]
+        {
+            Pair(Fake.Measurement(40, p95: 50, p99: 60), Fake.Measurement(35, p95: 45, p99: 80)),
+            Pair(Fake.Measurement(40, p95: 50, p99: 60), Fake.Measurement(35, p95: 45, p99: 45)),
+            Pair(Fake.Measurement(40, p95: 50, p99: 60), Fake.Measurement(35, p95: 45, p99: 45)),
+        };
+
+        var verdict = Evaluate(pairs);
+
+        Assert.Equal(LatencyVerdictOutcome.Rejected, verdict.Outcome);
+        Assert.Contains("p99", verdict.Reason, StringComparison.Ordinal);
+    }
+
     /// <summary>A single probe of a 24-probe batch going missing is normal, not a regression.</summary>
     [Fact]
     public void OneMissingProbeIsWithinTolerance()
@@ -190,6 +251,20 @@ public sealed class LatencyComparisonTests
 
         Assert.Equal(LatencyVerdictOutcome.Rejected, verdict.Outcome);
         Assert.Contains("yanıt vermedi", verdict.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NonFiniteOrImpossibleStatisticsAreRejected()
+    {
+        var invalidBaseline = Fake.Measurement(30) with { MedianRttMs = double.NaN };
+        var invalidOrdering = Fake.Measurement(25, p95: 24, p99: 30);
+
+        Assert.Equal(
+            LatencyVerdictOutcome.Rejected,
+            Evaluate([Pair(invalidBaseline, Fake.Measurement(20))]).Outcome);
+        Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(
+            Fake.Measurement(30),
+            invalidOrdering));
     }
 
     // --- comparability ---------------------------------------------------------------
@@ -223,17 +298,29 @@ public sealed class LatencyComparisonTests
     }
 
     /// <summary>
-    /// Counters that cannot be read leave the load unknown. That is a reason to lean on
-    /// the other checks, not a reason to refuse to measure at all.
+    /// One unreadable counter cannot establish that the two windows had the same load.
     /// </summary>
     [Fact]
-    public void AnUnreadableLoadCounterDoesNotBlockAComparison()
+    public void AnUnreadableLoadCounterIsNotDirectlyComparable()
     {
         var pair = Pair(
             Fake.Measurement(42, load: LatencyLoadState.Unknown),
             Fake.Measurement(36, load: LatencyLoadState.Idle));
 
-        Assert.True(pair.IsComparable);
+        Assert.False(pair.IsComparable);
+    }
+
+    [Fact]
+    public void TwoUnknownLoadsNeedEveryCycleAndAStrongerGain()
+    {
+        var pairs = Enumerable.Range(0, MaximumCycles)
+            .Select(_ => Pair(
+                Fake.Measurement(42, load: LatencyLoadState.Unknown),
+                Fake.Measurement(36, load: LatencyLoadState.Unknown)))
+            .ToArray();
+
+        Assert.Equal(LatencyVerdictOutcome.Inconclusive, Evaluate(pairs[..^1]).Outcome);
+        Assert.Equal(LatencyVerdictOutcome.Accepted, Evaluate(pairs).Outcome);
     }
 
     [Fact]
@@ -271,32 +358,84 @@ public sealed class LatencyComparisonTests
             LatencyVerdictOutcome.Accepted,
             Evaluate(Fake.Pairs((40, 30), (40, 30.4)), cpuSensitive: true).Outcome);
 
-    // --- the final single-sample gate -------------------------------------------------
+    // --- independent final verification ---------------------------------------------
 
     [Fact]
-    public void TheFinalCheckPassesWhenNothingRegressed()
-        => Assert.True(LatencyComparison.ConfirmsImprovement(Fake.Measurement(42), Fake.Measurement(37)));
+    public void IdenticalMeasurementsAreSafeButNotAConfirmedImprovement()
+    {
+        var before = Fake.Measurement(30);
+        var after = Fake.Measurement(30);
+
+        Assert.True(LatencyComparison.HasNoMaterialRegression(before, after));
+        Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(before, after));
+    }
+
+    [Fact]
+    public void ATinyMeaninglessImprovementIsNotConfirmed()
+        => Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(
+            Fake.Measurement(30),
+            Fake.Measurement(29.8)));
+
+    [Fact]
+    public void ASmallAllowedRegressionIsNotAConfirmedImprovement()
+    {
+        var before = Fake.Measurement(30);
+        var after = Fake.Measurement(30.8);
+
+        Assert.True(LatencyComparison.HasNoMaterialRegression(before, after));
+        Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(before, after));
+    }
+
+    [Fact]
+    public void AMeaningfulMedianImprovementIsConfirmed()
+        => Assert.True(LatencyComparison.ConfirmsMeaningfulImprovement(
+            Fake.Measurement(42),
+            Fake.Measurement(37)));
+
+    [Fact]
+    public void AMeaningfulP95ImprovementWithEnoughRepliesIsConfirmed()
+        => Assert.True(LatencyComparison.ConfirmsMeaningfulImprovement(
+            Fake.Measurement(30, p95: 60, p99: 90),
+            Fake.Measurement(30, p95: 48, p99: 90)));
+
+    [Fact]
+    public void AP99OnlyImprovementNeedsEnoughRepliesToRepresentThePercentile()
+    {
+        var before = Fake.Measurement(30, p95: 60, p99: 100);
+        var after = Fake.Measurement(30, p95: 60, p99: 80);
+
+        Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(before, after));
+        Assert.True(LatencyComparison.ConfirmsMeaningfulImprovement(
+            before with { RemoteAttempts = 100, RemoteReplies = 100 },
+            after with { RemoteAttempts = 100, RemoteReplies = 100 }));
+    }
 
     [Fact]
     public void TheFinalCheckFailsOnAMedianRegression()
-        => Assert.False(LatencyComparison.ConfirmsImprovement(Fake.Measurement(25), Fake.Measurement(31)));
+        => Assert.False(LatencyComparison.HasNoMaterialRegression(Fake.Measurement(25), Fake.Measurement(31)));
 
     [Fact]
     public void TheFinalCheckFailsWhenTheRemoteEndStoppedAnswering()
-        => Assert.False(LatencyComparison.ConfirmsImprovement(
+        => Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(
             Fake.Measurement(25),
             LatencyMeasurement.Create("1.1.1.1", "ICMP", [], 24, [], 8)));
 
     [Fact]
     public void TheFinalCheckFailsOnAP99Regression()
-        => Assert.False(LatencyComparison.ConfirmsImprovement(
+        => Assert.False(LatencyComparison.HasNoMaterialRegression(
             Fake.Measurement(25, p95: 30, p99: 34),
             Fake.Measurement(24, p95: 29, p99: 90)));
+
+    [Fact]
+    public void TheFinalCheckFailsOnPacketLossRegression()
+        => Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(
+            Fake.Measurement(30),
+            Fake.Measurement(20, loss: 12)));
 
     // --- aggregation -------------------------------------------------------------------
 
     [Fact]
-    public void StackedGainsAreAddedAndAveragedGainsAreNot()
+    public void CandidateDeltasCanBeSummedForDiagnosticsAndAveraged()
     {
         LatencyDelta[] deltas =
         [
@@ -312,4 +451,25 @@ public sealed class LatencyComparisonTests
 
     private static LatencyPair Pair(LatencyMeasurement baseline, LatencyMeasurement candidate)
         => new() { Baseline = baseline, Candidate = candidate };
+
+    private static IReadOnlyList<LatencyPair> P95Pairs(params double[] gains) =>
+    [
+        .. gains.Select(gain => Pair(
+            Fake.Measurement(30, p95: 60, p99: 90),
+            Fake.Measurement(30, p95: 60 - gain, p99: 90))),
+    ];
+
+    private static IReadOnlyList<LatencyPair> P99Pairs(params double[] gains) =>
+    [
+        .. gains.Select(gain => Pair(
+            Fake.Measurement(30, p95: 60, p99: 100),
+            Fake.Measurement(30, p95: 60, p99: 100 - gain))),
+    ];
+
+    private static IReadOnlyList<LatencyPair> JitterPairs(params double[] gains) =>
+    [
+        .. gains.Select(gain => Pair(
+            Fake.Measurement(30, jitter: 8),
+            Fake.Measurement(30, jitter: 8 - gain))),
+    ];
 }

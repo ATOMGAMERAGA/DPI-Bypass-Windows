@@ -293,8 +293,9 @@ public sealed record LatencyPathAnalysis
             LocalLinkMs = null,
             RemotePathMs = null,
             QueueingMs = queueing,
-            LocallyImprovable = true,
-            Summary = "Ağ geçidi ICMP yanıtlamıyor; yerel ve uzak gecikme ayrıştırılamadı.",
+            LocallyImprovable = false,
+            Summary = "Ağ geçidi ICMP yanıtlamıyor; yerel ve uzak gecikme ayrıştırılamadı. "
+                + "Bu bilinmeyen bir kaynak sınıflandırmasıdır; yerel NIC sorunu olduğu varsayılmaz.",
         };
     }
 }
@@ -540,7 +541,7 @@ public sealed record LatencyOptimizationResult
     /// <summary>What the paired benchmark concluded about each candidate that was tried.</summary>
     public IReadOnlyList<LatencyVerdict> Verdicts { get; init; } = [];
 
-    /// <summary>The aggregate improvement, present only when one was actually verified.</summary>
+    /// <summary>The observed original-to-final improvement, present only when verified.</summary>
     public LatencyDelta? VerifiedImprovement { get; init; }
 
     public bool HasVerifiedGain => Status == LatencyOptimizationStatus.Active

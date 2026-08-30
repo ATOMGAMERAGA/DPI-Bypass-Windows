@@ -6,9 +6,9 @@ namespace DpiBypass.Core.Network;
 /// Turns a run into the few lines the user reads.
 /// </summary>
 /// <remarks>
-/// The one rule here: a number only appears next to the word "improvement" when a paired
-/// benchmark produced it. A run that found nothing says so and says the original settings
-/// are back, which is a better answer than a decorated zero.
+/// The one rule here: a number only appears next to the word "improvement" when paired
+/// candidate benchmarks and an independent original-to-final measurement both support
+/// it. A run that found nothing says so and says the original settings are back.
 /// </remarks>
 public static class LatencyReport
 {
@@ -32,7 +32,7 @@ public static class LatencyReport
         builder.AppendLine();
         AppendBlock(builder, "Optimize", optimized);
         builder.AppendLine();
-        builder.AppendLine("Doğrulanmış iyileşme (eşli A/B ölçümü)");
+        builder.AppendLine("Doğrulanmış iyileşme (başlangıç → son ölçüm)");
 
         foreach (var line in ImprovementLines(improvement))
         {
@@ -50,42 +50,34 @@ public static class LatencyReport
     /// A run that re-applied a result an earlier benchmark verified on this network.
     /// </summary>
     /// <remarks>
-    /// The improvement shown is the one that earlier paired benchmark measured, and it
-    /// is labelled with its date rather than presented as something measured just now.
-    /// This session only confirms the settings still apply and the link is no worse.
+    /// A cached profile is only a shortcut to settings worth testing. The improvement
+    /// shown here is freshly measured in this session, not copied from the old profile.
     /// </remarks>
     public static string Replayed(
         string adapterName,
-        LatencyProfile profile,
+        LatencyMeasurement baseline,
         LatencyMeasurement confirmation,
+        LatencyDelta improvement,
         IReadOnlyList<string> applied,
         LatencyPathAnalysis? path)
     {
-        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(baseline);
         ArgumentNullException.ThrowIfNull(confirmation);
+        ArgumentNullException.ThrowIfNull(improvement);
         ArgumentNullException.ThrowIfNull(applied);
 
         var builder = new StringBuilder();
         builder.AppendLine($"Ağ optimizasyonu · {adapterName} (kayıtlı profil)");
         builder.AppendLine();
+        AppendBlock(builder, "Başlangıç", baseline);
+        builder.AppendLine();
         AppendBlock(builder, "Şimdiki ölçüm", confirmation);
+        builder.AppendLine();
+        builder.AppendLine("Bu oturumda doğrulanan iyileşme");
 
-        if (profile.Baseline is { } before && profile.Optimized is { } after)
+        foreach (var line in ImprovementLines(improvement))
         {
-            builder.AppendLine();
-            builder.AppendLine($"{profile.VerifiedAt.LocalDateTime:yyyy-MM-dd} tarihinde doğrulanan iyileşme");
-
-            foreach (var line in ImprovementLines(new LatencyDelta
-            {
-                MedianMs = before.MedianRttMs - after.MedianRttMs,
-                P95Ms = before.P95RttMs - after.P95RttMs,
-                P99Ms = before.P99RttMs - after.P99RttMs,
-                JitterMs = before.JitterMs - after.JitterMs,
-                LossPercent = before.PacketLossPercent - after.PacketLossPercent,
-            }))
-            {
-                builder.AppendLine(line);
-            }
+            builder.AppendLine(line);
         }
 
         builder.AppendLine();

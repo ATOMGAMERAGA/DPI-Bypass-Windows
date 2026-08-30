@@ -236,11 +236,12 @@ public sealed class HotspotDiagnosticResultTests
     }
 
     [Fact]
-    public void CarrierGradeNatIsReportedAsInformationRatherThanAFault()
+    public void SharedAddressSpaceIsReportedWithoutClaimingUpstreamCarrierNat()
     {
-        var report = (Result() with { AddressKind = HotspotAddressKind.CarrierGradeNat }).ToReport();
+        var report = (Result() with { AddressKind = HotspotAddressKind.SharedAddressSpace }).ToReport();
 
         Assert.Contains("100.64/10", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("operatör NAT'ı", report, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -254,9 +255,9 @@ public sealed class HotspotDiagnosticResultTests
     [Fact]
     public void AnMtuBelowFifteenHundredIsSpelledOutInBytes()
     {
-        var report = (Result() with { LargestUnfragmentedPayload = 1372, MtuLooksReduced = true }).ToReport();
+        var report = (Result() with { LargestUnfragmentedPayload = 1432, MtuLooksReduced = true }).ToReport();
 
-        Assert.Contains("1400 bayta kadar", report, StringComparison.Ordinal);
+        Assert.Contains("üst sınır 1460 bayt", report, StringComparison.Ordinal);
     }
 
     private static HotspotDiagnosticResult Result() => new()
@@ -283,8 +284,8 @@ public sealed class HotspotDiagnosticResultTests
 public sealed class HotspotFindingsTests
 {
     [Theory]
-    [InlineData("100.64.0.1", HotspotAddressKind.CarrierGradeNat)]
-    [InlineData("100.127.255.254", HotspotAddressKind.CarrierGradeNat)]
+    [InlineData("100.64.0.1", HotspotAddressKind.SharedAddressSpace)]
+    [InlineData("100.127.255.254", HotspotAddressKind.SharedAddressSpace)]
     [InlineData("100.63.255.255", HotspotAddressKind.Public)]
     [InlineData("100.128.0.1", HotspotAddressKind.Public)]
     [InlineData("192.168.1.42", HotspotAddressKind.Private)]
@@ -295,6 +296,36 @@ public sealed class HotspotFindingsTests
     [InlineData("93.184.216.34", HotspotAddressKind.Public)]
     public void AddressesAreClassifiedByRangeAlone(string address, HotspotAddressKind expected)
         => Assert.Equal(expected, MobileHotspotDiagnostics.Classify(System.Net.IPAddress.Parse(address)));
+
+    [Fact]
+    public void MultipleIpv4AddressClassesAreSummarizedDeterministically()
+    {
+        System.Net.IPAddress[] addresses =
+        [
+            System.Net.IPAddress.Parse("192.168.1.20"),
+            System.Net.IPAddress.Parse("100.64.2.5"),
+        ];
+
+        Assert.Equal(HotspotAddressKind.Mixed, MobileHotspotDiagnostics.SummarizeAddressKinds(addresses));
+        Assert.Equal(HotspotAddressKind.Mixed, MobileHotspotDiagnostics.SummarizeAddressKinds(addresses.Reverse()));
+        Assert.Equal(
+            HotspotAddressKind.Private,
+            MobileHotspotDiagnostics.SummarizeAddressKinds(
+            [
+                System.Net.IPAddress.Parse("192.168.1.20"),
+                System.Net.IPAddress.Parse("10.0.0.4"),
+            ]));
+    }
+
+    [Fact]
+    public void SharedAddressSpaceFindingDoesNotClaimItProvesCarrierCgnat()
+    {
+        var findings = MobileHotspotDiagnostics.Findings(
+            Working() with { AddressKind = HotspotAddressKind.SharedAddressSpace });
+
+        Assert.Contains(findings, finding => finding.Contains("tek başına kanıtlamaz", StringComparison.Ordinal));
+        Assert.DoesNotContain(findings, finding => finding.Contains("arkasındasınız", StringComparison.Ordinal));
+    }
 
     [Fact]
     public void NoConnectivityAtAllLeadsWithThatAndSuggestsRestartingTheShare()
@@ -340,14 +371,15 @@ public sealed class HotspotFindingsTests
     }
 
     [Fact]
-    public void AReducedMtuExplainsTheSymptomAndSuggestsALowerValue()
+    public void AReducedMtuExplainsTheSymptomWithoutBlindlyPrescribingFourteenHundred()
     {
-        var result = Working() with { MtuLooksReduced = true, LargestUnfragmentedPayload = 1372 };
+        var result = Working() with { MtuLooksReduced = true, LargestUnfragmentedPayload = 1432 };
 
         Assert.Contains(
             MobileHotspotDiagnostics.Findings(result),
             finding => finding.Contains("yarım yüklenirse", StringComparison.Ordinal));
         Assert.Contains("MTU", MobileHotspotDiagnostics.Remediation(result)!, StringComparison.Ordinal);
+        Assert.DoesNotContain("1400", MobileHotspotDiagnostics.Remediation(result)!, StringComparison.Ordinal);
     }
 
     /// <summary>An unmeasurable MTU says nothing; operators drop large ICMP all the time.</summary>
@@ -396,4 +428,110 @@ public sealed class HotspotFindingsTests
         AddressKind = HotspotAddressKind.Private,
         VpnAdapterActive = false,
     };
+}
+
+public sealed class HotspotMtuProbeTests
+{
+    [Fact]
+    public async Task AFullSizeSuccessReportsEthernetMtuWithoutSearching()
+    {
+        var calls = new List<int>();
+
+        var result = await MobileHotspotDiagnostics.FindLargestUnfragmentedPayloadAsync((payload, _) =>
+        {
+            calls.Add(payload);
+            return Task.FromResult<bool?>(true);
+        });
+
+        Assert.Equal(1472, result.Largest);
+        Assert.False(result.Reduced);
+        Assert.Equal([1472], calls);
+    }
+
+    [Fact]
+    public async Task BinarySearchFindsTheActualLargestSuccessfulPayload()
+    {
+        const int largestWorkingPayload = 1432;
+
+        var result = await MobileHotspotDiagnostics.FindLargestUnfragmentedPayloadAsync(
+            (payload, _) => Task.FromResult<bool?>(payload <= largestWorkingPayload));
+
+        Assert.Equal(largestWorkingPayload, result.Largest);
+        Assert.True(result.Reduced);
+    }
+
+    [Fact]
+    public async Task FilteredOrContradictoryIcmpIsInconclusive()
+    {
+        var fullFiltered = await MobileHotspotDiagnostics.FindLargestUnfragmentedPayloadAsync(
+            (_, _) => Task.FromResult<bool?>(null));
+        var midProbe = 0;
+        var filteredDuringSearch = await MobileHotspotDiagnostics.FindLargestUnfragmentedPayloadAsync((payload, _) =>
+        {
+            if (payload == 1472)
+            {
+                return Task.FromResult<bool?>(false);
+            }
+
+            if (payload == 1200)
+            {
+                return Task.FromResult<bool?>(true);
+            }
+
+            midProbe = payload;
+            return Task.FromResult<bool?>(null);
+        });
+
+        Assert.Null(fullFiltered.Largest);
+        Assert.Null(fullFiltered.Reduced);
+        Assert.True(midProbe > 1200);
+        Assert.Null(filteredDuringSearch.Largest);
+        Assert.Null(filteredDuringSearch.Reduced);
+    }
+}
+
+public sealed class HotspotVpnDetectionTests
+{
+    [Theory]
+    [InlineData(System.Net.NetworkInformation.NetworkInterfaceType.Tunnel, "Ethernet", "ordinary", false)]
+    [InlineData(System.Net.NetworkInformation.NetworkInterfaceType.Ppp, "WAN Miniport", "PPP", false)]
+    [InlineData(System.Net.NetworkInformation.NetworkInterfaceType.Ethernet, "WireGuard Tunnel", "Wintun Userspace Tunnel", true)]
+    [InlineData(System.Net.NetworkInformation.NetworkInterfaceType.Ethernet, "Local Area Connection", "TAP-Windows Adapter V9", true)]
+    public void ActiveTunnelTypesAndHighConfidenceAdapterNamesAreRecognized(
+        System.Net.NetworkInformation.NetworkInterfaceType type,
+        string name,
+        string description,
+        bool hasAddress)
+        => Assert.True(MobileHotspotDiagnostics.LooksLikeActiveTunnel(
+            System.Net.NetworkInformation.OperationalStatus.Up,
+            type,
+            name,
+            description,
+            hasAddress));
+
+    [Fact]
+    public void AGenericActiveVirtualEthernetAdapterIsNotAutomaticallyCalledAVpn()
+        => Assert.False(MobileHotspotDiagnostics.LooksLikeActiveTunnel(
+            System.Net.NetworkInformation.OperationalStatus.Up,
+            System.Net.NetworkInformation.NetworkInterfaceType.Ethernet,
+            "Hyper-V Virtual Ethernet Adapter",
+            "Microsoft Virtual Ethernet Adapter",
+            hasUsableAddress: true));
+
+    [Fact]
+    public void ARecognizableButInactiveOrUnaddressedAdapterIsNotCalledActive()
+    {
+        Assert.False(MobileHotspotDiagnostics.LooksLikeActiveTunnel(
+            System.Net.NetworkInformation.OperationalStatus.Down,
+            System.Net.NetworkInformation.NetworkInterfaceType.Ethernet,
+            "WireGuard",
+            "Wintun",
+            hasUsableAddress: true));
+        Assert.False(MobileHotspotDiagnostics.LooksLikeActiveTunnel(
+            System.Net.NetworkInformation.OperationalStatus.Up,
+            System.Net.NetworkInformation.NetworkInterfaceType.Ethernet,
+            "WireGuard",
+            "Wintun",
+            hasUsableAddress: false));
+    }
 }

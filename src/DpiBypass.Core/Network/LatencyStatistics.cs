@@ -44,6 +44,30 @@ public static class LatencyStatistics
     public static double Median(IEnumerable<double> samples) => Percentile(samples, 0.50);
 
     /// <summary>
+    /// Robust spread around the median, scaled to be comparable with standard deviation
+    /// for normally distributed observations.
+    /// </summary>
+    /// <remarks>
+    /// Candidate benchmarks only have a handful of paired cycles. Squaring one outlying
+    /// cycle lets it dominate an ordinary standard deviation; median absolute deviation
+    /// instead asks how far a typical cycle sits from the typical result.
+    /// </remarks>
+    public static double MedianAbsoluteDeviation(IReadOnlyList<double> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+
+        if (values.Count < 2)
+        {
+            return 0;
+        }
+
+        var median = Median(values);
+        var absoluteDeviations = values.Select(value => Math.Abs(value - median));
+
+        return Median(absoluteDeviations) * 1.4826;
+    }
+
+    /// <summary>
     /// Mean absolute difference between consecutive samples: the delay variation a
     /// real-time stream actually has to absorb.
     /// </summary>

@@ -7,6 +7,15 @@ namespace DpiBypass.Tests;
 public sealed class LatencyStatisticsTests
 {
     [Fact]
+    public void MedianAbsoluteDeviationUsesTheTypicalSpreadRatherThanSquaringAnOutlier()
+    {
+        var spread = LatencyStatistics.MedianAbsoluteDeviation([12, 6, 1]);
+
+        Assert.Equal(7.413, spread, precision: 3);
+        Assert.Equal(0, LatencyStatistics.MedianAbsoluteDeviation([5]));
+    }
+
+    [Fact]
     public void MedianOfAnEvenCountInterpolatesBetweenTheMiddlePair()
         => Assert.Equal(13, LatencyStatistics.Median([10, 12, 14, 16]));
 

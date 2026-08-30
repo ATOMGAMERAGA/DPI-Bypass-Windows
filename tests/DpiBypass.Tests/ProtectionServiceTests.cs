@@ -2,9 +2,41 @@ using DpiBypass.Core;
 using DpiBypass.Core.Config;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
+using DpiBypass.Tests.Latency;
 using Xunit;
 
 namespace DpiBypass.Tests;
+
+public sealed class ProtectionServiceLatencyRecoveryTests
+{
+    [Fact]
+    public async Task StartupWithLatencyModeOffRestoresACommittedSnapshot()
+    {
+        using var directory = new TempDirectory();
+        var store = new ConfigStore(directory.File("settings.json"), directory.File("networks.json"));
+        var controller = new FakeController();
+        controller.Live.Add("SelectiveSuspend");
+        var snapshots = new FakeSnapshotStore
+        {
+            Value = Fake.Snapshot("adapter-committed", "SelectiveSuspend"),
+        };
+        var optimizer = new LatencyOptimizer(
+            controller,
+            FakeProbe.Flat(controller),
+            snapshots,
+            profiles: new FakeProfileStore());
+        await using var service = new ProtectionService(
+            store,
+            new LearnedDomainStore(directory.File("learned.json")),
+            optimizer);
+
+        await service.StartIndependentFeaturesAsync();
+
+        Assert.Empty(controller.Live);
+        Assert.Equal(["SelectiveSuspend"], controller.Restored);
+        Assert.Null(snapshots.Value);
+    }
+}
 
 /// <summary>
 /// The parts of the service that decide what the tuner is asked to do. Everything
@@ -163,6 +195,24 @@ public sealed class ProtectionServiceHotspotTests : IDisposable
     }
 
     [Fact]
+    public async Task ANewDiagnosticsRunCancelsTheObsoleteOneBeforeItCanPublish()
+    {
+        var diagnostics = new CancellableHotspotDiagnostics();
+        await using var service = Build(diagnostics);
+
+        var obsolete = service.RunHotspotDiagnosticsAsync();
+        await diagnostics.FirstStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var current = service.RunHotspotDiagnosticsAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => obsolete);
+        var result = await current;
+
+        Assert.Equal(2, diagnostics.Runs);
+        Assert.Equal("current", result.NetworkName);
+        Assert.Same(result, service.HotspotStatus.LastResult);
+    }
+
+    [Fact]
     public async Task TheDiagnosticsSwitchIsPersisted()
     {
         await using var service = Build();
@@ -217,6 +267,40 @@ public sealed class ProtectionServiceHotspotTests : IDisposable
                 AddressKind = HotspotAddressKind.Private,
                 VpnAdapterActive = false,
             });
+        }
+    }
+
+    private sealed class CancellableHotspotDiagnostics : IMobileHotspotDiagnostics
+    {
+        private int _runs;
+
+        public int Runs => _runs;
+
+        public TaskCompletionSource FirstStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<HotspotDiagnosticResult> RunAsync(
+            NetworkFingerprint network,
+            CancellationToken cancellationToken = default)
+        {
+            var run = Interlocked.Increment(ref _runs);
+            if (run == 1)
+            {
+                FirstStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            return new HotspotDiagnosticResult
+            {
+                NetworkName = "current",
+                AdapterName = network.AdapterName ?? "-",
+                HasIpv4 = true,
+                HasIpv6 = false,
+                Ipv4Works = true,
+                Ipv6Works = false,
+                DnsWorks = true,
+                AddressKind = HotspotAddressKind.Private,
+                VpnAdapterActive = false,
+            };
         }
     }
 }

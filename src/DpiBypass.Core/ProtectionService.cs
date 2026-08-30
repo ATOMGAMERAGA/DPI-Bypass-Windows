@@ -38,6 +38,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly LearnedDomainStore _learned;
     private readonly TargetMatcher _matcher = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Lock _hotspotDiagnosticsGate = new();
     private readonly IMobileHotspotDiagnostics _hotspot;
     private readonly LatencyOptimizer _latencyOptimizer;
 
@@ -53,6 +54,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private CancellationTokenSource? _lifetime;
     private Task? _networkWork;
     private Task? _recheckWork;
+    private CancellationTokenSource? _hotspotDiagnosticsCancellation;
 
     public ProtectionService(
         ConfigStore? store = null,
@@ -172,10 +174,18 @@ public sealed class ProtectionService : IAsyncDisposable
     /// </remarks>
     public async Task StartIndependentFeaturesAsync(CancellationToken cancellationToken = default)
     {
-        await _latencyOptimizer.RecoverAsync(cancellationToken).ConfigureAwait(false);
+        var recovered = await _latencyOptimizer.RecoverAsync(cancellationToken).ConfigureAwait(false);
 
         if (!Settings.LowLatencyMode)
         {
+            // RecoverAsync deliberately leaves a committed snapshot alone because it
+            // describes settings the mode chose. If the persisted mode is now off,
+            // nothing owns those settings any more and startup must put them back.
+            if (recovered)
+            {
+                await _latencyOptimizer.RestoreAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return;
         }
 
@@ -500,18 +510,32 @@ public sealed class ProtectionService : IAsyncDisposable
     /// Runs the read-only mobile hotspot checks against the network we are on now.
     /// </summary>
     /// <remarks>
-    /// Nothing is changed by this and nothing is left behind by it, so it is safe to run
-    /// at any time, on any network, however many times.
+    /// No persistent network state is changed or left behind. The ordinary diagnostic
+    /// probes are safe to run at any time, on any network, however many times.
     /// </remarks>
     public async Task<HotspotDiagnosticResult> RunHotspotDiagnosticsAsync(CancellationToken cancellationToken = default)
     {
-        Network = NetworkFingerprint.Capture();
+        var network = NetworkFingerprint.Capture();
+        Network = network;
+        var operation = CreateHotspotDiagnosticsCancellation(cancellationToken);
 
-        var result = await _hotspot.RunAsync(Network, cancellationToken).ConfigureAwait(false);
-        LastHotspotDiagnostics = result;
-        Changed?.Invoke();
+        try
+        {
+            var result = await _hotspot.RunAsync(network, operation.Token).ConfigureAwait(false);
+            operation.Token.ThrowIfCancellationRequested();
 
-        return result;
+            if (string.Equals(Network.Key, network.Key, StringComparison.Ordinal))
+            {
+                LastHotspotDiagnostics = result;
+                Changed?.Invoke();
+            }
+
+            return result;
+        }
+        finally
+        {
+            ClearHotspotDiagnosticsCancellation(operation);
+        }
     }
 
     /// <summary>
@@ -533,6 +557,12 @@ public sealed class ProtectionService : IAsyncDisposable
 
         Settings.HotspotDiagnostics = enabled;
         _store.Save(Settings);
+
+        if (!enabled)
+        {
+            CancelHotspotDiagnostics();
+        }
+
         Changed?.Invoke();
     }
 
@@ -580,7 +610,14 @@ public sealed class ProtectionService : IAsyncDisposable
 
         if (Settings.HotspotDiagnostics)
         {
-            _ = Task.Run(() => RunHotspotDiagnosticsOnTransitionAsync(fingerprint, token), token);
+            var diagnostics = CreateHotspotDiagnosticsCancellation(token);
+            // Always enter the delegate so its finally block disposes the linked source,
+            // even if shutdown cancels it between creation and queueing.
+            _ = Task.Run(() => RunHotspotDiagnosticsOnTransitionAsync(fingerprint, diagnostics));
+        }
+        else
+        {
+            CancelHotspotDiagnostics();
         }
 
         // Re-tuning happens off the event thread so the OS notification returns at once.
@@ -608,13 +645,18 @@ public sealed class ProtectionService : IAsyncDisposable
     /// explanation of the network, not a part of making it work, so nothing downstream
     /// waits on them and a network that is still settling simply produces a poor report.
     /// </remarks>
-    private async Task RunHotspotDiagnosticsOnTransitionAsync(NetworkFingerprint fingerprint, CancellationToken token)
+    private async Task RunHotspotDiagnosticsOnTransitionAsync(
+        NetworkFingerprint fingerprint,
+        CancellationTokenSource operation)
     {
+        var token = operation.Token;
+
         try
         {
             AppLog.Info($"hotspot.diagnostics: '{fingerprint.DisplayName}' ağına geçildi; bağlantı inceleniyor.");
 
             var result = await _hotspot.RunAsync(fingerprint, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
 
             // Only if we are still on the network this describes. A second transition
             // while this ran would otherwise leave the panel showing the wrong link.
@@ -634,6 +676,65 @@ public sealed class ProtectionService : IAsyncDisposable
         catch (Exception ex)
         {
             AppLog.Error("Ağ değişikliği sonrası hotspot tanılaması başarısız", ex);
+        }
+        finally
+        {
+            ClearHotspotDiagnosticsCancellation(operation);
+        }
+    }
+
+    private CancellationTokenSource CreateHotspotDiagnosticsCancellation(CancellationToken callerToken)
+    {
+        var lifetimeToken = State == ProtectionState.Stopped
+            ? CancellationToken.None
+            : _lifetime?.Token ?? CancellationToken.None;
+        var operation = CancellationTokenSource.CreateLinkedTokenSource(callerToken, lifetimeToken);
+        CancellationTokenSource? previous;
+
+        lock (_hotspotDiagnosticsGate)
+        {
+            previous = _hotspotDiagnosticsCancellation;
+            _hotspotDiagnosticsCancellation = operation;
+        }
+
+        CancelWithoutRacingDispose(previous);
+        return operation;
+    }
+
+    private void CancelHotspotDiagnostics()
+    {
+        CancellationTokenSource? operation;
+        lock (_hotspotDiagnosticsGate)
+        {
+            operation = _hotspotDiagnosticsCancellation;
+            _hotspotDiagnosticsCancellation = null;
+        }
+
+        CancelWithoutRacingDispose(operation);
+    }
+
+    private void ClearHotspotDiagnosticsCancellation(CancellationTokenSource operation)
+    {
+        lock (_hotspotDiagnosticsGate)
+        {
+            if (ReferenceEquals(_hotspotDiagnosticsCancellation, operation))
+            {
+                _hotspotDiagnosticsCancellation = null;
+            }
+        }
+
+        operation.Dispose();
+    }
+
+    private static void CancelWithoutRacingDispose(CancellationTokenSource? operation)
+    {
+        try
+        {
+            operation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Completion can win the race after the source was removed from the field.
         }
     }
 
@@ -820,6 +921,8 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             await _lifetime.CancelAsync().ConfigureAwait(false);
         }
+
+        CancelHotspotDiagnostics();
 
         if (_discovery is not null)
         {
@@ -1031,6 +1134,8 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        CancelHotspotDiagnostics();
+
         try
         {
             await StopAsync(CancellationToken.None).ConfigureAwait(false);

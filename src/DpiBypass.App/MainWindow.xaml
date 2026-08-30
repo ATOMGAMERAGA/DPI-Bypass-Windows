@@ -712,7 +712,7 @@
                                            Margin="0,0,0,8" />
 
                                 <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Text="Telefon paylaşımı ve mobil veri bağlantılarını inceler: IPv4/IPv6 adresi ve erişimi, DNS, gecikme ve kayıp, MTU sorunu, operatör NAT'ı ve etkin VPN. Yalnızca okur; hiçbir ayarı, paketi veya kuralı değiştirmez." />
+                                           Text="Telefon paylaşımı ve mobil veri bağlantılarını inceler: IPv4/IPv6 adresi ve erişimi, DNS, gecikme ve kayıp, MTU sınırı, yerel adres aralığı ve olası etkin VPN. Kalıcı ayar veya kural değiştirmez; ölçüm için sıradan ağ tanılama paketleri gönderir." />
 
                                 <CheckBox Content="Ağ değiştiğinde bağlantıyı kendiliğinden incele"
                                           Margin="0,16,0,0"

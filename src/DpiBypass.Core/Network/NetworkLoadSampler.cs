@@ -23,6 +23,17 @@ public readonly record struct NetworkCounters(long BytesSent, long BytesReceived
 /// <summary>What the link was doing across one measurement window.</summary>
 public sealed record NetworkLoadSample
 {
+    /// <summary>
+    /// Largest accepted ratio between two loaded windows in the same direction.
+    /// </summary>
+    /// <remarks>
+    /// Exact throughput equality is neither realistic nor necessary, but 300 kbit/s and
+    /// 50 Mbit/s can put entirely different queues under pressure even though both are
+    /// called "loaded". A two-to-one bound tolerates normal application variation without
+    /// treating different load regimes as the same experiment.
+    /// </remarks>
+    public const double MaximumComparableLoadRatio = 2.0;
+
     /// <summary>Anything at or above this in either direction counts as loaded.</summary>
     /// <remarks>
     /// 256 kbit/s is well above the drip of a machine sitting idle - name resolution,
@@ -60,15 +71,46 @@ public sealed record NetworkLoadSample
     {
         ArgumentNullException.ThrowIfNull(other);
 
-        // Nothing is known about at least one side, so there is nothing to disagree
-        // about either; the rest of the checks still have to hold the result up.
+        // Unknown is absence of evidence, not evidence that two windows were alike.
+        // The paired evaluator may use repeated Unknown/Unknown cycles at reduced
+        // confidence, but this primitive comparison never calls them comparable.
         if (State == LatencyLoadState.Unknown || other.State == LatencyLoadState.Unknown)
         {
-            return true;
+            return false;
         }
 
-        return State == other.State;
+        if (State != other.State)
+        {
+            return false;
+        }
+
+        return State switch
+        {
+            LatencyLoadState.Idle => IsValidIdleWindow(this) && IsValidIdleWindow(other),
+            LatencyLoadState.UplinkLoaded => SimilarMagnitude(UplinkKbps, other.UplinkKbps),
+            LatencyLoadState.DownlinkLoaded => SimilarMagnitude(DownlinkKbps, other.DownlinkKbps),
+            LatencyLoadState.BidirectionalLoaded =>
+                SimilarMagnitude(UplinkKbps, other.UplinkKbps)
+                && SimilarMagnitude(DownlinkKbps, other.DownlinkKbps),
+            _ => false,
+        };
     }
+
+    private static bool SimilarMagnitude(double first, double second)
+    {
+        if (!double.IsFinite(first) || !double.IsFinite(second) || first < LoadedKbps || second < LoadedKbps)
+        {
+            return false;
+        }
+
+        return Math.Max(first, second) / Math.Min(first, second) <= MaximumComparableLoadRatio;
+    }
+
+    private static bool IsValidIdleWindow(NetworkLoadSample sample) =>
+        double.IsFinite(sample.UplinkKbps)
+        && double.IsFinite(sample.DownlinkKbps)
+        && sample.UplinkKbps is >= 0 and < LoadedKbps
+        && sample.DownlinkKbps is >= 0 and < LoadedKbps;
 
     public static NetworkLoadSample Between(NetworkCounters? start, NetworkCounters? end)
     {

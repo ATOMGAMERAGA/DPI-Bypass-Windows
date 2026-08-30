@@ -559,7 +559,23 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             if (outcome.LostConnectivity)
             {
                 _log?.Invoke("latency.rollback.started: NIC değişikliğinden sonra ağ yanıt vermedi.");
-                await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                var restored = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                _log?.Invoke(restored ? "latency.rollback.completed" : "latency.rollback.failed");
+
+                if (!restored)
+                {
+                    return Publish(new LatencyOptimizationResult
+                    {
+                        Status = LatencyOptimizationStatus.Failed,
+                        StatusLine = "Bağlantı denetimi başarısız oldu ve bazı NIC ayarları geri yüklenemedi; "
+                            + "snapshot kurtarma için korundu.",
+                        AdapterName = adapter.AdapterName,
+                        NetworkKey = network.Key,
+                        Before = baseline,
+                        Path = path,
+                        Verdicts = verdicts,
+                    });
+                }
 
                 return Publish(NoGain(
                     adapter,
@@ -603,7 +619,22 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             // cycles, so this is normally a no-op - but clearing a snapshot that still
             // described a value on the adapter would abandon it, and the whole point of
             // the file is that this cannot happen.
-            await RestoreSnapshotCoreAsync(token).ConfigureAwait(false);
+            if (!await RestoreSnapshotCoreAsync(token).ConfigureAwait(false))
+            {
+                return Publish(new LatencyOptimizationResult
+                {
+                    Status = LatencyOptimizationStatus.Failed,
+                    StatusLine = "Adaylar elendi ancak bazı NIC ayarları geri yüklenemedi; "
+                        + "snapshot kurtarma için korundu.",
+                    AdapterName = adapter.AdapterName,
+                    NetworkKey = network.Key,
+                    Before = baseline,
+                    After = reference,
+                    Path = path,
+                    Verdicts = verdicts,
+                });
+            }
+
             await SaveProfileAsync(network, adapter, baseline, null, verdicts, path, token).ConfigureAwait(false);
 
             return Publish(NoGain(
@@ -628,12 +659,30 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             ? await _probe.MeasureAsync(network, benchmark, token).ConfigureAwait(false)
             : null;
 
-        if (final is null || !LatencyComparison.ConfirmsImprovement(baseline, final))
+        var hasCpuSensitiveChange = accepted.Any(candidate => candidate.CpuSensitive);
+        if (final is null
+            || !LatencyComparison.ConfirmsMeaningfulImprovement(baseline, final, hasCpuSensitiveChange))
         {
-            _log?.Invoke("latency.verification.completed: son ölçüm başlangıcın gerisinde kaldı.");
+            _log?.Invoke("latency.verification.completed: son ölçüm anlamlı bir uçtan uca kazancı doğrulamadı.");
             _log?.Invoke("latency.rollback.started: son doğrulama geçilemedi.");
             var undone = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
             _log?.Invoke(undone ? "latency.rollback.completed" : "latency.rollback.failed");
+
+            if (!undone)
+            {
+                return Publish(new LatencyOptimizationResult
+                {
+                    Status = LatencyOptimizationStatus.Failed,
+                    StatusLine = "Son doğrulama geçilemedi ve bazı NIC ayarları geri yüklenemedi; "
+                        + "snapshot kurtarma için korundu.",
+                    AdapterName = adapter.AdapterName,
+                    NetworkKey = network.Key,
+                    Before = baseline,
+                    After = final,
+                    Path = path,
+                    Verdicts = verdicts,
+                });
+            }
 
             return Publish(NoGain(
                 adapter,
@@ -644,7 +693,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 verdicts,
                 final is null
                     ? "Son doğrulamada bağlantı ölçülemedi; özgün NIC ayarları geri yüklendi."
-                    : "Son doğrulama başlangıç ölçümünün gerisinde kaldı; özgün NIC ayarları geri yüklendi."));
+                    : "Son doğrulamada anlamlı bir uçtan uca iyileşme kanıtlanamadı; özgün NIC ayarları geri yüklendi."));
         }
 
         _log?.Invoke($"latency.verification.completed: {LatencyReport.Compact(final)}");
@@ -657,10 +706,10 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         _lastNetworkKey = network.Key;
 
-        // The headline number comes from the paired cycles, not from the single final
-        // sample: that is the measurement the acceptance rule actually rests on, and one
-        // lucky or unlucky last sample must not be able to inflate or erase it.
-        var improvement = LatencyDelta.Sum([.. verdicts.Where(v => v.Accepted).Select(v => v.Delta)]);
+        // Per-candidate paired deltas remain in Verdicts for diagnostics. The headline
+        // is what the machine actually measured from the original baseline to the final
+        // state; summing noisy interacting candidate estimates can overstate that result.
+        var improvement = LatencyDelta.Between(baseline, final);
         var applied = accepted.Select(candidate => candidate.Description).ToArray();
 
         _log?.Invoke($"latency.committed: {applied.Length} ayar · median {improvement.MedianMs:F1} ms · p95 {improvement.P95Ms:F1} ms");
@@ -975,7 +1024,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Re-applies a previously verified profile and confirms the machine is no worse for it.
+    /// Re-applies a previously verified profile and freshly proves it is still beneficial.
     /// </summary>
     /// <returns>The published result, or null to fall through to a full benchmark.</returns>
     private async Task<LatencyOptimizationResult?> ReplayProfileAsync(
@@ -1024,8 +1073,14 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         {
             if (!await ApplyAndTrackAsync(adapter, snapshot, candidate, token).ConfigureAwait(false))
             {
-                await RestoreSnapshotCoreAsync(token).ConfigureAwait(false);
-                await _profiles.RemoveAsync(network.Key, adapter.AdapterId, token).ConfigureAwait(false);
+                var restored = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                if (!restored)
+                {
+                    await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
+                    return Publish(ProfileRollbackFailure(network, adapter, baseline, path));
+                }
+
+                await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
                 return null;
             }
         }
@@ -1040,11 +1095,19 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             ? await _probe.MeasureAsync(network, benchmark, token).ConfigureAwait(false)
             : null;
 
-        if (confirmation is null || !LatencyComparison.ConfirmsImprovement(baseline, confirmation))
+        var cpuSensitive = candidates.Any(candidate => candidate.CpuSensitive);
+        if (confirmation is null
+            || !LatencyComparison.ConfirmsMeaningfulImprovement(baseline, confirmation, cpuSensitive))
         {
-            _log?.Invoke("latency.profile: kayıtlı ayarlar bu oturumda doğrulanamadı; geri alınıp baştan ölçülecek.");
-            await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
-            await _profiles.RemoveAsync(network.Key, adapter.AdapterId, CancellationToken.None).ConfigureAwait(false);
+            _log?.Invoke("latency.profile: kayıtlı ayarlar bu oturumda anlamlı kazanç göstermedi; geri alınıp baştan ölçülecek.");
+            var restored = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            if (!restored)
+            {
+                await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
+                return Publish(ProfileRollbackFailure(network, adapter, baseline, path));
+            }
+
+            await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
             return null;
         }
 
@@ -1054,19 +1117,75 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         _lastNetworkKey = network.Key;
         var applied = candidates.Select(candidate => candidate.Description).ToArray();
+        var improvement = LatencyDelta.Between(baseline, confirmation);
+        var refreshedProfile = profile with
+        {
+            VerifiedAt = _now(),
+            Baseline = LatencySummary.From(baseline),
+            Optimized = LatencySummary.From(confirmation),
+            Bottleneck = path.Bottleneck,
+        };
+
+        await SaveReplayedProfileSafelyAsync(refreshedProfile, token).ConfigureAwait(false);
         _log?.Invoke($"latency.profile.replayed: {applied.Length} ayar yeniden uygulandı ve doğrulandı.");
 
         return Publish(new LatencyOptimizationResult
         {
             Status = LatencyOptimizationStatus.Active,
-            StatusLine = LatencyReport.Replayed(adapter.AdapterName, profile, confirmation, applied, path),
+            StatusLine = LatencyReport.Replayed(adapter.AdapterName, baseline, confirmation, improvement, applied, path),
             AdapterName = adapter.AdapterName,
             NetworkKey = network.Key,
             Before = baseline,
             After = confirmation,
             AppliedChanges = applied,
             Path = path,
+            VerifiedImprovement = improvement,
         });
+    }
+
+    private LatencyOptimizationResult ProfileRollbackFailure(
+        NetworkFingerprint network,
+        AdapterLatencyCapability adapter,
+        LatencyMeasurement baseline,
+        LatencyPathAnalysis path) => new()
+        {
+            Status = LatencyOptimizationStatus.Failed,
+            StatusLine = "Kayıtlı profil doğrulanamadı ve bazı NIC ayarları geri yüklenemedi; "
+                + "snapshot kurtarma için korundu ve yeni ölçüm başlatılmadı.",
+            AdapterName = adapter.AdapterName,
+            NetworkKey = network.Key,
+            Before = baseline,
+            Path = path,
+        };
+
+    private async Task RemoveProfileSafelyAsync(
+        NetworkFingerprint network,
+        AdapterLatencyCapability adapter)
+    {
+        try
+        {
+            await _profiles.RemoveAsync(network.Key, adapter.AdapterId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"latency.profile: geçersiz kayıt silinemedi ({ex.Message}).");
+        }
+    }
+
+    private async Task SaveReplayedProfileSafelyAsync(LatencyProfile profile, CancellationToken token)
+    {
+        try
+        {
+            await _profiles.SaveAsync(profile, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"latency.profile: yeniden doğrulanan kayıt yenilenemedi ({ex.Message}).");
+        }
     }
 
     private async Task SaveProfileAsync(

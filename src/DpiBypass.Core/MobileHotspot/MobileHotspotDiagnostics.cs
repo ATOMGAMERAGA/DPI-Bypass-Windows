@@ -17,8 +17,11 @@ public enum HotspotAddressKind
     /// <summary>RFC 1918: the ordinary router or phone hotspot case.</summary>
     Private = 2,
 
-    /// <summary>RFC 6598 100.64/10, which operators use in front of carrier-grade NAT.</summary>
-    CarrierGradeNat = 3,
+    /// <summary>RFC 6598 100.64/10 shared address space observed on this local adapter.</summary>
+    SharedAddressSpace = 3,
+
+    /// <summary>The adapter has IPv4 addresses from more than one address class.</summary>
+    Mixed = 4,
 }
 
 /// <summary>What the diagnostics pass could establish. Nothing here is inferred.</summary>
@@ -81,7 +84,9 @@ public sealed record HotspotDiagnosticResult
         builder.AppendLine($"IPv6          : {Describe(HasIpv6, Ipv6Works)}");
         builder.AppendLine($"DNS           : {(DnsWorks ? "çalışıyor" : "ad çözülemiyor")}");
         builder.AppendLine($"Adres türü    : {DescribeAddress(AddressKind)}");
-        builder.AppendLine($"VPN           : {(VpnAdapterActive ? "etkin bir tünel bağdaştırıcısı var" : "yok")}");
+        builder.AppendLine($"VPN           : {(VpnAdapterActive
+            ? "etkin olabilecek bir VPN/tünel bağdaştırıcısı saptandı (en iyi çaba)"
+            : "etkin tünel saptanmadı (tespit en iyi çabadır)")}");
         builder.AppendLine($"Operatör      : {CarrierHint ?? "Bilinmiyor"}");
         builder.AppendLine($"Plan / hotspot hakkı: {PlanEntitlement}");
 
@@ -92,7 +97,7 @@ public sealed record HotspotDiagnosticResult
 
         if (LargestUnfragmentedPayload is { } payload)
         {
-            builder.AppendLine($"MTU           : {payload + 28} bayta kadar parçalanmadan geçiyor"
+            builder.AppendLine($"MTU           : ölçülen parçalanmasız üst sınır {payload + 28} bayt"
                 + (MtuLooksReduced == true ? " (1500'ün altında)" : string.Empty));
         }
 
@@ -125,7 +130,8 @@ public sealed record HotspotDiagnosticResult
     {
         HotspotAddressKind.Public => "genel IP",
         HotspotAddressKind.Private => "özel aralık (NAT arkasında)",
-        HotspotAddressKind.CarrierGradeNat => "operatör NAT'ı (100.64/10) - gelen bağlantı kabul edilemez",
+        HotspotAddressKind.SharedAddressSpace => "yerel bağdaştırıcıda paylaşılan adres alanı (100.64/10)",
+        HotspotAddressKind.Mixed => "birden çok yerel IPv4 adres sınıfı",
         _ => "belirlenemedi",
     };
 }
@@ -142,7 +148,8 @@ public interface IMobileHotspotDiagnostics
 /// <para>
 /// This is what replaced the TTL rewrite: it answers "is this connection working, and
 /// if not, what is wrong with it" using ordinary reachability checks that any diagnostic
-/// tool performs. It changes nothing, disguises nothing, and sends nothing anywhere.
+/// tool performs. It makes no persistent network change and disguises no traffic, but it
+/// does send ordinary ICMP, DNS and connectivity probes to gather the reported facts.
 /// </para>
 /// <para>
 /// It deliberately refuses to guess at a subscription. What an operator counts as
@@ -155,8 +162,23 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
     /// <summary>1472 bytes of ICMP payload is exactly a 1500 byte Ethernet MTU.</summary>
     private const int EthernetProbePayload = 1472;
 
-    /// <summary>A common reduced MTU: PPPoE, many tethering paths, some VPNs.</summary>
-    private const int ReducedProbePayload = 1372;
+    /// <summary>Lowest payload included in the bounded path-MTU search (1228-byte MTU).</summary>
+    private const int MinimumProbePayload = 1200;
+
+    private static readonly string[] TunnelNameHints =
+    [
+        "wireguard",
+        "wintun",
+        "tap-windows",
+        "openvpn",
+        "nordlynx",
+        "mullvad",
+        "protonvpn",
+        "tailscale",
+        "zerotier",
+        " vpn",
+        "vpn ",
+    ];
 
     private static readonly IPAddress Ipv4Target = IPAddress.Parse("1.1.1.1");
     private static readonly IPAddress Ipv6Target = IPAddress.Parse("2606:4700:4700::1111");
@@ -244,21 +266,27 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
             findings.Add("Ad çözümleme başarısız; adresler açılıyorsa sorun DNS tarafındadır.");
         }
 
-        if (result.MtuLooksReduced == true)
+        if (result.MtuLooksReduced == true && result.LargestUnfragmentedPayload is { } payload)
         {
             findings.Add(
-                $"1500 baytlık paketler geçmiyor, {result.LargestUnfragmentedPayload + 28} bayta kadar geçiyor. "
+                $"1500 baytlık paketler geçmiyor; ikili aramada {payload + 28} baytlık yol MTU'su ölçüldü. "
                 + "Bazı siteler yarım yüklenirse sebebi budur.");
         }
 
-        if (result.AddressKind == HotspotAddressKind.CarrierGradeNat)
+        if (result.AddressKind == HotspotAddressKind.SharedAddressSpace)
         {
-            findings.Add("Operatör NAT'ı arkasındasınız; gelen bağlantı ve port yönlendirme çalışmaz.");
+            findings.Add(
+                "Yerel bağdaştırıcı adresi 100.64/10 paylaşılan adres alanında. "
+                + "Bu gözlem, telefonun veya operatörün yukarısındaki CGNAT'ı tek başına kanıtlamaz.");
+        }
+        else if (result.AddressKind == HotspotAddressKind.Mixed)
+        {
+            findings.Add("Bağdaştırıcıda birden çok IPv4 adres sınıfı var; tek bir NAT türü çıkarılamaz.");
         }
 
         if (result.VpnAdapterActive)
         {
-            findings.Add("Etkin bir VPN/tünel bağdaştırıcısı var; ölçümler o yolu içerebilir.");
+            findings.Add("Etkin olabilecek bir VPN/tünel bağdaştırıcısı saptandı; ölçümler o yolu içerebilir.");
         }
 
         if (result.PacketLossPercent is > 2)
@@ -283,7 +311,9 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
 
         if (result.MtuLooksReduced == true)
         {
-            return "Bağdaştırıcının MTU değerini düşürmek (örneğin 1400) yarım yüklenen sayfaları düzeltebilir.";
+            return "Yalnızca yarım yüklenen sayfa veya takılan büyük aktarım belirtisi varsa, "
+                + "bağdaştırıcı MTU'sunu ölçülen sınıra yakın bir değerle deneyip yeniden doğrulayın; "
+                + "bu tarama tek başına kalıcı ayar değişikliği gerektirmez.";
         }
 
         return null;
@@ -309,6 +339,7 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
     private static AddressSummary ReadAddresses(NetworkFingerprint network)
     {
         var summary = new AddressSummary();
+        var ipv4Addresses = new List<IPAddress>();
 
         if (string.IsNullOrWhiteSpace(network.AdapterId))
         {
@@ -330,7 +361,7 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
                     {
                         case AddressFamily.InterNetwork:
                             summary.HasIpv4 = true;
-                            summary.Kind = Classify(address.Address);
+                            ipv4Addresses.Add(address.Address);
                             break;
 
                         // Link local answers nothing beyond this cable, so it does not
@@ -340,6 +371,8 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
                             break;
                     }
                 }
+
+                summary.Kind = SummarizeAddressKinds(ipv4Addresses);
 
                 break;
             }
@@ -355,12 +388,19 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
 
     internal static HotspotAddressKind Classify(IPAddress address)
     {
+        ArgumentNullException.ThrowIfNull(address);
+
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            return HotspotAddressKind.Unknown;
+        }
+
         var octets = address.GetAddressBytes();
 
         // RFC 6598 100.64.0.0/10.
         if (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
         {
-            return HotspotAddressKind.CarrierGradeNat;
+            return HotspotAddressKind.SharedAddressSpace;
         }
 
         var isPrivate = octets[0] == 10
@@ -371,19 +411,91 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
         return isPrivate ? HotspotAddressKind.Private : HotspotAddressKind.Public;
     }
 
+    internal static HotspotAddressKind SummarizeAddressKinds(IEnumerable<IPAddress> addresses)
+    {
+        ArgumentNullException.ThrowIfNull(addresses);
+
+        var kinds = addresses
+            .Where(address => address.AddressFamily == AddressFamily.InterNetwork
+                && !IPAddress.IsLoopback(address)
+                && !address.Equals(IPAddress.Any))
+            .Select(Classify)
+            .Where(kind => kind != HotspotAddressKind.Unknown)
+            .Distinct()
+            .Take(2)
+            .ToArray();
+
+        return kinds.Length switch
+        {
+            0 => HotspotAddressKind.Unknown,
+            1 => kinds[0],
+            _ => HotspotAddressKind.Mixed,
+        };
+    }
+
     private static bool HasActiveTunnel(NetworkFingerprint network)
     {
         try
         {
             return NetworkInterface.GetAllNetworkInterfaces().Any(adapter =>
-                adapter.OperationalStatus == OperationalStatus.Up
-                && adapter.NetworkInterfaceType is NetworkInterfaceType.Tunnel or NetworkInterfaceType.Ppp
-                && !string.Equals(adapter.Id, network.AdapterId, StringComparison.OrdinalIgnoreCase));
+            {
+                if (string.Equals(adapter.Id, network.AdapterId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                var hasUsableAddress = false;
+                try
+                {
+                    hasUsableAddress = adapter.GetIPProperties().UnicastAddresses.Any(address =>
+                        !IPAddress.IsLoopback(address.Address)
+                        && !address.Address.Equals(IPAddress.Any)
+                        && !address.Address.Equals(IPAddress.IPv6Any)
+                        && !address.Address.IsIPv6LinkLocal);
+                }
+                catch (NetworkInformationException)
+                {
+                    // The adapter can disappear while being enumerated.
+                }
+
+                return LooksLikeActiveTunnel(
+                    adapter.OperationalStatus,
+                    adapter.NetworkInterfaceType,
+                    adapter.Name,
+                    adapter.Description,
+                    hasUsableAddress);
+            });
         }
         catch (NetworkInformationException)
         {
             return false;
         }
+    }
+
+    internal static bool LooksLikeActiveTunnel(
+        OperationalStatus status,
+        NetworkInterfaceType type,
+        string? name,
+        string? description,
+        bool hasUsableAddress)
+    {
+        if (status != OperationalStatus.Up)
+        {
+            return false;
+        }
+
+        if (type is NetworkInterfaceType.Tunnel or NetworkInterfaceType.Ppp)
+        {
+            return true;
+        }
+
+        if (!hasUsableAddress)
+        {
+            return false;
+        }
+
+        var identity = $" {name} {description} ".ToLowerInvariant();
+        return TunnelNameHints.Any(identity.Contains);
     }
 
     private async Task<bool> ResolvesAsync(CancellationToken cancellationToken)
@@ -425,31 +537,67 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
     }
 
     /// <summary>
-    /// Two don't-fragment probes: one at a full Ethernet MTU and one below it.
+    /// Bounded don't-fragment search for the largest successful IPv4 payload.
     /// </summary>
     /// <remarks>
-    /// A tethered path very often carries less than 1500 bytes, and the symptom - some
-    /// pages loading half way, large uploads stalling - looks nothing like an MTU
-    /// problem to the person hitting it. Two packets is enough to say so.
+    /// A lower successful probe is only a lower bound. Once a full-size probe returns an
+    /// explicit PacketTooBig result, binary search finds the boundary instead of calling
+    /// a 1400-byte success the largest possible MTU. Any timeout/filtering result makes
+    /// the diagnosis inconclusive rather than inventing a boundary.
     /// </remarks>
     private async Task<(int? Largest, bool? Reduced)> ProbeMtuAsync(CancellationToken cancellationToken)
+        => await FindLargestUnfragmentedPayloadAsync(PassesUnfragmentedAsync, cancellationToken).ConfigureAwait(false);
+
+    internal static async Task<(int? Largest, bool? Reduced)> FindLargestUnfragmentedPayloadAsync(
+        Func<int, CancellationToken, Task<bool?>> probe,
+        CancellationToken cancellationToken = default)
     {
-        var full = await PassesUnfragmentedAsync(EthernetProbePayload, cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(probe);
+
+        var full = await probe(EthernetProbePayload, cancellationToken).ConfigureAwait(false);
         if (full == true)
         {
             return (EthernetProbePayload, false);
         }
 
-        var reduced = await PassesUnfragmentedAsync(ReducedProbePayload, cancellationToken).ConfigureAwait(false);
-
-        return reduced switch
+        // A timeout or filtered echo says nothing about MTU. Search only after the path
+        // explicitly reported that the full payload was too large.
+        if (full != false)
         {
-            true => (ReducedProbePayload, true),
+            return (null, null);
+        }
 
-            // Neither size came back. That is usually an operator dropping ICMP rather
-            // than an MTU of under 1400, so nothing is claimed.
-            _ => (null, null),
-        };
+        var minimum = await probe(MinimumProbePayload, cancellationToken).ConfigureAwait(false);
+        if (minimum != true)
+        {
+            return (null, null);
+        }
+
+        var largest = MinimumProbePayload;
+        var upper = EthernetProbePayload - 1;
+
+        while (largest < upper)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var payload = largest + ((upper - largest + 1) / 2);
+            var result = await probe(payload, cancellationToken).ConfigureAwait(false);
+
+            if (result is null)
+            {
+                return (null, null);
+            }
+
+            if (result == true)
+            {
+                largest = payload;
+            }
+            else
+            {
+                upper = payload - 1;
+            }
+        }
+
+        return (largest, true);
     }
 
     private async Task<bool?> PassesUnfragmentedAsync(int payloadBytes, CancellationToken cancellationToken)
