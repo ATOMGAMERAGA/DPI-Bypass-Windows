@@ -70,6 +70,27 @@ public static class ControlProtocol
         public const string LatencyOff = "latency.off";
         public const string LatencyStatus = "latency.status";
         public const string LatencyRestore = "latency.restore";
+
+        /// <summary>The full status as stable JSON, for scripts and support requests.</summary>
+        public const string LatencyStatusJson = "latency.status.json";
+
+        /// <summary>Idle latency to the chosen target; changes nothing.</summary>
+        public const string LatencyQuickTest = "latency.quick";
+
+        /// <summary>Latency while the user's own transfer is running, plus Traffic Guard.</summary>
+        public const string LatencyDeepTest = "latency.deep";
+
+        /// <summary>Measure again from scratch, ignoring the saved answer.</summary>
+        public const string LatencyRetest = "latency.retest";
+
+        /// <summary>The last full report, exactly as the status panel shows it.</summary>
+        public const string LatencyReport = "latency.report";
+
+        /// <summary>Forget every saved per-network latency result.</summary>
+        public const string LatencyProfilesClear = "latency.profiles.clear";
+
+        /// <summary>Set the measurement target; the argument is host, host:port or a URI form.</summary>
+        public const string LatencyTarget = "latency.target";
         public const string Domains = "domains";
     }
 }

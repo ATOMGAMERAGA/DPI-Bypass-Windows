@@ -1,5 +1,18 @@
 namespace DpiBypass.Core.Network;
 
+/// <summary>Which half of a cycle ran first.</summary>
+/// <remarks>
+/// Always measuring the baseline first would let anything that drifts with time - a
+/// machine warming up, a link quietening down after the user stopped typing - land
+/// entirely on one arm. Alternating the order across cycles turns that drift into noise
+/// instead of into a result.
+/// </remarks>
+public enum LatencyCycleOrder
+{
+    BaselineFirst = 0,
+    CandidateFirst = 1,
+}
+
 /// <summary>One baseline/candidate pair, measured back to back under the same conditions.</summary>
 public sealed record LatencyPair
 {
@@ -7,13 +20,34 @@ public sealed record LatencyPair
 
     public required LatencyMeasurement Candidate { get; init; }
 
+    /// <summary>Which arm this cycle measured first.</summary>
+    public LatencyCycleOrder Order { get; init; } = LatencyCycleOrder.BaselineFirst;
+
+    /// <summary>Machine and radio state during the baseline arm, when it was sampled.</summary>
+    public LatencyEnvironment? BaselineEnvironment { get; init; }
+
+    public LatencyEnvironment? CandidateEnvironment { get; init; }
+
     /// <summary>
-    /// Whether the two halves are worth subtracting: same target, both answered, and the
-    /// link was equally busy for both.
+    /// Whether the two halves are worth subtracting: same target, both answered, the link
+    /// was equally busy for both, and the machine underneath did not change.
     /// </summary>
     public bool IsComparable =>
         HasSameMeasurementPath
-        && Baseline.Load.ComparableWith(Candidate.Load);
+        && Baseline.Load.ComparableWith(Candidate.Load)
+        && HasComparableEnvironment;
+
+    /// <summary>
+    /// Whether CPU load, power source, route and radio stayed alike across the pair.
+    /// </summary>
+    /// <remarks>
+    /// True when nothing was sampled: a machine that cannot report its own state has not
+    /// told us the halves differed, and treating silence as a mismatch would reject every
+    /// pair on hardware that simply has no counters.
+    /// </remarks>
+    public bool HasComparableEnvironment => BaselineEnvironment is null
+        || CandidateEnvironment is null
+        || BaselineEnvironment.ComparableWith(CandidateEnvironment);
 
     /// <summary>Everything except load counters proves both halves measured the same path.</summary>
     public bool HasSameMeasurementPath =>
@@ -149,7 +183,70 @@ public sealed record LatencyVerdict
     /// <summary>Robust spread of the winning metric's per-cycle deltas.</summary>
     public double MetricNoiseMs { get; init; }
 
+    /// <summary>Which metric carried the decision, when one did.</summary>
+    public string? WinningMetric { get; init; }
+
+    /// <summary>Resampled interval for the winning metric's mean paired difference.</summary>
+    public double? ConfidenceLowerMs { get; init; }
+
+    public double? ConfidenceUpperMs { get; init; }
+
+    /// <summary>Paired sign-flip p-value for the winning metric, reported not gated.</summary>
+    public double? PValue { get; init; }
+
+    /// <summary>The intervention this verdict is about.</summary>
+    public string InterventionId { get; init; } = string.Empty;
+
     public bool Accepted => Outcome == LatencyVerdictOutcome.Accepted;
+}
+
+/// <summary>How strict one evaluation should be.</summary>
+/// <remarks>
+/// Split out so the production path can require things a focused unit test does not: a
+/// balanced cycle order, a resampled interval that excludes zero, and enough replies
+/// before a tail percentile is allowed to decide anything.
+/// </remarks>
+public sealed record LatencyEvaluationOptions
+{
+    public static readonly LatencyEvaluationOptions Default = new();
+
+    /// <summary>What a production run uses: every guard on.</summary>
+    public static readonly LatencyEvaluationOptions Strict = new()
+    {
+        RequireBalancedOrder = true,
+        RequireConfidenceInterval = true,
+    };
+
+    public int MinimumCycles { get; init; } = 2;
+
+    public int MaximumCycles { get; init; } = 4;
+
+    /// <summary>
+    /// Whether at least one cycle must have run each way round.
+    /// </summary>
+    /// <remarks>
+    /// Without this a two-cycle run could be A→B twice, and anything drifting over those
+    /// two minutes would be credited to the candidate both times.
+    /// </remarks>
+    public bool RequireBalancedOrder { get; init; }
+
+    /// <summary>Whether the resampled interval for the winning metric must exclude zero.</summary>
+    public bool RequireConfidenceInterval { get; init; }
+
+    /// <summary>
+    /// Replies needed in both halves before p99 may decide anything.
+    /// </summary>
+    /// <remarks>
+    /// A p99 computed from forty samples is the maximum wearing a percentile's name.
+    /// Below this the tail is still reported, but it cannot accept a candidate on its own.
+    /// </remarks>
+    public int MinimumRepliesForP99 { get; init; } = 100;
+
+    public double ConfidenceLevel { get; init; } = 0.90;
+
+    public int BootstrapIterations { get; init; } = 2000;
+
+    public int Seed { get; init; } = 0x5EED;
 }
 
 /// <summary>
@@ -211,17 +308,31 @@ public static class LatencyComparison
         IReadOnlyList<LatencyPair> pairs,
         int minimumCycles,
         int maximumCycles)
+        => Evaluate(
+            candidate,
+            pairs,
+            LatencyEvaluationOptions.Default with { MinimumCycles = minimumCycles, MaximumCycles = maximumCycles });
+
+    public static LatencyVerdict Evaluate(
+        LatencyOptimizationCandidate candidate,
+        IReadOnlyList<LatencyPair> pairs,
+        LatencyEvaluationOptions options)
     {
         ArgumentNullException.ThrowIfNull(candidate);
         ArgumentNullException.ThrowIfNull(pairs);
-        ArgumentOutOfRangeException.ThrowIfLessThan(minimumCycles, 1);
-        ArgumentOutOfRangeException.ThrowIfLessThan(maximumCycles, minimumCycles);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentOutOfRangeException.ThrowIfLessThan(options.MinimumCycles, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(options.MaximumCycles, options.MinimumCycles);
+
+        var minimumCycles = options.MinimumCycles;
+        var maximumCycles = options.MaximumCycles;
 
         LatencyVerdict Verdict(LatencyVerdictOutcome outcome, string reason, LatencyDelta? delta = null, double noise = 0) => new()
         {
             Outcome = outcome,
             PropertyName = candidate.PropertyName,
             Description = candidate.Description,
+            InterventionId = candidate.Descriptor.Id,
             Reason = reason,
             Cycles = pairs.Count,
             Delta = delta ?? LatencyDelta.Zero,
@@ -268,6 +379,18 @@ public static class LatencyComparison
             return Verdict(
                 LatencyVerdictOutcome.Inconclusive,
                 "yük sayaçları okunamadı; ek ölçüm gerekiyor");
+        }
+
+        // Every usable cycle having run the same way round means anything drifting over
+        // the run landed entirely on one arm, and no amount of repetition separates that
+        // from an effect.
+        if (options.RequireBalancedOrder
+            && usable.Length >= 2
+            && usable.DistinctBy(pair => pair.Order).Count() == 1)
+        {
+            return Verdict(
+                pairs.Count >= maximumCycles ? LatencyVerdictOutcome.Rejected : LatencyVerdictOutcome.Inconclusive,
+                "turların tümü aynı sırada ölçüldü; sıra dengelenmeden karar verilmez");
         }
 
         var deltas = usable.Select(pair => pair.Delta).ToArray();
@@ -335,6 +458,12 @@ public static class LatencyComparison
         var scale = (candidate.CpuSensitive ? CpuSensitiveMultiplier : 1.0)
             * (usingUnknownLoad ? UnknownLoadMultiplier : 1.0);
 
+        // A p99 is only a percentile once there are enough replies for the hundredth of
+        // them to mean something. Below that it is the worst sample, and the worst sample
+        // is not allowed to accept a candidate on its own.
+        var repliesPerArm = usable.Min(pair => Math.Min(pair.Baseline.RemoteReplies, pair.Candidate.RemoteReplies));
+        var tailIsDecisive = repliesPerArm >= options.MinimumRepliesForP99;
+
         var gains = new (string Name, double Value, double Threshold, Func<LatencyDelta, double> Select)[]
         {
             ("median", mean.MedianMs, Limit(baselineMean.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale, delta => delta.MedianMs),
@@ -344,6 +473,7 @@ public static class LatencyComparison
         };
 
         var winner = gains
+            .Where(gain => tailIsDecisive || gain.Name != "p99")
             .Where(gain => gain.Value >= gain.Threshold)
             .OrderByDescending(gain => gain.Value / Math.Max(gain.Threshold, 0.001))
             .Select(gain => (gain.Name, gain.Value, gain.Threshold, gain.Select))
@@ -396,11 +526,65 @@ public static class LatencyComparison
                 : Verdict(LatencyVerdictOutcome.Inconclusive, "kazanç gürültü seviyesinde", mean, noise);
         }
 
-        return Verdict(
+        var (lower, upper) = LatencyStatistics.PairedMeanInterval(
+            winningDeltas,
+            options.ConfidenceLevel,
+            options.BootstrapIterations,
+            options.Seed);
+        var pValue = LatencyStatistics.PairedSignFlipPValue(winningDeltas, seed: options.Seed);
+
+        LatencyVerdict Enriched(LatencyVerdictOutcome outcome, string reason) => Verdict(outcome, reason, mean, noise) with
+        {
+            WinningMetric = winner.Name,
+            ConfidenceLowerMs = lower,
+            ConfidenceUpperMs = upper,
+            PValue = pValue,
+        };
+
+        // The resampled interval asks the one question the repeatability rules cannot:
+        // given how much these cycles disagree, is "no difference" still on the table?
+        if (options.RequireConfidenceInterval && lower <= 0)
+        {
+            return usable.Length >= maximumCycles
+                ? Enriched(
+                    LatencyVerdictOutcome.Rejected,
+                    $"{winner.Name} güven aralığı sıfırı içeriyor ({lower:F1} … {upper:F1} ms)")
+                : Enriched(LatencyVerdictOutcome.Inconclusive, "güven aralığı henüz sıfırı dışlamıyor");
+        }
+
+        return Enriched(
             LatencyVerdictOutcome.Accepted,
-            $"{winner.Name} {winner.Value:F1} ms iyileşti · {usable.Length} turun {improvedCycles} tanesinde tekrarlandı",
-            mean,
-            noise);
+            $"{winner.Name} {winner.Value:F1} ms iyileşti · {usable.Length} turun {improvedCycles} tanesinde tekrarlandı"
+                + (options.RequireConfidenceInterval ? $" · %{options.ConfidenceLevel * 100:F0} aralık {lower:F1}…{upper:F1} ms" : string.Empty));
+    }
+
+    /// <summary>
+    /// Confirms the whole accepted bundle, from paired cycles rather than one final read.
+    /// </summary>
+    /// <remarks>
+    /// Accepting settings one at a time proves each one on its own; it does not prove the
+    /// machine ends up better with all of them on. Two changes can each help a little and
+    /// fight each other, and the first baseline was taken minutes and possibly a different
+    /// network condition ago. So the bundle is re-measured the same way a candidate is:
+    /// alternating original and optimised, and judged on the paired differences.
+    /// </remarks>
+    public static bool ConfirmsBundle(
+        IReadOnlyList<LatencyPair> pairs,
+        bool cpuSensitive,
+        LatencyEvaluationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(pairs);
+
+        var settings = options ?? LatencyEvaluationOptions.Strict;
+        var bundle = new LatencyOptimizationCandidate
+        {
+            Kind = LatencySettingKind.AdvancedProperty,
+            PropertyName = "bundle",
+            Description = "tüm kabul edilen değişiklikler",
+            CpuSensitive = cpuSensitive,
+        };
+
+        return Evaluate(bundle, pairs, settings).Accepted;
     }
 
     /// <summary>

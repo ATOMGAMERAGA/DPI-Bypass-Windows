@@ -115,6 +115,78 @@ public sealed class ControlCommands
             case ControlProtocol.Commands.LatencyStatus:
                 return ControlResponse.Success(DescribeLatency());
 
+            case ControlProtocol.Commands.LatencyStatusJson:
+                return ControlResponse.Success(_service.LatencyStatus.ToJson());
+
+            case ControlProtocol.Commands.LatencyReport:
+            {
+                var status = _service.LatencyStatus;
+                return ControlResponse.Success(string.IsNullOrWhiteSpace(status.Detail)
+                    ? status.Headline
+                    : $"{status.Headline}{Environment.NewLine}{Environment.NewLine}{status.Detail}");
+            }
+
+            case ControlProtocol.Commands.LatencyQuickTest:
+            {
+                var result = await _service.TestLatencyAsync(cancellationToken).ConfigureAwait(false);
+                return result.Status == LatencyOptimizationStatus.Offline
+                    ? ControlResponse.Failure(result.StatusLine)
+                    : ControlResponse.Success(result.StatusLine);
+            }
+
+            case ControlProtocol.Commands.LatencyDeepTest:
+            {
+                var result = await _service.RunLoadedLatencyTestAsync(cancellationToken).ConfigureAwait(false);
+                return result.Status == LatencyOptimizationStatus.Offline
+                    ? ControlResponse.Failure(result.StatusLine)
+                    : ControlResponse.Success(result.StatusLine);
+            }
+
+            case ControlProtocol.Commands.LatencyRetest:
+            {
+                var result = await _service.RetestLatencyAsync(cancellationToken).ConfigureAwait(false);
+                return result.Status == LatencyOptimizationStatus.Failed
+                    ? ControlResponse.Failure(result.StatusLine)
+                    : ControlResponse.Success(result.StatusLine);
+            }
+
+            case ControlProtocol.Commands.LatencyProfilesClear:
+            {
+                var removed = _service.ClearLatencyProfiles();
+                return ControlResponse.Success(removed
+                    ? "Kayıtlı gecikme sonuçları silindi; sonraki ölçüm baştan yapılacak."
+                    : "Silinecek kayıtlı gecikme sonucu yoktu.");
+            }
+
+            case ControlProtocol.Commands.LatencyTarget:
+            {
+                if (string.IsNullOrWhiteSpace(request.Argument))
+                {
+                    _service.SetLatencyPreferences(_service.Settings.Latency with
+                    {
+                        TargetKind = LatencyTargetKind.Reference,
+                    });
+
+                    return ControlResponse.Success("Hedef genel internet referansına alındı "
+                        + "(oyun sunucusu değildir).");
+                }
+
+                if (!LatencyTargetSpec.TryParse(request.Argument, out var spec, out var error))
+                {
+                    return ControlResponse.Failure(error ?? "Hedef ayrıştırılamadı.");
+                }
+
+                _service.SetLatencyPreferences(_service.Settings.Latency with
+                {
+                    TargetKind = spec.Kind,
+                    TargetHost = spec.Host,
+                    TargetPort = spec.Port,
+                    TargetProtocol = spec.Protocol,
+                });
+
+                return ControlResponse.Success($"Ölçüm hedefi: {spec.Describe()}");
+            }
+
             case ControlProtocol.Commands.Domains:
                 return ControlResponse.Success(DescribeDomains());
 
@@ -193,15 +265,7 @@ public sealed class ControlCommands
         return builder.ToString();
     }
 
-    private string DescribeLatency()
-    {
-        if (!_service.Settings.LowLatencyMode)
-        {
-            return "kapalı";
-        }
-
-        return _service.LatencyResult.StatusLine;
-    }
+    private string DescribeLatency() => _service.LatencyStatus.ToCompactLine();
 
     private string DescribeDomains()
     {

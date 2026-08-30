@@ -147,4 +147,129 @@ public static class LatencyStatistics
 
     /// <summary>How much one lost probe is worth, in percentage points.</summary>
     public static double OneProbeWorth(int sent) => sent <= 0 ? 100 : 100d / sent;
+
+    /// <summary>
+    /// A confidence interval for the mean paired difference, by resampling the pairs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A handful of A/B cycles is far too few to assume any particular distribution, and
+    /// the thing being estimated - "how much better is the candidate, typically" - is a
+    /// mean of paired differences whose spread is exactly what the resampling measures.
+    /// If the lower bound of that interval sits at or below zero, the cycles have not
+    /// ruled out "no difference", whatever the point estimate looks like.
+    /// </para>
+    /// <para>
+    /// Seeded on purpose. A verdict that changes when the same numbers are evaluated
+    /// twice is not a verdict, and a test cannot pin one down.
+    /// </para>
+    /// </remarks>
+    public static (double Lower, double Upper) PairedMeanInterval(
+        IReadOnlyList<double> differences,
+        double confidenceLevel = 0.90,
+        int iterations = 2000,
+        int seed = 0x5EED)
+    {
+        ArgumentNullException.ThrowIfNull(differences);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(confidenceLevel, 0);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(confidenceLevel, 1);
+
+        if (differences.Count == 0)
+        {
+            return (0, 0);
+        }
+
+        if (differences.Count == 1)
+        {
+            // One pair cannot bound anything. Reporting the value as its own interval
+            // would claim a precision that does not exist, so the interval is opened to
+            // include zero and the caller's lower-bound test fails, as it should.
+            return (Math.Min(0, differences[0]), Math.Max(0, differences[0]));
+        }
+
+        var random = new Random(seed);
+        var means = new double[Math.Max(200, iterations)];
+
+        for (var iteration = 0; iteration < means.Length; iteration++)
+        {
+            var total = 0d;
+            for (var draw = 0; draw < differences.Count; draw++)
+            {
+                total += differences[random.Next(differences.Count)];
+            }
+
+            means[iteration] = total / differences.Count;
+        }
+
+        Array.Sort(means);
+        var tail = (1 - confidenceLevel) / 2;
+
+        return (PercentileOfSorted(means, tail), PercentileOfSorted(means, 1 - tail));
+    }
+
+    /// <summary>
+    /// The paired sign-flip permutation p-value for "the candidate changed nothing".
+    /// </summary>
+    /// <remarks>
+    /// Under the null hypothesis the sign of each paired difference is arbitrary, so the
+    /// distribution of the mean under every possible relabelling is the reference. Exact
+    /// while the number of pairs is small enough to enumerate, sampled - deterministically
+    /// - beyond that. Reported rather than used as the sole gate: with the few cycles a
+    /// user will sit through, the smallest attainable p-value is often still large.
+    /// </remarks>
+    public static double PairedSignFlipPValue(
+        IReadOnlyList<double> differences,
+        int iterations = 4096,
+        int seed = 0x5EED)
+    {
+        ArgumentNullException.ThrowIfNull(differences);
+
+        if (differences.Count == 0)
+        {
+            return 1;
+        }
+
+        var observed = Math.Abs(Mean(differences));
+        var atLeastAsExtreme = 0;
+        var total = 0;
+
+        if (differences.Count <= 14)
+        {
+            var combinations = 1 << differences.Count;
+            for (var mask = 0; mask < combinations; mask++)
+            {
+                var sum = 0d;
+                for (var index = 0; index < differences.Count; index++)
+                {
+                    sum += (mask & (1 << index)) == 0 ? differences[index] : -differences[index];
+                }
+
+                total++;
+                if (Math.Abs(sum / differences.Count) >= observed - 1e-12)
+                {
+                    atLeastAsExtreme++;
+                }
+            }
+        }
+        else
+        {
+            var random = new Random(seed);
+            for (var iteration = 0; iteration < iterations; iteration++)
+            {
+                var sum = 0d;
+                foreach (var difference in differences)
+                {
+                    sum += random.Next(2) == 0 ? difference : -difference;
+                }
+
+                total++;
+                if (Math.Abs(sum / differences.Count) >= observed - 1e-12)
+                {
+                    atLeastAsExtreme++;
+                }
+            }
+        }
+
+        return total == 0 ? 1 : (double)atLeastAsExtreme / total;
+    }
 }

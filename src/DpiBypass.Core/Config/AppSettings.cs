@@ -4,6 +4,7 @@ using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.MobileHotspot;
+using DpiBypass.Core.Network;
 
 namespace DpiBypass.Core.Config;
 
@@ -25,6 +26,65 @@ public sealed record NetworkProfile
     public int SuccessCount { get; init; }
 
     public int FailureCount { get; init; }
+}
+
+/// <summary>
+/// What the latency feature has been told to measure, and how far it may go.
+/// </summary>
+/// <remarks>
+/// Kept as its own record so a settings file written by an older build - which has none
+/// of this - loads with every field at its safe default rather than failing to parse.
+/// Nothing here is identifying beyond what the user typed themselves.
+/// </remarks>
+public sealed record LatencyPreferences
+{
+    public LatencyTargetKind TargetKind { get; set; } = LatencyTargetKind.Reference;
+
+    /// <summary>Host or address for a custom target, exactly as the user typed it.</summary>
+    public string? TargetHost { get; set; }
+
+    public int? TargetPort { get; set; }
+
+    public LatencyProtocol TargetProtocol { get; set; } = LatencyProtocol.Icmp;
+
+    /// <summary>Executable name (no path) of the application target.</summary>
+    public string? TargetProcess { get; set; }
+
+    /// <summary>
+    /// Whether the loaded-latency lane may create a send-rate limit.
+    /// </summary>
+    /// <remarks>
+    /// Off by default. It creates a QoS policy, and a policy that appears without being
+    /// asked for is exactly the kind of thing a user should never find on their machine.
+    /// </remarks>
+    public bool TrafficGuardEnabled { get; set; }
+
+    /// <summary>The one application whose bulk sending may be paced.</summary>
+    public string? TrafficGuardApplication { get; set; }
+
+    /// <summary>Uplink capacity in Mbit/s when the user knows it better than we can measure.</summary>
+    public double? ManualUplinkMbps { get; set; }
+
+    public LatencyTargetSpec ToSpec() => TargetKind switch
+    {
+        LatencyTargetKind.Custom when !string.IsNullOrWhiteSpace(TargetHost) => new LatencyTargetSpec
+        {
+            Kind = LatencyTargetKind.Custom,
+            Host = TargetHost,
+            Port = TargetPort,
+            Protocol = TargetProtocol,
+        },
+        LatencyTargetKind.Application when !string.IsNullOrWhiteSpace(TargetProcess) => new LatencyTargetSpec
+        {
+            Kind = LatencyTargetKind.Application,
+            ProcessName = TargetProcess,
+        },
+        _ => LatencyTargetSpec.Reference,
+    };
+
+    public LinkCapacityEstimate ToCapacity() => ManualUplinkMbps is { } mbps and > 0
+        ? new LinkCapacityEstimate { UplinkKbps = mbps * 1000, UserSupplied = true }
+        : LinkCapacityEstimate.Unknown;
 }
 
 public sealed record AppSettings : IHotspotLegacyState
@@ -93,6 +153,9 @@ public sealed record AppSettings : IHotspotLegacyState
     /// Missing in older JSON files means false through the normal serializer default.
     /// </summary>
     public bool LowLatencyMode { get; set; }
+
+    /// <summary>Target, Traffic Guard and capacity choices for the latency feature.</summary>
+    public LatencyPreferences Latency { get; set; } = new();
 
     public List<string> ExtraDomains { get; set; } = [];
 
@@ -290,6 +353,23 @@ public sealed class ConfigStore
     /// </summary>
     private static void Normalise(AppSettings settings)
     {
+        // "Latency": null is valid JSON and the deserialiser writes that null straight
+        // over the property initialiser, so every load puts it back.
+        settings.Latency ??= new LatencyPreferences();
+        settings.Latency.TargetHost = Trim(settings.Latency.TargetHost);
+        settings.Latency.TargetProcess = Trim(settings.Latency.TargetProcess);
+        settings.Latency.TrafficGuardApplication = Trim(settings.Latency.TrafficGuardApplication);
+
+        if (settings.Latency.TargetPort is < 1 or > 65535)
+        {
+            settings.Latency.TargetPort = null;
+        }
+
+        if (settings.Latency.ManualUplinkMbps is <= 0 or > 100_000 or double.NaN)
+        {
+            settings.Latency.ManualUplinkMbps = null;
+        }
+
         settings.ExtraDomains = CleanDomains(settings.ExtraDomains);
         settings.ExcludedDomains = CleanDomains(settings.ExcludedDomains);
 
@@ -324,6 +404,9 @@ public sealed class ConfigStore
                     DisplayName = pair.Value.DisplayName ?? string.Empty,
                 });
     }
+
+    private static string? Trim(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static List<string> CleanDomains(List<string>? domains) => domains is null
         ? []

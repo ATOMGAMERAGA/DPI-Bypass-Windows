@@ -243,6 +243,25 @@
 
     <!-- ======== Navigation rail ======== -->
 
+    <!-- The latency headline carries the state, so it is coloured the same way the
+         protection status line is: the wording is the meaning, the colour is a hint. -->
+    <Style x:Key="LatencyHeadlineStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding LatencyStatusSeverity}" Value="ok">
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding LatencyStatusSeverity}" Value="warn">
+                <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding LatencyStatusSeverity}" Value="info">
+                <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
     <Style x:Key="NavTabControlStyle" TargetType="TabControl">
         <Setter Property="TabStripPlacement" Value="Left" />
         <Setter Property="Background" Value="Transparent" />

@@ -44,6 +44,17 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly Lock _hotspotDiagnosticsGate = new();
     private readonly IMobileHotspotDiagnostics _hotspot;
     private readonly LatencyOptimizer _latencyOptimizer;
+    private readonly LoadedLatencyLane _loadedLatency;
+
+    /// <summary>
+    /// One latency operation at a time, across both lanes.
+    /// </summary>
+    /// <remarks>
+    /// The optimizer guards its own runs, but the loaded lane is a separate object that
+    /// measures the same link and can create a QoS policy while the optimizer is
+    /// alternating adapter settings. Two of those at once would measure each other.
+    /// </remarks>
+    private readonly SemaphoreSlim _latencyGate = new(1, 1);
 
     private DohResolver? _resolver;
     private DnsProxyServer? _dnsProxy;
@@ -63,12 +74,14 @@ public sealed class ProtectionService : IAsyncDisposable
         ConfigStore? store = null,
         LearnedDomainStore? learnedDomains = null,
         LatencyOptimizer? latencyOptimizer = null,
-        IMobileHotspotDiagnostics? hotspotDiagnostics = null)
+        IMobileHotspotDiagnostics? hotspotDiagnostics = null,
+        LoadedLatencyLane? loadedLatency = null)
     {
         _store = store ?? new ConfigStore();
         _learned = learnedDomains ?? new LearnedDomainStore();
         _latencyOptimizer = latencyOptimizer ?? new LatencyOptimizer(log: AppLog.InfoSink);
         _latencyOptimizer.Changed += OnLatencyChanged;
+        _loadedLatency = loadedLatency ?? new LoadedLatencyLane(log: AppLog.InfoSink);
         _hotspot = hotspotDiagnostics ?? new MobileHotspotDiagnostics(log: AppLog.InfoSink);
 
         // Load already disabled the obsolete TTL sub-feature and preserved any reusable
@@ -78,6 +91,9 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             _store.Save(Settings);
         }
+
+        _latencyResult = _latencyOptimizer.Current;
+        _latencyOptimizer.Target = Settings.Latency.ToSpec();
 
         ApplySettingsToMatcher();
     }
@@ -104,9 +120,24 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public long DnsCacheHits => _dnsProxy?.CacheHits ?? 0;
 
-    public LatencyOptimizationResult LatencyResult => _latencyOptimizer.Current;
+    /// <summary>
+    /// The most recent latency result from either lane.
+    /// </summary>
+    /// <remarks>
+    /// Two things produce one: the idle optimizer, which publishes as it works, and the
+    /// loaded lane, which runs on demand. Whichever ran last is what the user is looking
+    /// at, so both write here rather than the UI having to know which to read.
+    /// </remarks>
+    private LatencyOptimizationResult _latencyResult;
 
-    public bool IsLatencyBusy => _latencyOptimizer.IsBusy;
+    public LatencyOptimizationResult LatencyResult => _latencyResult;
+
+    /// <summary>The whole latency picture, for the UI and for the JSON status command.</summary>
+    public LatencyStatusView LatencyStatus => LatencyStatusView.From(Settings.LowLatencyMode, _latencyResult);
+
+    public bool IsLatencyBusy => _latencyOptimizer.IsBusy || _loadedLatencyBusy;
+
+    private volatile bool _loadedLatencyBusy;
 
     /// <summary>Last verification result against discord.com.</summary>
     public ProbeResult? LastProbe { get; private set; }
@@ -191,9 +222,13 @@ public sealed class ProtectionService : IAsyncDisposable
                 await _latencyOptimizer.RestoreAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            // A QoS policy created by this app outlives the snapshot that recorded it if
+            // the machine died between the two. With the mode off, nothing owns one.
+            await _loadedLatency.ClearOwnedPoliciesAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
 
+        _latencyOptimizer.Target = Settings.Latency.ToSpec();
         await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -205,16 +240,175 @@ public sealed class ProtectionService : IAsyncDisposable
         _store.Save(Settings);
         Changed?.Invoke();
 
-        return enabled
-            ? await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false)
-            : await _latencyOptimizer.StopAndRestoreAsync(cancellationToken).ConfigureAwait(false);
+        if (enabled)
+        {
+            _latencyOptimizer.Target = Settings.Latency.ToSpec();
+            return PublishLatency(await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false));
+        }
+
+        var stopped = await _latencyOptimizer.StopAndRestoreAsync(cancellationToken).ConfigureAwait(false);
+        await _loadedLatency.ClearOwnedPoliciesAsync(cancellationToken).ConfigureAwait(false);
+        return PublishLatency(stopped);
     }
 
-    public Task<LatencyOptimizationResult> TestLatencyAsync(CancellationToken cancellationToken = default)
-        => _latencyOptimizer.TestAsync(cancellationToken);
+    /// <summary>The quick test: idle latency to the chosen target, changing nothing.</summary>
+    public async Task<LatencyOptimizationResult> TestLatencyAsync(CancellationToken cancellationToken = default)
+    {
+        await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            PublishLatency(Working(LatencyOptimizationStatus.QuickTesting, "Hızlı test çalışıyor…"));
 
-    public Task<LatencyOptimizationResult> RestoreLatencyAsync(CancellationToken cancellationToken = default)
-        => _latencyOptimizer.RestoreAsync(cancellationToken);
+            var result = await _latencyOptimizer
+                .TestAsync(Settings.Latency.ToSpec(), cancellationToken)
+                .ConfigureAwait(false);
+
+            return PublishLatency(result);
+        }
+        finally
+        {
+            _latencyGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The deep test: latency while the link is genuinely busy, and the Traffic Guard.
+    /// </summary>
+    /// <remarks>
+    /// Runs only when the user asks, because it needs them to start a real transfer.
+    /// Nothing is sent by the application; see <see cref="ObservedLoadExperiment"/>.
+    /// </remarks>
+    public async Task<LatencyOptimizationResult> RunLoadedLatencyTestAsync(CancellationToken cancellationToken = default)
+    {
+        await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        _loadedLatencyBusy = true;
+
+        try
+        {
+            PublishLatency(Working(
+                LatencyOptimizationStatus.LoadTesting,
+                _loadedLatency.Instruction(LoadDirection.Upload)));
+
+            var result = await _loadedLatency.RunAsync(
+                new LoadedLaneRequest
+                {
+                    Target = Settings.Latency.ToSpec(),
+                    RunTrafficGuard = Settings.Latency.TrafficGuardEnabled,
+                    BulkApplication = Settings.Latency.TrafficGuardApplication,
+                    Capacity = Settings.Latency.ToCapacity(),
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            return PublishLatency(result);
+        }
+        finally
+        {
+            _loadedLatencyBusy = false;
+            _latencyGate.Release();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>Programs holding a live remote connection, for the target picker.</summary>
+    /// <remarks>
+    /// Reads the connection table and the process list, both of which take long enough to
+    /// be noticed on a UI thread, so it is deliberately asynchronous.
+    /// </remarks>
+    public Task<IReadOnlyList<string>> ListConnectedProcessesAsync(CancellationToken cancellationToken = default)
+        => Task.Run<IReadOnlyList<string>>(
+            () => new WindowsProcessEndpointProvider(AppLog.InfoSink).ConnectedProcesses(),
+            cancellationToken);
+
+    private LatencyOptimizationResult Working(LatencyOptimizationStatus status, string line) => new()
+    {
+        Status = status,
+        StatusLine = line,
+        AdapterName = Network.AdapterName ?? Network.DisplayName,
+        NetworkKey = Network.Key,
+        TargetLabel = Settings.Latency.ToSpec().Describe(),
+    };
+
+    /// <summary>What the user has to do for the deep test to have anything to measure.</summary>
+    public string LatencyLoadInstruction(LoadDirection direction) => _loadedLatency.Instruction(direction);
+
+    /// <summary>Measures again from scratch, ignoring any saved answer for this network.</summary>
+    public async Task<LatencyOptimizationResult> RetestLatencyAsync(CancellationToken cancellationToken = default)
+    {
+        await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var result = await _latencyOptimizer
+                .RetestAsync(NetworkFingerprint.Capture(), cancellationToken)
+                .ConfigureAwait(false);
+
+            return PublishLatency(result);
+        }
+        finally
+        {
+            _latencyGate.Release();
+        }
+    }
+
+    /// <summary>Applies a new latency target and persists it.</summary>
+    public void SetLatencyPreferences(LatencyPreferences preferences)
+    {
+        ArgumentNullException.ThrowIfNull(preferences);
+
+        Settings.Latency = preferences;
+        _store.Save(Settings);
+        _latencyOptimizer.Target = preferences.ToSpec();
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Puts every latency change back: adapter properties and this app's QoS policies.
+    /// </summary>
+    /// <remarks>
+    /// The policy sweep runs whatever the snapshot says, because a policy created by a
+    /// build that crashed before it could record one would otherwise outlive every other
+    /// trace of this feature.
+    /// </remarks>
+    public async Task<LatencyOptimizationResult> RestoreLatencyAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await _latencyOptimizer.RestoreAsync(cancellationToken).ConfigureAwait(false);
+        await _loadedLatency.ClearOwnedPoliciesAsync(cancellationToken).ConfigureAwait(false);
+        return PublishLatency(result);
+    }
+
+    /// <summary>
+    /// Deletes every saved per-network latency result.
+    /// </summary>
+    /// <remarks>
+    /// The file is a cache and nothing else, so removing it costs one re-measurement and
+    /// can never leave a machine in a changed state. Anything actually applied lives in
+    /// the snapshot, which this does not touch.
+    /// </remarks>
+    public bool ClearLatencyProfiles()
+    {
+        try
+        {
+            if (!File.Exists(AppPaths.LatencyProfilesFile))
+            {
+                return false;
+            }
+
+            File.Delete(AppPaths.LatencyProfilesFile);
+            AppLog.Info("latency.profile: kayıtlı sonuçlar kullanıcı isteğiyle silindi.");
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Info($"latency.profile: kayıtlı sonuçlar silinemedi ({ex.Message}).");
+            return false;
+        }
+    }
+
+    private LatencyOptimizationResult PublishLatency(LatencyOptimizationResult result)
+    {
+        _latencyResult = result;
+        Changed?.Invoke();
+        return result;
+    }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -319,7 +513,11 @@ public sealed class ProtectionService : IAsyncDisposable
         Changed?.Invoke();
     }
 
-    private void OnLatencyChanged(LatencyOptimizationResult result) => Changed?.Invoke();
+    private void OnLatencyChanged(LatencyOptimizationResult result)
+    {
+        _latencyResult = result;
+        Changed?.Invoke();
+    }
 
     /// <summary>
     /// Re-verifies the chosen recipe on a timer, so an operator changing its rules
@@ -1236,6 +1434,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         _latencyOptimizer.Changed -= OnLatencyChanged;
         await _latencyOptimizer.DisposeAsync().ConfigureAwait(false);
+        _latencyGate.Dispose();
         _lifetime?.Dispose();
         _gate.Dispose();
     }

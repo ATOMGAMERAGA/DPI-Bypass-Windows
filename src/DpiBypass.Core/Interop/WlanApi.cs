@@ -3,8 +3,25 @@ using System.Text;
 
 namespace DpiBypass.Core.Interop;
 
-/// <summary>Currently associated Wi-Fi network, if any.</summary>
-public readonly record struct WlanConnection(string Ssid, string Bssid);
+/// <summary>
+/// Currently associated Wi-Fi network, if any.
+/// </summary>
+/// <param name="Ssid">The network name.</param>
+/// <param name="Bssid">The access point's MAC address.</param>
+/// <param name="SignalQuality">
+/// Windows' 0-100 signal quality, or -1 when the driver did not report one. Roaming to
+/// another access point or simply walking away from this one changes the radio the
+/// measurement runs over, so a latency comparison spanning such a change is not a
+/// comparison of anything else.
+/// </param>
+/// <param name="RxRateKbps">Current receive PHY rate in kbit/s, 0 when unknown.</param>
+/// <param name="TxRateKbps">Current transmit PHY rate in kbit/s, 0 when unknown.</param>
+public readonly record struct WlanConnection(
+    string Ssid,
+    string Bssid,
+    int SignalQuality = -1,
+    uint RxRateKbps = 0,
+    uint TxRateKbps = 0);
 
 /// <summary>
 /// Reads the connected SSID/BSSID straight from the Native Wi-Fi API. Shelling out
@@ -21,6 +38,13 @@ public static class WlanApi
     private const int SsidLengthOffset = AssociationOffset;
     private const int SsidBytesOffset = AssociationOffset + 4;
     private const int BssidOffset = AssociationOffset + 36 + 4;
+
+    // WLAN_ASSOCIATION_ATTRIBUTES continues after the six BSSID bytes: the MAC address
+    // is followed by two bytes of padding before the next 4-byte field.
+    private const int PhyTypeOffset = BssidOffset + 8;
+    private const int SignalQualityOffset = PhyTypeOffset + 8;
+    private const int RxRateOffset = SignalQualityOffset + 4;
+    private const int TxRateOffset = RxRateOffset + 4;
 
     public static WlanConnection? TryGetCurrentConnection()
     {
@@ -109,9 +133,27 @@ public static class WlanApi
             var bssid = new byte[6];
             Marshal.Copy(data + BssidOffset, bssid, 0, 6);
 
+            // The radio fields sit past the BSSID. An older or unusual structure that
+            // stops short is not an error; the connection itself is still valid, so the
+            // rates are simply reported as unknown.
+            var signalQuality = -1;
+            uint rxRate = 0;
+            uint txRate = 0;
+
+            if (size >= TxRateOffset + 4)
+            {
+                var quality = Marshal.ReadInt32(data + SignalQualityOffset);
+                signalQuality = quality is >= 0 and <= 100 ? quality : -1;
+                rxRate = (uint)Marshal.ReadInt32(data + RxRateOffset);
+                txRate = (uint)Marshal.ReadInt32(data + TxRateOffset);
+            }
+
             return new WlanConnection(
                 Encoding.UTF8.GetString(ssidBytes),
-                string.Join(':', bssid.Select(b => b.ToString("x2"))));
+                string.Join(':', bssid.Select(b => b.ToString("x2"))),
+                signalQuality,
+                rxRate,
+                txRate);
         }
         finally
         {

@@ -666,12 +666,67 @@
                                 </StackPanel>
 
                                 <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Text="Her ayar tek tek, eşli A/B turlarıyla ölçülür: ayarsız ölç, ayarı uygula, tekrar ölç, geri al — ve bu birkaç kez. Bir ayar yalnızca median, p95, p99 veya jitter kazancı turlar boyunca tekrarlandığında kalır. Kazanç yoksa, kayıp arttıysa ya da bağlantı bozulduysa özgün değerler anında geri yüklenir." />
+                                           Text="Her ayar tek tek, dönüşümlü A/B turlarıyla ölçülür: ayarsız ölç, ayarı uygula, bekle, tekrar ölç, geri al — ve sıra her turda değişir. Bir ayar yalnızca median, p95 veya jitter kazancı turlar boyunca tekrarlandığında ve yeniden örneklenen güven aralığı sıfırı dışladığında kalır. Kabul edilen ayarların tamamı en sonda birlikte yeniden ölçülür. Kazanç yoksa, kayıp arttıysa ya da bağlantı bozulduysa özgün değerler anında geri yüklenir." />
 
                                 <CheckBox Content="Ping düşürmeyi etkinleştir"
                                           Margin="0,16,0,0"
                                           Style="{StaticResource SwitchStyle}"
                                           IsChecked="{Binding LowLatencyMode, Mode=TwoWay}" />
+
+                                <!-- Hedef seçimi: ne ölçüldüğü, hangi sayının ne anlama geldiğini belirler. -->
+                                <TextBlock Text="Ölçüm hedefi" Style="{StaticResource FieldLabelStyle}" Margin="0,16,0,4" />
+                                <ComboBox ItemsSource="{Binding LatencyTargetOptions}"
+                                          SelectedItem="{Binding SelectedLatencyTarget, Mode=TwoWay}"
+                                          MinWidth="300"
+                                          MinHeight="34"
+                                          HorizontalAlignment="Left"
+                                          VerticalContentAlignment="Center" />
+                                <TextBlock Text="{Binding SelectedLatencyTarget.Description}"
+                                           Style="{StaticResource CaptionStyle}"
+                                           Margin="0,6,0,0"
+                                           TextWrapping="Wrap" />
+
+                                <Grid Margin="0,10,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Grid.Column="0"
+                                             MinHeight="34"
+                                             VerticalContentAlignment="Center"
+                                             IsEnabled="{Binding IsCustomLatencyTarget}"
+                                             Text="{Binding LatencyCustomTarget, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="host · host:port · tcp:// · udp://"
+                                               Style="{StaticResource HintStyle}"
+                                               Margin="10,0,0,0"
+                                               VerticalAlignment="Center" />
+                                </Grid>
+
+                                <Grid Margin="0,10,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox Grid.Column="0"
+                                              MinHeight="34"
+                                              VerticalContentAlignment="Center"
+                                              IsEnabled="{Binding IsApplicationLatencyTarget}"
+                                              ItemsSource="{Binding LatencyProcesses}"
+                                              SelectedItem="{Binding SelectedLatencyProcess, Mode=TwoWay}" />
+                                    <Button Grid.Column="1"
+                                            Content="Uygulamaları tara"
+                                            MinWidth="150"
+                                            Margin="10,0,0,0"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding RefreshLatencyProcessesCommand}" />
+                                </Grid>
+
+                                <TextBlock Text="{Binding LatencyTargetError}"
+                                           Style="{StaticResource CaptionStyle}"
+                                           Margin="0,6,0,0"
+                                           TextWrapping="Wrap"
+                                           Foreground="{DynamicResource AppWarningBrush}" />
 
                                 <ProgressBar Height="3"
                                              Margin="0,14,0,0"
@@ -679,28 +734,144 @@
                                              Background="{DynamicResource AppSubtleBackgroundBrush}"
                                              Foreground="{DynamicResource AppAccentBrush}" />
 
-                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,10,0,0">
+                                <TextBlock Text="{Binding LatencyHeadline}"
+                                           Style="{StaticResource LatencyHeadlineStyle}"
+                                           Margin="0,12,0,0" />
+                                <TextBlock Text="{Binding LatencyTargetSummary}"
+                                           Style="{StaticResource CaptionStyle}"
+                                           Margin="0,4,0,0"
+                                           TextWrapping="Wrap" />
+
+                                <TextBlock Text="{Binding LatencyIdleSummary}"
+                                           Style="{StaticResource MonospaceStyle}"
+                                           Margin="0,10,0,0"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding LatencyUploadSummary}"
+                                           Style="{StaticResource MonospaceStyle}"
+                                           Margin="0,4,0,0"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding LatencyDownloadSummary}"
+                                           Style="{StaticResource MonospaceStyle}"
+                                           Margin="0,4,0,0"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding LatencyPathSummary}"
+                                           Style="{StaticResource CaptionStyle}"
+                                           Margin="0,8,0,0"
+                                           TextWrapping="Wrap" />
+
+                                <TextBlock Text="Uygulanan değişiklikler"
+                                           Style="{StaticResource FieldLabelStyle}"
+                                           Margin="0,14,0,4" />
+                                <ItemsControl ItemsSource="{Binding LatencyAppliedChanges}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding}"
+                                                       Style="{StaticResource CaptionStyle}"
+                                                       TextWrapping="Wrap"
+                                                       Margin="0,0,0,2" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <TextBlock Text="Denenip geri alınan değişiklikler"
+                                           Style="{StaticResource FieldLabelStyle}"
+                                           Margin="0,10,0,4" />
+                                <ItemsControl ItemsSource="{Binding LatencyRejectedChanges}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Style="{StaticResource CaptionStyle}"
+                                                       TextWrapping="Wrap"
+                                                       Margin="0,0,0,2">
+                                                <Run Text="{Binding Change, Mode=OneWay}" />
+                                                <Run Text=" — " />
+                                                <Run Text="{Binding Reason, Mode=OneWay}" />
+                                            </TextBlock>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,12,0,0">
                                     <TextBlock Text="{Binding LatencyStatusLine}"
                                                Style="{StaticResource MonospaceStyle}"
                                                TextWrapping="Wrap" />
                                 </Border>
 
                                 <WrapPanel Margin="0,12,0,0">
-                                    <Button Content="Yalnız ölç"
+                                    <Button Content="Hızlı test"
                                             MinWidth="130"
-                                            Margin="0,0,8,0"
+                                            Margin="0,0,8,8"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             Command="{Binding LatencyTestCommand}" />
-                                    <Button Content="Özgün ayarları geri yükle"
+                                    <Button Content="Yük altında derin test"
                                             MinWidth="200"
+                                            Margin="0,0,8,8"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding LatencyDeepTestCommand}" />
+                                    <Button Content="Zorla yeniden ölç"
+                                            MinWidth="170"
+                                            Margin="0,0,8,8"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding LatencyRetestCommand}" />
+                                    <Button Content="Kayıtlı sonuçları sil"
+                                            MinWidth="180"
+                                            Margin="0,0,8,8"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding LatencyClearProfilesCommand}" />
+                                    <Button Content="Tüm özgün ayarları geri yükle"
+                                            MinWidth="230"
+                                            Margin="0,0,0,8"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             Command="{Binding LatencyRestoreCommand}" />
                                 </WrapPanel>
 
+                                <TextBlock Text="{Binding LatencyLoadInstruction}"
+                                           Style="{StaticResource HintStyle}"
+                                           Margin="0,2,0,0"
+                                           TextWrapping="Wrap" />
+
+                                <Expander Style="{StaticResource AdvancedExpanderStyle}" Margin="0,14,0,0">
+                                    <Expander.Header>
+                                        <TextBlock Text="Traffic Guard (yük altındaki gecikme)"
+                                                   Style="{StaticResource SectionTitleStyle}"
+                                                   Margin="0" />
+                                    </Expander.Header>
+                                    <StackPanel>
+                                        <TextBlock Style="{StaticResource CaptionStyle}"
+                                                   TextWrapping="Wrap"
+                                                   Text="Ev bağlantılarında en büyük gecikme artışı genelde boştaki ping değil, siz bir şey gönderirken oluşan kuyruklanmadır. Bu seçenek, adını yazdığınız uygulamanın giden trafiğini ölçülen kapasitenin güvenli bir yüzdesinde sınırlamak için Windows QoS ilkesi oluşturur. İlke yalnız 'DPIBypass.Latency.' ön ekiyle oluşturulur; sizin veya yöneticinizin mevcut QoS ilkelerine dokunulmaz. Kuyruklanma ölçülerek azalmazsa ilke silinir." />
+
+                                        <CheckBox Content="Yük altında derin testte gönderim sınırını dene"
+                                                  Margin="0,14,0,0"
+                                                  Style="{StaticResource SwitchStyle}"
+                                                  IsChecked="{Binding TrafficGuardEnabled, Mode=TwoWay}" />
+
+                                        <TextBlock Text="Sınırlanacak uygulama (örnek: steam.exe)"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,14,0,4" />
+                                        <TextBox MinHeight="34"
+                                                 VerticalContentAlignment="Center"
+                                                 Text="{Binding TrafficGuardApplication, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+
+                                        <TextBlock Text="Gönderim hızınız (Mbit/s, biliyorsanız)"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,14,0,4" />
+                                        <TextBox MinHeight="34"
+                                                 MaxWidth="160"
+                                                 HorizontalAlignment="Left"
+                                                 VerticalContentAlignment="Center"
+                                                 Text="{Binding ManualUplinkMbps, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+
+                                        <TextBlock Text="{Binding LatencyGuardSummary}"
+                                                   Style="{StaticResource MonospaceStyle}"
+                                                   Margin="0,12,0,0"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Expander>
+
                                 <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Margin="0,10,0,0"
+                                           Margin="0,12,0,0"
                                            TextWrapping="Wrap"
-                                           Text="Yalnızca bağdaştırıcının geri alınabilir ayarları değiştirilir; IP, DHCP, gateway, DNS, IPv6, TCP kayıt defteri ayarları ve paket yolu bu özellik tarafından değiştirilmez. Oyun ve ses trafiği normal Windows ağ yolunda kalır." />
+                                           Text="Yalnızca bağdaştırıcının geri alınabilir ayarları ve bu uygulamanın kendi QoS ilkeleri değiştirilir; IP, DHCP, gateway, DNS, IPv6, TCP kayıt defteri ayarları ve paket yolu bu özellik tarafından değiştirilmez. Oyun ve ses trafiği normal Windows ağ yolunda kalır. Boştaki ping, yük altındaki gecikme, jitter, paket kaybı, DNS çözümleme süresi ve ISP/WAN rota gecikmesi ayrı şeylerdir; hiçbiri diğerinin yerine gösterilmez." />
                             </StackPanel>
                         </Border>
 

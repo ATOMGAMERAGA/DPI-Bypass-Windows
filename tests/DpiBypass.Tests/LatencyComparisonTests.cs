@@ -459,11 +459,20 @@ public sealed class LatencyComparisonTests
             Fake.Measurement(30, p95: 60 - gain, p99: 90))),
     ];
 
+    /// <summary>
+    /// Deliberately measured with 120 replies per arm.
+    /// </summary>
+    /// <remarks>
+    /// The evaluator will not let p99 decide anything below a hundred replies, because
+    /// below that the "99th percentile" is the worst sample wearing a percentile's name.
+    /// A p99 fixture built on the 24-probe default would therefore be testing the reply
+    /// guard rather than the tail rule it is named after.
+    /// </remarks>
     private static IReadOnlyList<LatencyPair> P99Pairs(params double[] gains) =>
     [
         .. gains.Select(gain => Pair(
-            Fake.Measurement(30, p95: 60, p99: 100),
-            Fake.Measurement(30, p95: 60, p99: 100 - gain))),
+            Fake.Measurement(30, p95: 60, p99: 100, attempts: 120),
+            Fake.Measurement(30, p95: 60, p99: 100 - gain, attempts: 120))),
     ];
 
     private static IReadOnlyList<LatencyPair> JitterPairs(params double[] gains) =>

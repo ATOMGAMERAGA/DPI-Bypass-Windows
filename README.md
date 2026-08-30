@@ -189,96 +189,224 @@ alanlarını temizler.
 
 ## Ping düşürme (Beta)
 
-**DNS ve ayarlar → Ping düşürme** kartındaki özellik, aktif fiziksel ağ
-bağdaştırıcısının desteklediği güvenli NIC seçeneklerini **eşli A/B ölçümüyle**
-tek tek sınar.
+**DNS ve ayarlar → Ping düşürme** kartındaki özellik iki ayrı şeyi yapar ve
+ikisini birbirine karıştırmaz:
+
+1. **Boştaki gecikme:** aktif fiziksel bağdaştırıcının desteklediği güvenli NIC
+   ayarlarını, seçtiğiniz hedefe karşı **dönüşümlü A/B ölçümüyle** tek tek sınar.
+2. **Yük altındaki gecikme:** siz bir indirme veya gönderim başlattığınızda RTT'ye
+   ne olduğunu ölçer, ve isterseniz giden toplu trafiği Windows QoS ile
+   sınırlayıp bunun gerçekten işe yarayıp yaramadığını ölçer.
+
+Hangi ayarların neden denendiği, hangilerinin bilerek dışarıda bırakıldığı ve her
+biri hangi resmî belgeye dayandığı **[LATENCY-RESEARCH.md](LATENCY-RESEARCH.md)**
+dosyasında kaynak bağlantılarıyla yazılıdır.
+
+### Neyi ölçtüğünüzü siz seçersiniz
+
+| Hedef | Ne ölçülür | Ne ölçülmez |
+| --- | --- | --- |
+| **Genel internet referansı** | 1.1.1.1 / 8.8.8.8 / 9.9.9.9 ICMP RTT'si | Oyun sunucunuzun rotası. Bu hedef genel bağlantı sağlığıdır, **oyun sunucusu değildir** |
+| **Çalışan oyun / uygulama** | Programın açık TCP bağlantısındaki **gerçek uzak uç** (IP Helper bağlantı tablosundan) | Yalnız UDP kullanan bir oyunun sunucusu — Windows UDP soketinin uzak adresini bildirmez |
+| **Özel sunucu** | `host`, `host:port`, `tcp://host:port` | `udp://host:port` verilirse aynı adrese **rota referansı** ölçülür ve arayüz bunu böyle etiketler |
+
+Hedef deney başında bir kez çözülür ve **sabitlenir**. A ve B kolları aynı IP,
+aynı protokol ve aynı portu kullanır — RFC 2681'in Type-P kuralı budur; farklı
+uçları ölçen iki sayı birbirinden çıkarılamaz.
 
 ### Ölçüm
 
-Her ölçüm, aynı hedefe **peş peşe ve sabit aralıkla** 24 ICMP probe'u gönderir
-(batch hâlinde değil: eşzamanlı gönderim ağ kadar makinenin kendi gönderim
-kuyruğunu da ölçer). Hesaplananlar: minimum, **median, p95, p99**, jitter
-(ardışık farkların ortalaması), paket kaybı, gateway median/p95 ve ölçüm
-sırasında bağdaştırıcının taşıdığı trafik. ICMP engelliyse internet ölçümü
-açıkça `TCP/443` olarak etiketlenen bağlantı süresiyle devam eder.
+Her ölçüm aynı uca **peş peşe ve sabit aralıkla** probe gönderir (batch hâlinde
+değil: eşzamanlı gönderim ağ kadar makinenin kendi gönderim kuyruğunu da ölçer).
+İlk birkaç probe **ısınma** sayılır ve sonuçtan çıkarılır. Hesaplananlar:
+minimum, **median, p95, p99**, jitter (ardışık farkların ortalaması), paket
+kaybı, gateway median/p95 ve pencere boyunca bağdaştırıcının taşıdığı trafik.
+ICMP engelliyse ölçüm açıkça `TCP/443` olarak etiketlenen bağlantı süresiyle
+sürer.
 
-### Eşli A/B
+**p99, iki kolda da en az 100 geçerli yanıt olmadan karar metriği olamaz.** 40
+örnekten hesaplanan bir "p99" en kötü örnektir, yüzdelik değil; arayüz ve JSON
+çıktısı bu durumda p99 yerine "örnek yetersiz" der.
+
+### Dönüşümlü A/B (ABBA)
 
 Tek bir önce/sonra çifti, 2 ms'lik bir iyileşmeyi 2 ms'lik bir dalgalanmadan
-ayıramaz. Bu yüzden her aday için tur tur ölçülür:
+ayıramaz. Dahası, her turu hep A→B sırasında ölçmek, koşu boyunca kayan her
+şeyi (makinenin ısınması, hattın sakinleşmesi) tek bir kola yükler. Bu yüzden
+sıra her turda değişir:
 
 ```
-A1 ölç (ayarsız) → uygula → B1 ölç → geri al
-A2 ölç (ayarsız) → uygula → B2 ölç → geri al
-                 ...
+tur 1:  A ölç (ayarsız) → uygula → bekle → B ölç → geri al → bekle
+tur 2:  uygula → bekle → B ölç → geri al → bekle → A ölç
+tur 3:  A ölç → uygula → …
 ```
 
-Bir ayar ancak **aynı metrikteki kazanç turların çoğunda tekrarlanır ve turların
-birbiriyle olan uyuşmazlığından büyükse** kabul edilir. Sonuç kararsızsa
-(kazanç var ama tutarsız) fazladan tur çalıştırılır; hâlâ kararsızsa cevap
-"hayır"dır. Kabul edilen bir ayar, bir sonraki adayın ölçüldüğü zemin olur, ve
-kullanıcıya gösterilen iyileşme **eşli turların** sonucudur — tek bir son
-örneğin değil.
+Her yazmadan sonra o ayarın kendi **oturma süresi** kadar beklenir; sürücü
+değişikliğinden hemen sonraki paketler durumu değil geçişi ölçer.
 
-Bir çiftin iki yarısı farklı yük altında ölçüldüyse (biri boşta, diğeri indirme
-sırasında) o tur **atılır ve tekrarlanır**: aksi hâlde ölçülen şey ayar değil,
-indirmedir.
+Bir tur şu durumlarda **atılır ve tekrarlanır**: iki yarı farklı yük altındaysa,
+CPU yükü belirgin değiştiyse, güç kaynağı AC↔batarya değiştiyse, Wi-Fi sinyali
+veya bağlantı hızı belirgin değiştiyse. Rota, bağdaştırıcı veya erişim noktası
+(BSSID) değişirse **tur tamamen iptal edilir** — artık aynı yol ölçülmüyordur.
 
-### Reddetme
+Sonuç kararsızsa örnek sayısı büyütülür (40 → 120). Hâlâ kararsızsa, ya da süre
+sınırına gelinirse, cevap "hayır"dır.
+
+### Kabul kuralı
+
+Bir ayar ancak şunların **hepsi** doğruysa kalır:
+
+- aynı metrikteki kazanç turların çoğunda tekrarlanır;
+- hiçbir turda aynı büyüklükte ters sonuç yoktur;
+- kazanç, turların birbiriyle olan uyuşmazlığından (robust yayılım) büyüktür;
+- yeniden örneklenen (bootstrap) eşli fark aralığının alt sınırı **sıfırı
+  dışlar**;
+- turların hepsi aynı sırada ölçülmemiştir.
 
 Şunlardan herhangi biri adayı anında bitirir: uzak ucun yanıt vermemesi, paket
-kaybının bir probe'dan fazla artması, median / p95 / p99'da anlamlı gerileme,
-sürücünün değeri canlı uygulamaması, geri alınamayan bir yazma. CPU maliyeti
-olan bir ayar (Interrupt Moderation kapalı) **iki kat** büyük bir kazanç
-göstermek zorundadır.
+kaybının bir probe'dan fazla artması, median / p95 / p99 / jitter'da anlamlı
+gerileme, sürücünün değeri canlı uygulamaması, geri alınamayan bir yazma. CPU
+maliyeti olan bir ayar (Interrupt Moderation, RSC, LSO) **iki kat** büyük bir
+kazanç göstermek zorundadır.
+
+**Tam paket doğrulaması:** adaylar tek tek kabul edildikten sonra tek bir son
+ölçüm alınmaz. Kabul edilen ayarların **tamamı**, yine dönüşümlü sırayla,
+özgün duruma karşı yeniden ölçülür. Yalnız bu eşli doğrulama da kazanç
+gösteriyorsa değişiklikler kalıcı olur; aksi hâlde hepsi geri alınır.
+
+### Yük altındaki gecikme
+
+Ev bağlantılarında en büyük ms kazancı genelde boştaki ping'den değil,
+**bir şey gönderirken oluşan kuyruklanmadan** gelir. "Yük altında derin test"
+şunu yapar:
+
+1. boştaki RTT'yi ölçer;
+2. **siz** bir gönderim başlatana kadar bekler ve bağdaştırıcı sayaçlarından
+   hattın gerçekten dolduğunu doğrular;
+3. o pencerede aynı uca RTT'yi tekrar ölçer;
+4. aynısını indirme yönü için yapar;
+5. gönderim ve indirme kuyruklanmasını **ayrı ayrı** raporlar.
+
+**Uygulama hiçbir veri göndermez veya indirmez.** Yük sizin başlattığınız
+trafiktir; gelmezse cevap "ölçülmedi" olur, tahmin değil. "Yüklü" sayılma eşiği
+sabit bir sayı değil, hattın **ölçülen kapasitesinin** bir payıdır — 256 kbit/s
+5 Mbit'lik bir gönderim hattını doldurur, 500 Mbit'likte gürültüdür.
+
+### Traffic Guard (isteğe bağlı, varsayılan kapalı)
+
+Gönderim kuyruklanması bulunursa ve siz açıkça açtıysanız, seçtiğiniz **tek bir**
+uygulamanın giden trafiği Windows'un kendi Policy-based QoS mekanizmasıyla
+ölçülen kapasitenin güvenli bir yüzdesinde sınırlanır, sonra yük altındaki
+gecikme yeniden ölçülür.
+
+- İlke yalnız **`DPIBypass.Latency.`** ön ekiyle oluşturulur; başka hiçbir ad
+  oluşturulmaz, değiştirilmez veya silinmez.
+- Sizin veya yöneticinizin (GPO) mevcut QoS ilkelerine **dokunulmaz**. Rakip bir
+  hız sınırlama ilkesi varsa otomatik müdahale atlanır ve size söylenir.
+- İlke `ActiveStore`'da tutulur: yeniden başlatmadan sonra kalmaz.
+- Kuyruklanma **ölçülerek** azalmazsa, paket kaybı artarsa veya gönderim hızı
+  fazla düşerse ilke silinir.
+- DSCP işaretlemesi tek başına kazanç sayılmaz: router'ın onu sınıflandırıp
+  sınıflandırmadığı bu uçtan görülemez.
 
 ### Nerede olduğunu söyler
 
-Gecikmenin ne kadarının ilk atlamada, ne kadarının operatör ve internet yolunda
-olduğu ayrıştırılır. İlk atlama 1 ms ve uzak uç 70 ms ise hiçbir bağdaştırıcı
-ayarı bunu değiştirmez — ve bunu söylemek sekiz ayarı deneyip bir şey bulamamaktan
-daha faydalıdır. Kendi trafiğiniz aktifken gecikme belirgin artıyorsa bu
-**kuyruklanma** olarak raporlanır; çözümü gönderim hızını sınırlamaktır, NIC
-ayarı değil.
+Gecikmenin ne kadarının ilk atlamada, ne kadarının operatör ve internet yolunda,
+ne kadarının kendi trafiğinizin ürettiği kuyrukta olduğu ayrıştırılır. İlk atlama
+1 ms ve uzak uç 70 ms ise hiçbir bağdaştırıcı ayarı bunu değiştirmez — ve bunu
+söylemek sekiz ayarı deneyip bir şey bulamamaktan daha faydalıdır.
+
+**Bunlar aynı şey değildir ve arayüz hiçbirini diğerinin yerine göstermez:**
+
+| Kavram | Nedir | Neyle düşer |
+| --- | --- | --- |
+| Boştaki ping | Hat boşken gidiş-dönüş süresi | Mesafe ve rota; yerelde çok az şey |
+| Yük altındaki gecikme | Siz gönderirken/indirirken RTT | Gönderim hızını sınırlamak (yalnız gönderim yönü) |
+| Jitter | Ardışık paketler arası fark | Kararlı hat, kablolu bağlantı |
+| Paket kaybı | Yanıtsız probe oranı | Hat/kablo/radyo kalitesi |
+| DNS çözümleme süresi | Ad çözme gecikmesi | DNS sağlayıcısı — **RTT değildir** |
+| ISP/WAN rota gecikmesi | Operatör ve internet yolu | Bu yazılımla **düşürülemez** |
 
 ### Dokunulan ve dokunulmayan
 
-Sürücü gerçekten destekliyorsa denenenler:
+Sürücü gerçekten destekliyorsa denenenler (hepsi standart NDIS registry
+keyword'üyle eşleşir, yerelleştirilmiş görünen ad **hiç okunmaz**):
 
-- `SelectiveSuspend`, `DeviceSleepOnDisconnect` ve `D0PacketCoalescing`
-  (`Get/Set-NetAdapterPowerManagement`);
-- yalnız fiziksel Ethernet'te NDIS `*InterruptModeration` registry keyword'ü
-  (`Get/Set-NetAdapterAdvancedProperty`).
+- `*InterruptModeration` → 0
+- `*RscIPv4` / `*RscIPv6` → 0 (yalnız TCP hedefinde, yalnız RSC gerçekten
+  çalışıyorsa)
+- `*RSS` → 1 (yalnız kablolu, ≥4 mantıksal işlemci, şu anda kapalıysa)
+- `*EEE` → 0
+- `*LsoV2IPv4` / `*LsoV2IPv6` → 0 (yalnız toplu gönderim ölçülen lane'de)
+- `SelectiveSuspend`, `D0PacketCoalescing` → Disabled
+  (`Get/Set-NetAdapterPowerManagement`)
 
-RSS, checksum/LSO/RSC offload, MTU, TCP autotuning, ECN, Nagle/registry hack'leri,
-HPET/timer ayarları, DNS, IPv6, route/metric, QoS, firewall ve işlem önceliği
-değiştirilmez. Bağdaştırıcı kapatılıp açılmaz ve yeniden başlatılmaz. VPN,
-TAP/TUN, Hyper-V, Docker ve WSL sanal bağdaştırıcıları atlanır. Paket yoluna
-hiç dokunulmaz: bu özellik tek bir WinDivert tanıtıcısı açmaz, oyun ve ses
-trafiği normal Windows ağ yolunda kalır.
+`DeviceSleepOnDisconnect` **artık aday değildir**: bu keyword bağlantı
+kesildiğinde ne olduğunu yönetir, oyun oynarken RTT'yi değil. Yalnız eski bir
+kayıt taşıyan makineler için geri yüklenebilir listede kalır.
+
+**Checksum offload hiçbir koşulda kapatılmaz.** Microsoft bunların her iş
+yükünde açık kalmasını önerir ve RSS, RSC, LSO bunlara bağımlıdır.
+
+MTU, TCP autotuning, ECN, Nagle/registry hack'leri, `NetworkThrottlingIndex`,
+`SystemResponsiveness`, HPET/timer ayarları, DNS, IPv6, route/metric, firewall,
+güvenlik servisleri, güç planı ve işlem önceliği değiştirilmez. Bağdaştırıcı
+kapatılıp açılmaz ve yeniden başlatılmaz. VPN, TAP/TUN, Hyper-V, Docker ve WSL
+sanal bağdaştırıcıları atlanır. Paket yoluna hiç dokunulmaz: bu özellik tek bir
+WinDivert tanıtıcısı açmaz, oyun ve ses trafiği normal Windows ağ yolunda kalır.
 
 Bu özellik ISP rotasını değiştirmez, VPN değildir ve uzaktaki oyun sunucusunu
-fiziksel olarak yakınlaştırmaz. Doğrulanmış kazanç yoksa doğru sonuç
-**"Bu ağda doğrulanmış bir gecikme iyileşmesi bulunamadı. Özgün ayarlar geri
-yüklendi."** mesajıdır.
+fiziksel olarak yakınlaştırmaz.
+
+### "Kazanç bulunamadı" kapalı demek değildir
+
+Mod açıkken yerel olarak düzeltilebilir bir şey bulunamazsa arayüz **kapalı
+göstermez.** Ayırt edilen durumlar:
+
+| Durum | Ne demek |
+| --- | --- |
+| `Kapalı` | Anahtar kapalı |
+| `Açık · ölçülüyor` | Başlangıç ölçümü sürüyor |
+| `Açık · hızlı test yapılıyor` | Ayar değiştirmeden ölçüm |
+| `Açık · yük altında derin test yapılıyor` | Sizin trafiğiniz bekleniyor/ölçülüyor |
+| `Açık · NIC ayarı medianı X ms, p95'i Y ms azalttı` | Doğrulanmış kazanç uygulandı |
+| `Açık · Traffic Guard gönderim kuyruklanmasını X ms azalttı` | Ölçülmüş QoS kazancı |
+| `Açık · ağ izleniyor · yerel olarak uygulanabilir kazanç bulunamadı` | Mod çalışıyor, yapılacak bir şey yok |
+| `Açık · gecikmenin X ms'i ISP/WAN rotasında; yerel ayar bunu değiştiremez` | Fiziksel sınır |
+| `Derin test gerekli · yalnız boşta bağlantı ölçüldü` | Yük altındaki tablo bilinmiyor |
+| `Açık · müdahale geri alındı · <neden>` | Bir aday denendi ve geri alındı |
+| `Desteklenen NIC adayı yok · hedef ve yük tanılaması kullanılabilir` | Sürücü hiçbir güvenli ayar sunmuyor |
+| `Geri yükleme bekliyor` / `Başarısız` | Kurtarma gerekiyor; yeni ölçüm başlatılmaz |
 
 ### Profil ve kurtarma
 
-Doğrulanan sonuç **ağ + bağdaştırıcı + sürücü yetenek parmak izi** üçlüsüne
-bağlanarak `latency-profiles.json` içinde saklanır. Aynı ağa dönüldüğünde
-tam ölçüm yerine kayıtlı ayarlar yeniden uygulanır ve tek bir doğrulama ölçümüyle
-onaylanır; onaylanmazsa geri alınır ve profil silinir. Farklı bir bağdaştırıcı,
-sürücü güncellemesi veya bir aydan eski bir kayıt geçersizdir — Ethernet'te
-kanıtlanan bir ayar yanındaki Wi-Fi kartı için hiçbir şey söylemez. Dosyada
-adres, SSID veya BSSID tutulmaz ve hiçbir yere gönderilmez.
+Doğrulanan sonuç **ağ + bağdaştırıcı + sürücü yetenek parmak izi + ölçüm hedefi
++ ölçüm yöntemi sürümü** anahtarıyla `latency-profiles.json` içinde saklanır.
+Aynı ağa dönüldüğünde tam ölçüm yerine kayıtlı ayarlar yeniden uygulanır ve
+taze bir doğrulama ölçümüyle onaylanır; onaylanmazsa geri alınır ve profil
+silinir.
+
+**Elemeler ile kabuller aynı güven seviyesinde tutulmaz.** Bir kabul her
+tekrarında yeniden kanıtlanır; bir eleme ise yalnız sessizce bir adayı ölçüm
+dışı bırakır. Bu yüzden elemeler **3 gün** sonra, kabuller **30 gün** sonra
+geçersizdir — ve bir eleme yalnız ölçüldüğü koşullar hâlâ geçerliyken sayılır:
+hedef, güç kaynağı, erişim noktası, sinyal seviyesi veya "yük altında ölçüldü mü"
+değişirse aday yeniden ölçülür. Arayüzdeki **"Zorla yeniden ölç"** düğmesi ve
+`latency retest` komutu önbelleği tamamen atlar.
+
+Dosyada adres, SSID, BSSID veya tam işlem yolu tutulmaz; ağ, erişim noktası ve
+hedef kısa hash'lerle temsil edilir ve hiçbir yere gönderilmez.
 
 Özgün değerler `C:\ProgramData\DPI Bypass\latency-snapshot.json` içinde,
 her adımdan **önce** yazılan bir durum damgasıyla tutulur
-(`SnapshotCreated → CandidateApplied → Verifying → Committed`). Mod
-kapatıldığında, ağ değiştiğinde, uygulama normal kapandığında ve kaldırma
-başlamadan önce geri yüklenir. Yarım kalmış bir çalışma — crash, elektrik
-kesintisi, süreç sonlandırma — sonraki açılışta **modun açık olup olmadığına
-bakılmaksızın** geri alınır; kayıp bağdaştırıcı varsa kurtarma bilgisi silinmez.
+(`SnapshotCreated → CandidateApplied → Verifying → Committed`). Dosya artık
+yalnız NIC özelliklerini değil, bu uygulamanın oluşturduğu QoS ilkelerini de
+taşır. Mod kapatıldığında, ağ değiştiğinde, uygulama normal kapandığında ve
+kaldırma başlamadan önce geri yüklenir. Yarım kalmış bir çalışma — crash,
+elektrik kesintisi, süreç sonlandırma — sonraki açılışta **modun açık olup
+olmadığına bakılmaksızın** geri alınır. Geri alınamayan bir kaynak, geri
+alınabilenleri engellemez; çözülemeyen kayıtta korunur ve yeni bir optimizasyon
+başlatılmaz.
 
 ## Ping ve hıza etkisi
 
@@ -336,10 +464,20 @@ DpiBypass.exe vodafone on / off   # Vodafone güvenli tanılama modunu aç / kap
 DpiBypass.exe vodafone diagnose   # Vodafone bağlantısını incele
 DpiBypass.exe hotspot diagnose    # mobil paylaşım bağlantısını incele
 DpiBypass.exe hotspot cleanup     # yalnız eski TTL alt özelliğini temizle
-DpiBypass.exe latency status      # düşük-gecikme durumu
-DpiBypass.exe latency on / off    # ölçümlü optimizasyonu aç / kapat
-DpiBypass.exe latency test        # kalıcı ayar değiştirmeden ölç
-DpiBypass.exe latency restore     # özgün NIC değerlerini kurtar
+DpiBypass.exe latency status                 # düşük-gecikme durumu
+DpiBypass.exe latency status --json          # otomasyon için kararlı şema
+DpiBypass.exe latency on / off               # ölçümlü optimizasyonu aç / kapat
+DpiBypass.exe latency test --target mc.sunucu.com:25565
+                                             # kalıcı ayar değiştirmeden ölç
+DpiBypass.exe latency target mc.sunucu.com:25565
+                                             # ölçüm hedefini kalıcı ayarla
+DpiBypass.exe latency optimize --quick       # hızlı ölçüm
+DpiBypass.exe latency optimize --deep        # yük altında derin test
+DpiBypass.exe latency loaded-test            # yük altında derin test
+DpiBypass.exe latency retest                 # kayıtlı sonucu yok say, baştan ölç
+DpiBypass.exe latency report                 # son tam raporu yazdır
+DpiBypass.exe latency profiles clear         # kayıtlı per-ağ sonuçlarını sil
+DpiBypass.exe latency restore                # özgün NIC değerlerini kurtar
 DpiBypass.exe restore-dns         # DNS ayarlarını geri yükle
 DpiBypass.exe --health-check [sn] # çalışan kopyanın penceresini açmasını bekle
 DpiBypass.exe --ui-selftest       # arayüzü sına ve çık (ağ motorunu açmaz)
@@ -392,7 +530,7 @@ o durumda onay istenir. İstemiyorsanız Windows Başlangıç Uygulamaları'ndan
 | `learned-domains.json` | Otomatik keşfin bulduğu engelli alan adları |
 | `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |
 | `latency-snapshot.json` | Ping düşürmenin değiştirdiği NIC özelliklerinin tam özgün değerleri ve işlem durumu |
-| `latency-profiles.json` | Ağ + bağdaştırıcı + sürücü başına doğrulanmış ölçüm sonuçları (yalnız yerel) |
+| `latency-profiles.json` | Ağ + bağdaştırıcı + sürücü + hedef başına doğrulanmış ölçüm sonuçları (yalnız yerel, hash'li) |
 | `logs\` | Günlük kayıtları (14 gün saklanır) |
 
 ## Kaldırma
@@ -455,9 +593,11 @@ src/DpiBypass.Core/
   Network/IspProfile.cs       operatör profilleri
   Network/LatencyOptimizer.cs eşli A/B turlarıyla ölç, uygula, doğrula, rollback et
   Network/LatencyComparison.cs bir adayın kabul/ret kuralı
-  Network/LatencyStatistics.cs median, p95, p99, jitter, kayıp
-  Network/LatencyProbe.cs     sıralı ve sabit aralıklı RTT ölçümü
-  Network/LatencyProfileStore.cs ağ + bağdaştırıcı + sürücü başına doğrulanmış sonuç
+  Network/LatencyStatistics.cs median, p95, p99, jitter, kayıp, bootstrap aralığı
+  Network/LatencyProbe.cs     sıralı, ısınmalı ve sabit aralıklı RTT ölçümü
+  Network/LatencyProfileStore.cs ağ + bağdaştırıcı + sürücü + hedef başına sonuç
+  Network/Latency/            hedef çözümleme, müdahale kataloğu, deney koşucusu,
+                              ortam örnekleyici, yük deneyi, QoS ve Traffic Guard
   Network/NetworkLoadSampler.cs ölçüm penceresinde hattın ne kadar meşgul olduğu
   Diagnostics/StrategyTuner.cs        gerçek bağlantı testleriyle yöntem arama
   Diagnostics/BlockedSiteDiscovery.cs yeni engelli siteleri ölçerek bulma

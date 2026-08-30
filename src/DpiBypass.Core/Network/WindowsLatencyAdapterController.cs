@@ -43,8 +43,8 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
 
         var result = await RunAsync(
             DetectScript,
-            new Dictionary<string, string?> { ["DPI_BYPASS_ADAPTER_ID"] = network.AdapterId },
-            TimeSpan.FromSeconds(20),
+            BuildEnvironment(network.AdapterId, string.Empty),
+            TimeSpan.FromSeconds(25),
             cancellationToken).ConfigureAwait(false);
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -84,6 +84,10 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
                 RegistryValues = property.RegistryValues,
                 ValidRegistryValues = property.ValidRegistryValues,
             }).ToList(),
+            RscIPv4Operational = dto.Rsc?.IPv4Operational,
+            RscIPv6Operational = dto.Rsc?.IPv6Operational,
+            RssEnabled = dto.Rss?.Enabled,
+            RssMaxProcessors = dto.Rss?.MaxProcessors,
         };
     }
 
@@ -146,10 +150,22 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
         return outcome;
     }
 
+    /// <summary>
+    /// The fixed names the scripts read, plus the allow-lists they enforce.
+    /// </summary>
+    /// <remarks>
+    /// The lists are passed in rather than written into the scripts so the catalogue in
+    /// C# stays the only place that decides what may be touched, and so a test can prove
+    /// what that list does and does not contain.
+    /// </remarks>
     private static Dictionary<string, string?> BuildEnvironment(string adapterId, string propertyName) => new()
     {
         ["DPI_BYPASS_ADAPTER_ID"] = adapterId,
         ["DPI_BYPASS_PROPERTY"] = propertyName,
+        ["DPI_BYPASS_KEYWORDS"] = JsonSerializer.Serialize(AdapterInterventionCatalog.WritableKeywords),
+        ["DPI_BYPASS_FORBIDDEN"] = JsonSerializer.Serialize(AdapterInterventionCatalog.ForbiddenKeywords),
+        ["DPI_BYPASS_POWER_WRITE"] = JsonSerializer.Serialize(AdapterInterventionCatalog.WritablePowerProperties),
+        ["DPI_BYPASS_POWER_RESTORE"] = JsonSerializer.Serialize(AdapterInterventionCatalog.RestorablePowerProperties),
     };
 
     private static Task<ProcessResult> RunAsync(
@@ -193,6 +209,22 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
         public bool Virtual { get; init; }
         public PowerDto? Power { get; init; }
         public List<AdvancedPropertyDto> AdvancedProperties { get; init; } = [];
+        public RscDto? Rsc { get; init; }
+        public RssDto? Rss { get; init; }
+    }
+
+    private sealed record RscDto
+    {
+        public bool IPv4Enabled { get; init; }
+        public bool IPv6Enabled { get; init; }
+        public bool IPv4Operational { get; init; }
+        public bool IPv6Operational { get; init; }
+    }
+
+    private sealed record RssDto
+    {
+        public bool Enabled { get; init; }
+        public int MaxProcessors { get; init; }
     }
 
     private sealed record PowerDto
@@ -249,10 +281,17 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
             $power = Get-NetAdapterPowerManagement -Name $adapter.Name -ErrorAction Stop
         } catch { }
 
+        # Only the keywords this build is allowed to write are even read, and they are
+        # matched on RegistryKeyword. DisplayName and DisplayValue are never touched
+        # because Windows localises both.
+        $wanted = @($env:DPI_BYPASS_KEYWORDS | ConvertFrom-Json | ForEach-Object { [string]$_ })
+        $forbidden = @($env:DPI_BYPASS_FORBIDDEN | ConvertFrom-Json | ForEach-Object { [string]$_ })
+
         $advanced = @()
         try {
             $advanced = @(Get-NetAdapterAdvancedProperty -Name $adapter.Name -AllProperties -ErrorAction Stop |
-                Where-Object { $_.RegistryKeyword -eq '*InterruptModeration' } |
+                Where-Object { $wanted -contains [string]$_.RegistryKeyword } |
+                Where-Object { $forbidden -notcontains [string]$_.RegistryKeyword } |
                 ForEach-Object {
                     [pscustomobject]@{
                         RegistryKeyword = [string]$_.RegistryKeyword
@@ -260,6 +299,32 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
                         ValidRegistryValues = @($_.ValidRegistryValues | ForEach-Object { [string]$_ })
                     }
                 })
+        } catch { }
+
+        # Whether RSC is actually operational is not the same question as whether the
+        # keyword is set, and the difference is worth reporting rather than guessing.
+        $rsc = $null
+        try {
+            $state = Get-NetAdapterRsc -Name $adapter.Name -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $state) {
+                $rsc = [pscustomobject]@{
+                    IPv4Enabled = [bool]$state.IPv4Enabled
+                    IPv6Enabled = [bool]$state.IPv6Enabled
+                    IPv4Operational = [bool]$state.IPv4Operational
+                    IPv6Operational = [bool]$state.IPv6Operational
+                }
+            }
+        } catch { }
+
+        $rss = $null
+        try {
+            $state = Get-NetAdapterRss -Name $adapter.Name -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $state) {
+                $rss = [pscustomobject]@{
+                    Enabled = [bool]$state.Enabled
+                    MaxProcessors = [int]$state.MaxProcessors
+                }
+            }
         } catch { }
 
         [pscustomobject]@{
@@ -275,6 +340,8 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
                 D0PacketCoalescing = Read-PowerState $power 'D0PacketCoalescing'
             }
             AdvancedProperties = $advanced
+            Rsc = $rsc
+            Rss = $rss
         } | ConvertTo-Json -Depth 6 -Compress
         """;
 
@@ -299,18 +366,31 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
                 return
             }
 
-            $property = $env:DPI_BYPASS_PROPERTY
-            if ($property -in @('SelectiveSuspend', 'DeviceSleepOnDisconnect', 'D0PacketCoalescing')) {
+            $property = [string]$env:DPI_BYPASS_PROPERTY
+            $keywords = @($env:DPI_BYPASS_KEYWORDS | ConvertFrom-Json | ForEach-Object { [string]$_ })
+            $forbidden = @($env:DPI_BYPASS_FORBIDDEN | ConvertFrom-Json | ForEach-Object { [string]$_ })
+            $powerWritable = @($env:DPI_BYPASS_POWER_WRITE | ConvertFrom-Json | ForEach-Object { [string]$_ })
+
+            # Checksum offloads are refused here as well as in the catalogue. Microsoft's
+            # guidance is that they should always be enabled, and RSS, RSC and LSO all
+            # depend on them, so there is no path through this script that turns one off.
+            if ($forbidden -contains $property) {
+                Result $false 'Sağlama toplamı devri bu uygulama tarafından hiçbir koşulda değiştirilmez.'
+                return
+            }
+
+            if ($powerWritable -contains $property) {
                 $value = [int]$env:DPI_BYPASS_POWER_VALUE
                 switch ($property) {
                     'SelectiveSuspend' {
                         Set-NetAdapterPowerManagement -Name $adapter.Name -SelectiveSuspend $value -NoRestart -Confirm:$false -ErrorAction Stop
                     }
-                    'DeviceSleepOnDisconnect' {
-                        Set-NetAdapterPowerManagement -Name $adapter.Name -DeviceSleepOnDisconnect $value -NoRestart -Confirm:$false -ErrorAction Stop
-                    }
                     'D0PacketCoalescing' {
                         Set-NetAdapterPowerManagement -Name $adapter.Name -D0PacketCoalescing $value -NoRestart -Confirm:$false -ErrorAction Stop
+                    }
+                    default {
+                        Result $false 'İzin verilmeyen güç yönetimi özelliği reddedildi.'
+                        return
                     }
                 }
 
@@ -320,7 +400,7 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
                 return
             }
 
-            if ($property -eq '*InterruptModeration') {
+            if ($keywords -contains $property) {
                 $current = Get-NetAdapterAdvancedProperty -Name $adapter.Name -RegistryKeyword $property -AllProperties -ErrorAction Stop
                 $values = @($env:DPI_BYPASS_REGISTRY_VALUES | ConvertFrom-Json | ForEach-Object { [string]$_ })
                 $valid = @($current.ValidRegistryValues | ForEach-Object { [string]$_ })
@@ -364,9 +444,18 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
                 return
             }
 
-            $property = $env:DPI_BYPASS_PROPERTY
+            $property = [string]$env:DPI_BYPASS_PROPERTY
+            $keywords = @($env:DPI_BYPASS_KEYWORDS | ConvertFrom-Json | ForEach-Object { [string]$_ })
+            $forbidden = @($env:DPI_BYPASS_FORBIDDEN | ConvertFrom-Json | ForEach-Object { [string]$_ })
+            $powerRestorable = @($env:DPI_BYPASS_POWER_RESTORE | ConvertFrom-Json | ForEach-Object { [string]$_ })
+
+            if ($forbidden -contains $property) {
+                Result 'MissingProperty' 'Sağlama toplamı devri bu uygulama tarafından yönetilmez.'
+                return
+            }
+
             if ($env:DPI_BYPASS_SETTING_KIND -eq 'PowerManagement') {
-                if ($property -notin @('SelectiveSuspend', 'DeviceSleepOnDisconnect', 'D0PacketCoalescing')) {
+                if ($powerRestorable -notcontains $property) {
                     Result 'MissingProperty' 'Snapshot içindeki özellik bu sürüm tarafından yönetilmiyor.'
                     return
                 }
@@ -406,6 +495,11 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
             }
 
             if ($env:DPI_BYPASS_SETTING_KIND -eq 'AdvancedProperty') {
+                if ($keywords -notcontains $property) {
+                    Result 'MissingProperty' 'Snapshot içindeki anahtar bu sürüm tarafından yönetilmiyor.'
+                    return
+                }
+
                 $current = Get-NetAdapterAdvancedProperty -Name $adapter.Name -RegistryKeyword $property -AllProperties -ErrorAction SilentlyContinue
                 if ($null -eq $current) {
                     Result 'MissingProperty' 'Sürücü güncellemesinden sonra gelişmiş özellik bulunamadı.'
