@@ -56,4 +56,24 @@ public sealed class UiMarkupTests
             "270",
             document.Descendants().Attributes("Width").Select(attribute => attribute.Value));
     }
+
+    [Fact]
+    public void VodafoneFeatureIdentityAndHotspotDiagnosticsAreBothPresent()
+    {
+        var document = XDocument.Load(FindMainWindow());
+        var markup = document.ToString(SaveOptions.DisableFormatting);
+
+        Assert.Contains("Vodafone Sınırsız Modu", markup, StringComparison.Ordinal);
+        Assert.Contains("{Binding VodafoneModeEnabled, Mode=TwoWay}", markup, StringComparison.Ordinal);
+        Assert.Contains("{Binding VodafoneStatusLine}", markup, StringComparison.Ordinal);
+        Assert.Contains("{Binding VodafoneNetworks}", markup, StringComparison.Ordinal);
+        Assert.Contains("{Binding ForgetVodafoneNetworkCommand}", markup, StringComparison.Ordinal);
+
+        Assert.Contains("{Binding HotspotDiagnostics, Mode=TwoWay}", markup, StringComparison.Ordinal);
+        Assert.Contains("{Binding HotspotDiagnoseCommand}", markup, StringComparison.Ordinal);
+        Assert.Contains("{Binding HotspotCleanupCommand}", markup, StringComparison.Ordinal);
+        Assert.Contains("{Binding HotspotStatusLine}", markup, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("Vodafone sınırsız modu&quot; (hotspot TTL yeniden yazımı) kaldırıldı", markup, StringComparison.OrdinalIgnoreCase);
+    }
 }

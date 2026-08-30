@@ -49,6 +49,8 @@ public sealed record DomainEntry(string Domain, DomainOrigin Origin)
     public bool CanRemove => true;
 }
 
+public sealed record VodafoneNetworkEntry(string Key, string Display);
+
 public sealed record RecheckOption(int Seconds, string Display)
 {
     public override string ToString() => Display;
@@ -104,6 +106,8 @@ public sealed class MainViewModel : ObservableObject
     private string _domainStatus = string.Empty;
     private string _domainStatusSeverity = string.Empty;
     private string _domainFilter = string.Empty;
+    private VodafoneNetworkEntry? _selectedVodafoneNetwork;
+    private string _vodafoneStatusLine = "Kapalı.";
     private bool _isTuning;
     private bool _suppressPersist;
 
@@ -202,6 +206,9 @@ public sealed class MainViewModel : ObservableObject
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
         HotspotDiagnoseCommand = new AsyncRelayCommand(RunHotspotDiagnosticsAsync, () => !_isHotspotBusy);
         HotspotCleanupCommand = new RelayCommand(CleanUpLegacyHotspot);
+        ForgetVodafoneNetworkCommand = new RelayCommand(
+            ForgetSelectedVodafoneNetwork,
+            () => _selectedVodafoneNetwork is not null);
         ClearDomainFilterCommand = new RelayCommand(() => DomainFilter = string.Empty, () => HasFilter);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
@@ -213,6 +220,7 @@ public sealed class MainViewModel : ObservableObject
         AppLog.Written += OnLogWritten;
 
         RefreshDomains();
+        RefreshVodafoneNetworks();
         RefreshHotspotStatus();
 
         foreach (var entry in AppLog.Snapshot())
@@ -248,6 +256,8 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>The full protected domain list: shipped, discovered and hand-added.</summary>
     public ObservableCollection<DomainEntry> Domains { get; } = [];
 
+    public ObservableCollection<VodafoneNetworkEntry> VodafoneNetworks { get; } = [];
+
     public AsyncRelayCommand ToggleCommand { get; }
 
     public AsyncRelayCommand TestCommand { get; }
@@ -269,6 +279,8 @@ public sealed class MainViewModel : ObservableObject
     public AsyncRelayCommand HotspotDiagnoseCommand { get; }
 
     public RelayCommand HotspotCleanupCommand { get; }
+
+    public RelayCommand ForgetVodafoneNetworkCommand { get; }
 
     public RelayCommand ClearDomainFilterCommand { get; }
 
@@ -756,7 +768,45 @@ public sealed class MainViewModel : ObservableObject
         Raise(nameof(DomainsViewEmpty));
     }
 
-    // --- Mobil hotspot uyumluluğu ve tanılama --------------------------------
+    // --- Vodafone Sınırsız Modu / hotspot diagnostics ------------------------
+
+    /// <summary>
+    /// The restored product feature controls safe per-network compatibility checks.
+    /// It never enables the retired TTL/accounting rewrite.
+    /// </summary>
+    public bool VodafoneModeEnabled
+    {
+        get => _service.Settings.VodafoneModeEnabled;
+        set
+        {
+            if (_service.Settings.VodafoneModeEnabled == value)
+            {
+                return;
+            }
+
+            try
+            {
+                if (value)
+                {
+                    _service.EnableVodafoneModeHere();
+                }
+                else
+                {
+                    _service.DisableVodafoneMode();
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                Raise();
+                VodafoneStatusLine = ex.Message;
+                return;
+            }
+
+            Raise();
+            Raise(nameof(HotspotDiagnostics));
+            RefreshVodafoneNetworks();
+        }
+    }
 
     /// <summary>
     /// Whether moving to a different network runs the checks by itself.
@@ -799,6 +849,24 @@ public sealed class MainViewModel : ObservableObject
         private set => Set(ref _hotspotStatusLine, value);
     }
 
+    public string VodafoneStatusLine
+    {
+        get => _vodafoneStatusLine;
+        private set => Set(ref _vodafoneStatusLine, value);
+    }
+
+    public VodafoneNetworkEntry? SelectedVodafoneNetwork
+    {
+        get => _selectedVodafoneNetwork;
+        set
+        {
+            if (Set(ref _selectedVodafoneNetwork, value))
+            {
+                ForgetVodafoneNetworkCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
     private async Task RunHotspotDiagnosticsAsync()
     {
         IsHotspotBusy = true;
@@ -825,6 +893,50 @@ public sealed class MainViewModel : ObservableObject
         var migration = _service.CleanUpLegacyHotspotConfiguration();
         HotspotStatusLine = migration.Summary;
         Raise(nameof(HotspotDiagnostics));
+        Raise(nameof(VodafoneModeEnabled));
+        RefreshVodafoneNetworks();
+    }
+
+    private void ForgetSelectedVodafoneNetwork()
+    {
+        if (_selectedVodafoneNetwork is not { } network)
+        {
+            return;
+        }
+
+        _service.ForgetVodafoneNetwork(network.Key);
+        RefreshVodafoneNetworks();
+    }
+
+    private void RefreshVodafoneNetworks()
+    {
+        VodafoneNetworks.Clear();
+        foreach (var network in _service.Settings.VodafoneModeNetworks)
+        {
+            var name = string.IsNullOrWhiteSpace(network.DisplayName) ? network.Key : network.DisplayName;
+            var adapter = string.IsNullOrWhiteSpace(network.AdapterName) ? string.Empty : $"  ({network.AdapterName})";
+            VodafoneNetworks.Add(new VodafoneNetworkEntry(network.Key, name + adapter));
+        }
+
+        SelectedVodafoneNetwork = null;
+        RefreshVodafoneModeStatus();
+    }
+
+    private void RefreshVodafoneModeStatus()
+    {
+        var status = _service.HotspotStatus;
+        VodafoneStatusLine = status switch
+        {
+            { VodafoneModeEnabled: false } =>
+                "Kapalı. Tanılama düğmesi yine de kullanılabilir; kayıtlı ağlar silinmez.",
+            { RegisteredHere: true } =>
+                $"Etkin · {status.NetworkName} · otomatik tanılama "
+                    + (status.DiagnosticsEnabled ? "açık" : "kapalı"),
+            { RegisteredNetworks: 0 } =>
+                "Etkin · PR #11'den ağ kaydı kurtarılamadı; otomatik tanılama şimdilik tüm ağlarda çalışır. "
+                    + "Bağlı olduğunuz ağı kaydetmek için modu kapatıp yeniden açın.",
+            _ => $"Etkin, ancak bu ağ ('{status.NetworkName}') kayıtlı değil.",
+        };
     }
 
     private void RefreshHotspotStatus()
@@ -844,10 +956,7 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        HotspotStatusLine = status.LegacyCleanedAt is { } cleaned
-            ? $"Eski hotspot TTL yapılandırması {cleaned.LocalDateTime:yyyy-MM-dd} tarihinde temizlendi.\n"
-                + "Bağlantıyı incelemek için \u201cTanıla\u201d düğmesine basın."
-            : "Henüz çalıştırılmadı. Telefonunuzun paylaşımına bağlıyken \u201cTanıla\u201d düğmesine basın.";
+        HotspotStatusLine = "Henüz çalıştırılmadı. Telefonunuzun paylaşımına bağlıyken \u201cTanıla\u201d düğmesine basın.";
     }
 
     public bool StartEngineOnLaunch
@@ -1029,6 +1138,9 @@ public sealed class MainViewModel : ObservableObject
         }
 
         RefreshCounters();
+        Raise(nameof(VodafoneModeEnabled));
+        Raise(nameof(HotspotDiagnostics));
+        RefreshVodafoneNetworks();
         RefreshHotspotStatus();
         _lowLatencyMode = _service.Settings.LowLatencyMode;
         Raise(nameof(LowLatencyMode));

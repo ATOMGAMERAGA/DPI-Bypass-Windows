@@ -64,16 +64,26 @@ public sealed class ControlCommands
                 return ControlResponse.Success(DescribeHotspot());
 
             case ControlProtocol.Commands.HotspotCleanup:
-            case ControlProtocol.Commands.VodafoneOff:
             {
                 var migration = _service.CleanUpLegacyHotspotConfiguration();
                 return ControlResponse.Success($"{migration.Summary}\n{DescribeHotspot()}");
             }
 
             case ControlProtocol.Commands.VodafoneOn:
-                return ControlResponse.Failure(
-                    "Hotspot TTL modu kaldırıldı ve yapılandırması temizlendi. "
-                    + "Yerine 'hotspot diagnose' bağlantıyı değiştirmeden inceler.");
+                try
+                {
+                    _service.EnableVodafoneModeHere();
+                    return ControlResponse.Success(DescribeHotspot());
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return ControlResponse.Failure(ex.Message);
+                }
+
+            case ControlProtocol.Commands.VodafoneOff:
+                _service.DisableVodafoneMode();
+                _service.CleanUpLegacyHotspotConfiguration();
+                return ControlResponse.Success(DescribeHotspot());
 
             case ControlProtocol.Commands.VodafoneStatus:
                 return ControlResponse.Success(DescribeHotspot());
@@ -125,7 +135,7 @@ public sealed class ControlCommands
         builder.AppendLine($"Kapsam      : {ProtectionService.DescribeScope(_service.Settings.Scope)}");
         builder.AppendLine($"DNS         : {DescribeDns()}");
         builder.AppendLine($"Alan adları : {_service.ProtectedDomainCount} ({_service.LearnedDomains.Count} kendiliğinden bulundu)");
-        builder.AppendLine($"Hotspot     : {DescribeHotspot()}");
+        builder.AppendLine($"Vodafone modu: {DescribeHotspot()}");
         builder.AppendLine($"Ping düşürme: {DescribeLatency().Replace(Environment.NewLine, " · ")}");
 
         if (stats is not null)
@@ -157,11 +167,21 @@ public sealed class ControlCommands
         var status = _service.HotspotStatus;
         var builder = new StringBuilder();
 
-        builder.Append(status.DiagnosticsEnabled ? "tanılama açık" : "tanılama kapalı");
+        builder.Append(status.VodafoneModeEnabled ? "etkin" : "kapalı");
+
+        if (status.VodafoneModeEnabled)
+        {
+            builder.Append(status.RegisteredHere
+                ? $" · {status.NetworkName} kayıtlı"
+                : $" · bu ağ ('{status.NetworkName}') kayıtlı değil");
+        }
+
+        builder.Append(status.DiagnosticsEnabled ? " · otomatik tanılama açık" : " · otomatik tanılama kapalı");
+        builder.Append($" · kayıtlı ağ {status.RegisteredNetworks}");
 
         if (status.LegacyCleanedAt is { } cleaned)
         {
-            builder.Append($" · eski TTL yapılandırması {cleaned.LocalDateTime:yyyy-MM-dd} tarihinde temizlendi");
+            builder.Append($" · eski TTL alt özelliği {cleaned.LocalDateTime:yyyy-MM-dd} tarihinde devre dışı bırakıldı");
         }
 
         if (status.LastResult is { } last)

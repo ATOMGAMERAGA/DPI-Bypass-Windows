@@ -252,7 +252,7 @@ jobs:
           - 14 atlatma yöntemi; ağa göre en hızlısı gerçek bağlantı testleriyle ölçülerek seçilir.
           - Ağ değiştiğinde çalışan yöntem arka planda yeniden bulunur, düzenli denetimle doğrulanır.
           - Yeni engelli siteler kendiliğinden ölçülüp listeye eklenir; liste arayüzden düzenlenebilir.
-          - Mobil hotspot uyumluluğu ve tanılama: IPv4/IPv6, DNS, RTT, kayıp, MTU ve operatör NAT'ı kontrolü — hiçbir şeyi değiştirmeden.
+          - Vodafone Sınırsız Modu: ağ tercihleri ile IPv4/IPv6, DNS, RTT, kayıp, MTU ve en iyi çaba VPN tanılaması; eski TTL/kota gizleme mekanizması yoktur.
           - Beta Ping Düşürme: eşli A/B turlarıyla median/p95/p99/jitter ölçer; kazanç tekrarlanmazsa ayarı geri alır.
           - Şifreli DNS: Cloudflare birincil, Google ve Quad9 yedek.
           - Kapsam seçimi: yalnızca Discord, engelli site listesi, + tarayıcılar veya tüm sistem.

@@ -5,19 +5,18 @@ using Xunit;
 namespace DpiBypass.Tests;
 
 /// <summary>
-/// Retiring the hotspot TTL rewrite from a settings file.
+/// Retiring only the hotspot TTL rewrite while preserving the Vodafone feature.
 /// </summary>
 /// <remarks>
-/// The property being pinned is that no file - old, hand-edited, restored from a backup -
-/// can leave the retired mode switched on, and that running the cleanup again never does
-/// anything a second time.
+/// The property being pinned is that no file can leave the retired packet rewrite on,
+/// while reusable networks and unrelated preferences survive an idempotent migration.
 /// </remarks>
 public sealed class HotspotLegacyMigrationTests
 {
     private static readonly DateTimeOffset Now = new(2026, 8, 29, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public void AConfigWithTheOldModeEnabledIsCleanedAndTheReplacementSwitchedOn()
+    public void AConfigWithTheOldModeEnabledPreservesTheFeatureAndItsNetworks()
     {
         var settings = LegacySettings(enabled: true, networks: 3);
 
@@ -25,20 +24,23 @@ public sealed class HotspotLegacyMigrationTests
 
         Assert.True(migration.Changed);
         Assert.True(migration.LegacyWasEnabled);
-        Assert.Equal(3, migration.ClearedNetworks);
+        Assert.Equal(3, migration.MigratedNetworks);
 
         Assert.False(settings.HotspotTtlFix);
         Assert.Empty(settings.HotspotTtlNetworks);
+        Assert.True(settings.VodafoneModeEnabled);
+        Assert.Equal(3, settings.VodafoneModeNetworks.Count);
         Assert.True(settings.HotspotDiagnostics);
         Assert.Equal(Now, settings.HotspotLegacyMigratedAt);
+        Assert.Equal(Now, settings.VodafoneModeRestoredAt);
     }
 
     /// <summary>
-    /// Somebody who had the mode switched off but still had networks remembered gets the
-    /// list cleared without a feature they never used being turned on for them.
+    /// Somebody who had the mode switched off keeps their remembered networks without a
+    /// feature they were not using being turned on for them.
     /// </summary>
     [Fact]
-    public void RememberedNetworksAreClearedWithoutEnablingAnythingNew()
+    public void RememberedNetworksAreMigratedWithoutEnablingAnythingNew()
     {
         var settings = LegacySettings(enabled: false, networks: 2);
 
@@ -47,6 +49,8 @@ public sealed class HotspotLegacyMigrationTests
         Assert.True(migration.Changed);
         Assert.False(migration.LegacyWasEnabled);
         Assert.Empty(settings.HotspotTtlNetworks);
+        Assert.Equal(2, settings.VodafoneModeNetworks.Count);
+        Assert.False(settings.VodafoneModeEnabled);
         Assert.False(settings.HotspotDiagnostics);
     }
 
@@ -59,6 +63,8 @@ public sealed class HotspotLegacyMigrationTests
 
         Assert.False(migration.Changed);
         Assert.Null(settings.HotspotLegacyMigratedAt);
+        Assert.Null(settings.VodafoneModeRestoredAt);
+        Assert.False(settings.VodafoneModeEnabled);
         Assert.False(settings.HotspotDiagnostics);
     }
 
@@ -75,6 +81,9 @@ public sealed class HotspotLegacyMigrationTests
 
         // The marker records when it was actually done, not the last time it was checked.
         Assert.Equal(Now, settings.HotspotLegacyMigratedAt);
+        Assert.Equal(Now, settings.VodafoneModeRestoredAt);
+        Assert.True(settings.VodafoneModeEnabled);
+        Assert.Equal(2, settings.VodafoneModeNetworks.Count);
         Assert.True(settings.HotspotDiagnostics);
     }
 
@@ -100,6 +109,58 @@ public sealed class HotspotLegacyMigrationTests
 
         Assert.True(HotspotLegacyMigration.Apply(settings, Now).Changed);
         Assert.False(settings.HotspotTtlFix);
+    }
+
+    [Fact]
+    public void APr11SettingsFileHasItsFeatureIdentityRestoredOnce()
+    {
+        var settings = new AppSettings
+        {
+            HotspotDiagnostics = true,
+            HotspotLegacyMigratedAt = Now - TimeSpan.FromDays(1),
+        };
+
+        var first = HotspotLegacyMigration.Apply(settings, Now);
+        settings.VodafoneModeEnabled = false;
+        var second = HotspotLegacyMigration.Apply(settings, Now + TimeSpan.FromDays(1));
+
+        Assert.True(first.Changed);
+        Assert.True(first.VodafoneIdentityRestored);
+        Assert.False(second.Changed);
+        Assert.False(settings.VodafoneModeEnabled);
+        Assert.Equal(Now, settings.VodafoneModeRestoredAt);
+    }
+
+    [Fact]
+    public void ExistingSafeNetworkDetailsWinOverDuplicateLegacyData()
+    {
+        var settings = LegacySettings(enabled: true, networks: 1);
+        settings.VodafoneModeNetworks.Add(new VodafoneModeNetwork
+        {
+            Key = "network-0",
+            DisplayName = "current name",
+            AdapterName = "current adapter",
+        });
+
+        var migration = HotspotLegacyMigration.Apply(settings, Now);
+
+        Assert.Equal(1, migration.MigratedNetworks);
+        var network = Assert.Single(settings.VodafoneModeNetworks);
+        Assert.Equal("current name", network.DisplayName);
+        Assert.Equal("current adapter", network.AdapterName);
+    }
+
+    [Fact]
+    public void MigrationDoesNotDiscardOlderValidNetworkRegistrations()
+    {
+        var settings = LegacySettings(enabled: true, networks: 12);
+
+        var migration = HotspotLegacyMigration.Apply(settings, Now);
+
+        Assert.Equal(12, migration.MigratedNetworks);
+        Assert.Equal(12, settings.VodafoneModeNetworks.Count);
+        Assert.Equal("network-0", settings.VodafoneModeNetworks[0].Key);
+        Assert.Equal("network-11", settings.VodafoneModeNetworks[^1].Key);
     }
 
     private static AppSettings LegacySettings(bool enabled, int networks)
@@ -144,6 +205,12 @@ public sealed class HotspotConfigMigrationTests
 
         Assert.False(settings.HotspotTtlFix);
         Assert.Empty(settings.HotspotTtlNetworks);
+        Assert.Null(settings.HotspotTtlValue);
+        Assert.Null(settings.HotspotDropIPv6);
+        var preserved = Assert.Single(settings.VodafoneModeNetworks);
+        Assert.Equal("abc123", preserved.Key);
+        Assert.Equal("atom hotspot", preserved.DisplayName);
+        Assert.True(settings.VodafoneModeEnabled);
         Assert.True(settings.HotspotDiagnostics);
         Assert.NotNull(settings.HotspotLegacyMigratedAt);
     }
@@ -170,6 +237,32 @@ public sealed class HotspotConfigMigrationTests
     }
 
     [Fact]
+    public void LegacyPacketOptionsAloneAreRemovedWithoutChangingOtherPreferences()
+    {
+        using var directory = new TempDirectory();
+        var settingsPath = directory.File("settings.json");
+        File.WriteAllText(settingsPath, """
+            {
+              "HotspotTtlValue": 65,
+              "HotspotDropIPv6": true,
+              "StartEngineOnLaunch": false,
+              "ManualIspProfileId": "vodafone-mobile"
+            }
+            """);
+
+        var store = new ConfigStore(settingsPath, directory.File("networks.json"));
+        var settings = store.Load();
+        Assert.True(settings.LegacyHotspotCleaned);
+        store.Save(settings);
+
+        var onDisk = File.ReadAllText(settingsPath);
+        Assert.DoesNotContain("HotspotTtlValue", onDisk, StringComparison.Ordinal);
+        Assert.DoesNotContain("HotspotDropIPv6", onDisk, StringComparison.Ordinal);
+        Assert.Contains("\"StartEngineOnLaunch\": false", onDisk, StringComparison.Ordinal);
+        Assert.Contains("\"ManualIspProfileId\": \"vodafone-mobile\"", onDisk, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ANullNetworkListDoesNotThrowOnLoad()
     {
         using var directory = new TempDirectory();
@@ -178,6 +271,38 @@ public sealed class HotspotConfigMigrationTests
         var settings = new ConfigStore(directory.File("settings.json"), directory.File("networks.json")).Load();
 
         Assert.Empty(settings.HotspotTtlNetworks);
+    }
+
+    [Fact]
+    public void MigrationPreservesUnrelatedPreferences()
+    {
+        using var directory = new TempDirectory();
+        var settingsPath = directory.File("settings.json");
+        File.WriteAllText(settingsPath, """
+            {
+              "HotspotTtlFix": true,
+              "HotspotTtlNetworks": [
+                { "Key": "vodafone", "DisplayName": "phone", "AdapterName": "Wi-Fi" }
+              ],
+              "Scope": "Everything",
+              "DnsMode": "SystemDefault",
+              "StartEngineOnLaunch": false,
+              "StartMinimised": false,
+              "ExtraDomains": ["example.test"]
+            }
+            """);
+
+        var store = new ConfigStore(settingsPath, directory.File("networks.json"));
+        var settings = store.Load();
+        store.Save(settings);
+        var reloaded = store.Load();
+
+        Assert.Equal(Core.Engine.ProtectionScope.Everything, reloaded.Scope);
+        Assert.Equal(Core.Dns.DnsMode.SystemDefault, reloaded.DnsMode);
+        Assert.False(reloaded.StartEngineOnLaunch);
+        Assert.False(reloaded.StartMinimised);
+        Assert.Equal(["example.test"], reloaded.ExtraDomains);
+        Assert.Single(reloaded.VodafoneModeNetworks);
     }
 
     [Fact]
@@ -533,5 +658,38 @@ public sealed class HotspotVpnDetectionTests
             "WireGuard",
             "Wintun",
             hasUsableAddress: false));
+    }
+}
+
+/// <summary>The restored name and both CLI spellings remain wired to safe commands.</summary>
+public sealed class VodafoneCompatibilitySurfaceTests
+{
+    [Fact]
+    public void VodafoneCliVerbStillSupportsStatusOnOffDiagnoseAndCleanup()
+    {
+        var source = File.ReadAllText(RepoFiles.Find("src", "DpiBypass.App", "CommandLineTasks.cs"));
+
+        Assert.Contains("case \"vodafone\"", source, StringComparison.Ordinal);
+        Assert.Contains("ControlProtocol.Commands.VodafoneOn", source, StringComparison.Ordinal);
+        Assert.Contains("ControlProtocol.Commands.VodafoneOff", source, StringComparison.Ordinal);
+        Assert.Contains("ControlProtocol.Commands.VodafoneStatus", source, StringComparison.Ordinal);
+        Assert.Contains("ControlProtocol.Commands.HotspotDiagnose", source, StringComparison.Ordinal);
+        Assert.Contains("ControlProtocol.Commands.HotspotCleanup", source, StringComparison.Ordinal);
+        Assert.Contains("DpiBypass.exe vodafone [on|off]", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SafeVodafoneModeDoesNotRestoreTheDeletedPacketRewriteClasses()
+    {
+        var root = new DirectoryInfo(RepoFiles.Find("src", "DpiBypass.Core", "ProtectionService.cs")).Parent!;
+        var oldNamespace = Path.Combine(root.FullName, "Vodafone");
+        var service = File.ReadAllText(Path.Combine(root.FullName, "ProtectionService.cs"));
+
+        Assert.False(File.Exists(Path.Combine(oldNamespace, "HotspotTtlFix.cs")));
+        Assert.False(File.Exists(Path.Combine(oldNamespace, "TtlFixSettings.cs")));
+        Assert.DoesNotContain("ApplyTtlFix", service, StringComparison.Ordinal);
+        Assert.DoesNotContain("HotspotTtlFix _", service, StringComparison.Ordinal);
+        Assert.DoesNotContain("HotspotTtlValue", service, StringComparison.Ordinal);
+        Assert.DoesNotContain("HotspotDropIPv6", service, StringComparison.Ordinal);
     }
 }

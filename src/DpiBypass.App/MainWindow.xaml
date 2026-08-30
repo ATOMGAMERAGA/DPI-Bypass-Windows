@@ -704,61 +704,90 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- ===== Mobil hotspot uyumluluğu ve tanılama ===== -->
+                        <!-- ===== Vodafone Sınırsız Modu ===== -->
                         <Border Style="{StaticResource CardStyle}">
-                            <StackPanel>
-                                <TextBlock Text="Mobil hotspot uyumluluğu ve tanılama"
-                                           Style="{StaticResource SectionTitleStyle}"
-                                           Margin="0,0,0,8" />
+                            <Expander Style="{StaticResource AdvancedExpanderStyle}">
+                                <Expander.Header>
+                                    <TextBlock Text="Vodafone Sınırsız Modu"
+                                               Style="{StaticResource SectionTitleStyle}"
+                                               Margin="0" />
+                                </Expander.Header>
+                                <StackPanel>
+                                    <TextBlock Style="{StaticResource CaptionStyle}"
+                                               Text="Vodafone mobil bağlantıları ve telefon paylaşımı için ağ bazlı uyumluluk ve tanılama sunar: IPv4/IPv6, DNS, gecikme, kayıp, MTU, bağdaştırıcı ve olası etkin VPN incelenir. Ölçüm sıradan ağ tanılama paketleri gönderir; kalıcı ağ ayarı veya trafik sınıflandırma kuralı oluşturmaz." />
 
-                                <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Text="Telefon paylaşımı ve mobil veri bağlantılarını inceler: IPv4/IPv6 adresi ve erişimi, DNS, gecikme ve kayıp, MTU sınırı, yerel adres aralığı ve olası etkin VPN. Kalıcı ayar veya kural değiştirmez; ölçüm için sıradan ağ tanılama paketleri gönderir." />
-
-                                <CheckBox Content="Ağ değiştiğinde bağlantıyı kendiliğinden incele"
-                                          Margin="0,16,0,0"
-                                          Style="{StaticResource SwitchStyle}"
-                                          IsChecked="{Binding HotspotDiagnostics, Mode=TwoWay}" />
-                                <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Margin="26,4,0,0"
-                                           Text="Başka bir ağa geçildiğinde kısa bir inceleme çalıştırır ve sonucu günlüğe yazar. Kapalıyken yalnızca “Tanıla” düğmesiyle çalışır." />
-
-                                <ProgressBar Height="3"
-                                             Margin="0,14,0,0"
-                                             IsIndeterminate="{Binding IsHotspotBusy}"
-                                             Background="{DynamicResource AppSubtleBackgroundBrush}"
-                                             Foreground="{DynamicResource AppAccentBrush}" />
-
-                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,10,0,0">
-                                    <TextBlock Text="{Binding HotspotStatusLine}"
+                                    <CheckBox Content="Bu ağda Vodafone Sınırsız Modu'nu etkinleştir"
+                                              Margin="0,14,0,0"
+                                              Style="{StaticResource SwitchStyle}"
+                                              IsChecked="{Binding VodafoneModeEnabled, Mode=TwoWay}" />
+                                    <TextBlock Text="{Binding VodafoneStatusLine}"
                                                Style="{StaticResource MonospaceStyle}"
+                                               Margin="26,6,0,0"
                                                TextWrapping="Wrap" />
-                                </Border>
 
-                                <WrapPanel Margin="0,12,0,0">
-                                    <Button Content="Tanıla"
-                                            MinWidth="130"
-                                            Margin="0,0,8,0"
-                                            Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding HotspotDiagnoseCommand}" />
-                                    <Button Content="Eski yapılandırmayı temizle"
-                                            MinWidth="220"
-                                            Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding HotspotCleanupCommand}" />
-                                </WrapPanel>
+                                    <CheckBox Content="Kayıtlı ağa geçildiğinde bağlantıyı kendiliğinden incele"
+                                              Margin="0,14,0,0"
+                                              Style="{StaticResource SwitchStyle}"
+                                              IsChecked="{Binding HotspotDiagnostics, Mode=TwoWay}" />
+                                    <TextBlock Style="{StaticResource CaptionStyle}"
+                                               Margin="26,4,0,0"
+                                               Text="Kısa bir inceleme çalıştırır ve sonucu günlüğe yazar. Kapalıyken “Tanıla” düğmesi yine kullanılabilir." />
 
-                                <Border Style="{StaticResource NoticeCardStyle}" Margin="0,16,0,0">
+                                    <ProgressBar Height="3"
+                                                 Margin="0,14,0,0"
+                                                 IsIndeterminate="{Binding IsHotspotBusy}"
+                                                 Background="{DynamicResource AppSubtleBackgroundBrush}"
+                                                 Foreground="{DynamicResource AppAccentBrush}" />
+
+                                    <Border Style="{StaticResource StatusPanelStyle}" Margin="0,10,0,0">
+                                        <TextBlock Text="{Binding HotspotStatusLine}"
+                                                   Style="{StaticResource MonospaceStyle}"
+                                                   TextWrapping="Wrap" />
+                                    </Border>
+
+                                    <WrapPanel Margin="0,12,0,0">
+                                        <Button Content="Tanıla"
+                                                MinWidth="130"
+                                                Margin="0,0,8,0"
+                                                Style="{StaticResource SecondaryActionButtonStyle}"
+                                                Command="{Binding HotspotDiagnoseCommand}" />
+                                        <Button Content="Eski TTL alt özelliğini temizle"
+                                                MinWidth="230"
+                                                Style="{StaticResource SecondaryActionButtonStyle}"
+                                                Command="{Binding HotspotCleanupCommand}" />
+                                    </WrapPanel>
+
+                                    <TextBlock Text="Vodafone modu için kayıtlı ağlar"
+                                               Style="{StaticResource FieldLabelStyle}"
+                                               Margin="0,16,0,4" />
+                                    <TextBlock Style="{StaticResource CaptionStyle}"
+                                               Margin="0,0,0,6"
+                                               Text="Eski sürümlerde kaydedilmiş ağlar güvenli tanılama listesine taşınır; mod kapatıldığında liste silinmez." />
+                                    <Border Style="{StaticResource MonoPanelStyle}" Padding="6">
+                                        <ListBox Style="{StaticResource MonospaceListStyle}"
+                                                 ItemContainerStyle="{StaticResource DomainRowStyle}"
+                                                 MaxHeight="140"
+                                                 ItemsSource="{Binding VodafoneNetworks}"
+                                                 DisplayMemberPath="Display"
+                                                 SelectedItem="{Binding SelectedVodafoneNetwork, Mode=TwoWay}" />
+                                    </Border>
+                                    <Button Content="Seçili ağı unut"
+                                            MinWidth="150"
+                                            Margin="0,8,0,0"
+                                            HorizontalAlignment="Left"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding ForgetVodafoneNetworkCommand}" />
+
                                     <StackPanel>
-                                        <TextBlock Style="{StaticResource NoticeTextStyle}"
-                                                   Text="Eski &quot;Vodafone sınırsız modu&quot; (hotspot TTL yeniden yazımı) kaldırıldı. Operatörün paylaşım sayacını atlatmayı amaçlıyordu; bu abonelik koşullarına aykırıydı ve uygulamanın çözebileceği bir sorun değil." />
                                         <TextBlock Style="{StaticResource CaptionStyle}"
-                                                   Margin="0,8,0,0"
-                                                   Text="Eski sürümden gelen ayar dosyaları her açılışta otomatik olarak temizlenir: TTL yeniden yazımı kapatılır, kayıtlı ağ listesi silinir ve yerine bu tanılama açılır. Yedekten dönen veya elle düzenlenen bir dosya da modu geri getiremez." />
+                                                   Margin="0,14,0,0"
+                                                   Text="Geri yüklenen özellik: Vodafone Sınırsız Modu adı, ağ tercihleri, durum, tanılama ve kurtarma araçları." />
                                         <TextBlock Style="{StaticResource CaptionStyle}"
-                                                   Margin="0,8,0,0"
-                                                   Text="Plan / hotspot hakkınız TTL, SSID, operatör adı, APN veya IP aralığından anlaşılamaz; uygulama tahmin etmek yerine &quot;Bilinmiyor&quot; der." />
+                                                   Margin="0,4,0,0"
+                                                   Text="Geri getirilmeyen alt özellik: hotspot kotasını gizlemek için paket TTL'sini yeniden yazma ve IPv6'yı düşürme. Plan / hotspot hakkı tanılamada &quot;Bilinmiyor&quot; olarak kalır." />
                                     </StackPanel>
-                                </Border>
-                            </StackPanel>
+                                </StackPanel>
+                            </Expander>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>

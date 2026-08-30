@@ -1,5 +1,6 @@
 using DpiBypass.Core;
 using DpiBypass.Core.Config;
+using DpiBypass.Core.Ipc;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
 using DpiBypass.Tests.Latency;
@@ -134,7 +135,7 @@ public sealed class ProtectionServiceHotspotTests : IDisposable
     private readonly TempDirectory _directory = new("dpibypass-hotspot");
 
     [Fact]
-    public async Task ALegacyConfigIsCleanedAndPersistedWhenTheServiceIsBuilt()
+    public async Task ALegacyConfigIsSafelyMigratedAndPersistedWhenTheServiceIsBuilt()
     {
         File.WriteAllText(SettingsPath, """
             {
@@ -146,12 +147,17 @@ public sealed class ProtectionServiceHotspotTests : IDisposable
         await using var service = Build();
 
         Assert.False(service.Settings.HotspotTtlFix);
+        Assert.True(service.Settings.VodafoneModeEnabled);
+        Assert.Single(service.Settings.VodafoneModeNetworks);
         Assert.True(service.Settings.HotspotDiagnostics);
 
         // On disk, not only in memory: the next process to read this file, including the
         // uninstaller, must see the cleaned version.
         var onDisk = File.ReadAllText(SettingsPath);
         Assert.Contains("\"HotspotTtlFix\": false", onDisk, StringComparison.Ordinal);
+        Assert.Contains("\"VodafoneModeEnabled\": true", onDisk, StringComparison.Ordinal);
+        Assert.Contains("\"VodafoneModeNetworks\"", onDisk, StringComparison.Ordinal);
+        Assert.Contains("\"Key\": \"abc\"", onDisk, StringComparison.Ordinal);
         Assert.Contains("\"HotspotDiagnostics\": true", onDisk, StringComparison.Ordinal);
     }
 
@@ -232,6 +238,124 @@ public sealed class ProtectionServiceHotspotTests : IDisposable
         service.SetHotspotDiagnostics(true);
 
         Assert.Equal(written, File.GetLastWriteTimeUtc(SettingsPath));
+    }
+
+    [Fact]
+    public async Task NormalStartupDoesNotEraseUnrelatedConfiguration()
+    {
+        File.WriteAllText(SettingsPath, """
+            {
+              "HotspotTtlFix": true,
+              "HotspotTtlNetworks": [ { "Key": "abc", "DisplayName": "phone", "AdapterName": "Wi-Fi" } ],
+              "ManualIspProfileId": "vodafone-mobile",
+              "StartEngineOnLaunch": false,
+              "MinimiseToTrayOnClose": false,
+              "ExtraDomains": ["kept.example"]
+            }
+            """);
+
+        await using var service = Build();
+
+        Assert.Equal("vodafone-mobile", service.Settings.ManualIspProfileId);
+        Assert.False(service.Settings.StartEngineOnLaunch);
+        Assert.False(service.Settings.MinimiseToTrayOnClose);
+        Assert.Equal(["kept.example"], service.Settings.ExtraDomains);
+        Assert.Single(service.Settings.VodafoneModeNetworks);
+
+        var reloaded = new ConfigStore(SettingsPath, ProfilesPath).Load();
+        Assert.Equal("vodafone-mobile", reloaded.ManualIspProfileId);
+        Assert.False(reloaded.StartEngineOnLaunch);
+        Assert.False(reloaded.MinimiseToTrayOnClose);
+        Assert.Equal(["kept.example"], reloaded.ExtraDomains);
+        Assert.Single(reloaded.VodafoneModeNetworks);
+    }
+
+    [Fact]
+    public async Task SafeVodafoneModeRegistersTheNetworkWithoutInstallingTtlState()
+    {
+        await using var service = Build();
+        var network = new NetworkFingerprint
+        {
+            Ssid = "phone",
+            AdapterName = "Wi-Fi",
+            InterfaceIndex = 7,
+        };
+
+        service.EnableVodafoneMode(network);
+
+        Assert.True(service.Settings.VodafoneModeEnabled);
+        Assert.True(service.Settings.HotspotDiagnostics);
+        Assert.False(service.Settings.HotspotTtlFix);
+        Assert.Empty(service.Settings.HotspotTtlNetworks);
+        Assert.True(service.Settings.VodafoneNetworkRegistered(network.Key));
+        Assert.True(service.HotspotStatus.RegisteredHere);
+    }
+
+    [Fact]
+    public async Task DisablingAndCleanupPreserveSafeNetworksAndOtherPreferences()
+    {
+        await using var service = Build();
+        var network = new NetworkFingerprint { Ssid = "phone", InterfaceIndex = 7 };
+        service.Settings.ManualIspProfileId = "vodafone-mobile";
+        service.EnableVodafoneMode(network);
+
+        service.DisableVodafoneMode();
+        var first = service.CleanUpLegacyHotspotConfiguration();
+        var second = service.CleanUpLegacyHotspotConfiguration();
+
+        Assert.False(service.Settings.VodafoneModeEnabled);
+        Assert.False(service.Settings.HotspotDiagnostics);
+        Assert.True(service.Settings.VodafoneNetworkRegistered(network.Key));
+        Assert.Equal("vodafone-mobile", service.Settings.ManualIspProfileId);
+        Assert.False(first.Changed);
+        Assert.False(second.Changed);
+    }
+
+    [Fact]
+    public async Task VodafoneControlCommandsKeepStatusAndOffCompatibility()
+    {
+        await using var service = Build();
+        service.EnableVodafoneMode(new NetworkFingerprint { Ssid = "phone", InterfaceIndex = 7 });
+        var commands = new ControlCommands(service);
+
+        var status = await commands.HandleAsync(new ControlRequest
+        {
+            Command = ControlProtocol.Commands.VodafoneStatus,
+        });
+        var disabled = await commands.HandleAsync(new ControlRequest
+        {
+            Command = ControlProtocol.Commands.VodafoneOff,
+        });
+
+        Assert.True(status.Ok);
+        Assert.Contains("etkin", status.Text, StringComparison.Ordinal);
+        Assert.True(disabled.Ok);
+        Assert.Contains("kapalı", disabled.Text, StringComparison.Ordinal);
+        Assert.Single(service.Settings.VodafoneModeNetworks);
+    }
+
+    [Fact]
+    public void AutomaticDiagnosticsPreservePr11CompatibilityThenRespectRegisteredNetworks()
+    {
+        var current = new NetworkFingerprint { Ssid = "current", InterfaceIndex = 7 };
+        var other = new NetworkFingerprint { Ssid = "other", InterfaceIndex = 8 };
+        var settings = new AppSettings
+        {
+            VodafoneModeEnabled = true,
+            HotspotDiagnostics = true,
+        };
+
+        // PR #11 may already have erased the list. Do not silently turn off the
+        // automatic diagnostics it enabled for the affected user.
+        Assert.True(ProtectionService.ShouldRunHotspotDiagnostics(settings, current));
+
+        settings.RememberVodafoneNetwork(current.Key, current.DisplayName, "Wi-Fi");
+
+        Assert.True(ProtectionService.ShouldRunHotspotDiagnostics(settings, current));
+        Assert.False(ProtectionService.ShouldRunHotspotDiagnostics(settings, other));
+
+        settings.HotspotDiagnostics = false;
+        Assert.False(ProtectionService.ShouldRunHotspotDiagnostics(settings, current));
     }
 
     private string SettingsPath => Path.Combine(_directory.Path, "settings.json");

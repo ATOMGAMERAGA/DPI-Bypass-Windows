@@ -98,7 +98,16 @@ public sealed record AppSettings : IHotspotLegacyState
 
     public List<string> ExcludedDomains { get; set; } = [];
 
-    // --- Mobile hotspot ------------------------------------------------------------
+    // --- Vodafone Sınırsız Modu / mobile hotspot diagnostics ----------------------
+
+    /// <summary>
+    /// Keeps the Vodafone-branded compatibility feature available without enabling the
+    /// retired TTL/accounting rewrite.
+    /// </summary>
+    public bool VodafoneModeEnabled { get; set; }
+
+    /// <summary>Networks the user associated with the safe Vodafone mode, newest last.</summary>
+    public List<VodafoneModeNetwork> VodafoneModeNetworks { get; set; } = [];
 
     /// <summary>
     /// Run the read-only hotspot checks by themselves after a network change.
@@ -106,15 +115,19 @@ public sealed record AppSettings : IHotspotLegacyState
     /// <remarks>
     /// The checks - addressing, reachability, DNS, MTU - are what replaced the TTL
     /// rewrite, and they are always available on demand. This only decides whether
-    /// moving to a different network also runs them and logs the answer. It is switched
-    /// on automatically for anyone who had the old mode enabled, so the upgrade leaves
-    /// them with something rather than a missing feature.
+    /// moving to a Vodafone-mode network also runs them and logs the answer. It is
+    /// switched on automatically for anyone who had the old mode enabled.
     /// See <see cref="HotspotLegacyMigration"/>.
     /// </remarks>
     public bool HotspotDiagnostics { get; set; }
 
     /// <summary>When the retired hotspot TTL configuration was cleaned out of this file.</summary>
     public DateTimeOffset? HotspotLegacyMigratedAt { get; set; }
+
+    /// <summary>
+    /// Marks the one-time correction for settings already processed by PR #11.
+    /// </summary>
+    public DateTimeOffset? VodafoneModeRestoredAt { get; set; }
 
     // --- Retired: the hotspot TTL rewrite -------------------------------------------
     // Kept as fields only so a settings file written by an older build is recognised and
@@ -127,6 +140,41 @@ public sealed record AppSettings : IHotspotLegacyState
 
     /// <summary>Legacy per network list. Always empty after a load.</summary>
     public List<LegacyHotspotNetwork> HotspotTtlNetworks { get; set; } = [];
+
+    /// <summary>Legacy rewrite value, recognized only so migration can remove it.</summary>
+    public JsonElement? HotspotTtlValue { get; set; }
+
+    /// <summary>Legacy IPv6-drop option, recognized only so migration can remove it.</summary>
+    public JsonElement? HotspotDropIPv6 { get; set; }
+
+    public bool VodafoneNetworkRegistered(string key)
+        => !string.IsNullOrEmpty(key) && VodafoneModeNetworks.Any(network => network.Key == key);
+
+    /// <summary>Remembers a Vodafone-mode network without tying it to packet rewriting.</summary>
+    public void RememberVodafoneNetwork(string key, string displayName, string adapterName)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return;
+        }
+
+        VodafoneModeNetworks.RemoveAll(network => network.Key == key);
+        VodafoneModeNetworks.Add(new VodafoneModeNetwork
+        {
+            Key = key,
+            DisplayName = displayName,
+            AdapterName = adapterName,
+        });
+
+        const int maximumRememberedNetworks = 10;
+        while (VodafoneModeNetworks.Count > maximumRememberedNetworks)
+        {
+            VodafoneModeNetworks.RemoveAt(0);
+        }
+    }
+
+    public bool ForgetVodafoneNetwork(string key)
+        => VodafoneModeNetworks.RemoveAll(network => network.Key == key) > 0;
 
     /// <summary>Per network results, keyed by <see cref="NetworkProfile.Key"/>.</summary>
     [JsonIgnore]
@@ -147,6 +195,26 @@ public sealed record AppSettings : IHotspotLegacyState
 
     List<LegacyHotspotNetwork> IHotspotLegacyState.LegacyNetworks => HotspotTtlNetworks;
 
+    JsonElement? IHotspotLegacyState.LegacyTtlValue
+    {
+        get => HotspotTtlValue;
+        set => HotspotTtlValue = value;
+    }
+
+    JsonElement? IHotspotLegacyState.LegacyDropIpv6
+    {
+        get => HotspotDropIPv6;
+        set => HotspotDropIPv6 = value;
+    }
+
+    bool IHotspotLegacyState.VodafoneModeEnabled
+    {
+        get => VodafoneModeEnabled;
+        set => VodafoneModeEnabled = value;
+    }
+
+    List<VodafoneModeNetwork> IHotspotLegacyState.VodafoneNetworks => VodafoneModeNetworks;
+
     bool IHotspotLegacyState.DiagnosticsEnabled
     {
         get => HotspotDiagnostics;
@@ -157,6 +225,12 @@ public sealed record AppSettings : IHotspotLegacyState
     {
         get => HotspotLegacyMigratedAt;
         set => HotspotLegacyMigratedAt = value;
+    }
+
+    DateTimeOffset? IHotspotLegacyState.VodafoneIdentityRestoredAt
+    {
+        get => VodafoneModeRestoredAt;
+        set => VodafoneModeRestoredAt = value;
     }
 }
 
@@ -219,6 +293,8 @@ public sealed class ConfigStore
         settings.ExtraDomains = CleanDomains(settings.ExtraDomains);
         settings.ExcludedDomains = CleanDomains(settings.ExcludedDomains);
 
+        settings.VodafoneModeNetworks = CleanVodafoneNetworks(settings.VodafoneModeNetworks);
+
         // A null entry throws in every lookup that walks this list, and a keyless one can
         // never name a network anyway.
         settings.HotspotTtlNetworks = settings.HotspotTtlNetworks is null
@@ -252,6 +328,17 @@ public sealed class ConfigStore
     private static List<string> CleanDomains(List<string>? domains) => domains is null
         ? []
         : [.. domains.Where(domain => !string.IsNullOrWhiteSpace(domain))];
+
+    private static List<VodafoneModeNetwork> CleanVodafoneNetworks(List<VodafoneModeNetwork>? networks)
+        => networks is null
+            ? []
+            : [.. networks
+                .Where(network => network is not null && !string.IsNullOrWhiteSpace(network.Key))
+                .Select(network => network with
+                {
+                    DisplayName = network.DisplayName ?? string.Empty,
+                    AdapterName = network.AdapterName ?? string.Empty,
+                })];
 
     private static T? ReadJson<T>(string path)
         where T : class

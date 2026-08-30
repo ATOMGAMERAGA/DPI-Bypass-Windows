@@ -143,10 +143,9 @@ internal static class CommandLineTasks
             case "hotspot":
                 return await SendAsync(ResolveHotspotCommand(argument)).ConfigureAwait(false);
 
-            // Retired, and kept only so an existing script or habit still lands
-            // somewhere sensible rather than on "unknown command".
+            // Original product spelling retained alongside the generic hotspot alias.
             case "vodafone":
-                return await SendAsync(ResolveLegacyHotspotCommand(argument)).ConfigureAwait(false);
+                return await SendAsync(ResolveVodafoneCommand(argument)).ConfigureAwait(false);
 
             case "latency":
                 return await RunLatencyAsync(argument).ConfigureAwait(false);
@@ -173,13 +172,12 @@ internal static class CommandLineTasks
         _ => ControlProtocol.Commands.HotspotStatus,
     };
 
-    private static string ResolveLegacyHotspotCommand(string? argument) => argument?.Trim().ToLowerInvariant() switch
+    private static string ResolveVodafoneCommand(string? argument) => argument?.Trim().ToLowerInvariant() switch
     {
         "on" or "ac" or "aç" => ControlProtocol.Commands.VodafoneOn,
-
-        // "off" has to keep working exactly as before, because that is the command
-        // somebody reaches for to get their machine back to normal.
         "off" or "kapat" => ControlProtocol.Commands.VodafoneOff,
+        "diagnose" or "tanila" or "tanıla" or "test" => ControlProtocol.Commands.HotspotDiagnose,
+        "cleanup" or "temizle" => ControlProtocol.Commands.HotspotCleanup,
         _ => ControlProtocol.Commands.VodafoneStatus,
     };
 
@@ -288,8 +286,10 @@ internal static class CommandLineTasks
           DpiBypass.exe strategies          yöntem kataloğu
           DpiBypass.exe isps                operatör profilleri
           DpiBypass.exe enable | disable    korumayı aç / kapat
+          DpiBypass.exe vodafone [on|off]   Vodafone Sınırsız Modu (güvenli tanılama)
+          DpiBypass.exe vodafone diagnose   Vodafone bağlantısını incele
           DpiBypass.exe hotspot diagnose    mobil paylaşım bağlantısını incele (hiçbir şeyi değiştirmez)
-          DpiBypass.exe hotspot cleanup     eski hotspot TTL yapılandırmasını temizle
+          DpiBypass.exe hotspot cleanup     yalnız eski TTL alt özelliğini temizle
           DpiBypass.exe hotspot             hotspot durumunu göster
           DpiBypass.exe latency status      düşük-gecikme durumunu göster
           DpiBypass.exe latency on | off    ölçümlü düşük-gecikme modunu aç / kapat

@@ -22,7 +22,10 @@ public enum ProtectionState
 
 /// <summary>What the mobile hotspot feature is doing right now.</summary>
 public sealed record HotspotStatus(
+    bool VodafoneModeEnabled,
     bool DiagnosticsEnabled,
+    bool RegisteredHere,
+    int RegisteredNetworks,
     string NetworkName,
     string AdapterName,
     DateTimeOffset? LegacyCleanedAt,
@@ -68,9 +71,8 @@ public sealed class ProtectionService : IAsyncDisposable
         _latencyOptimizer.Changed += OnLatencyChanged;
         _hotspot = hotspotDiagnostics ?? new MobileHotspotDiagnostics(log: AppLog.InfoSink);
 
-        // Load already ran the legacy hotspot migration in memory. Persisting it here
-        // means the cleaned file is on disk from the first run rather than whenever the
-        // user next happens to change a setting.
+        // Load already disabled the obsolete TTL sub-feature and preserved any reusable
+        // Vodafone-mode settings in memory. Persist the one-time migration immediately.
         Settings = _store.Load();
         if (Settings.LegacyHotspotCleaned)
         {
@@ -145,7 +147,10 @@ public sealed class ProtectionService : IAsyncDisposable
 
     /// <summary>Live state of the mobile hotspot compatibility feature.</summary>
     public HotspotStatus HotspotStatus => new(
+        VodafoneModeEnabled: Settings.VodafoneModeEnabled,
         DiagnosticsEnabled: Settings.HotspotDiagnostics,
+        RegisteredHere: Settings.VodafoneNetworkRegistered(Network.Key),
+        RegisteredNetworks: Settings.VodafoneModeNetworks.Count,
         NetworkName: Network.DisplayName,
         AdapterName: Network.AdapterName ?? "-",
         LegacyCleanedAt: Settings.HotspotLegacyMigratedAt,
@@ -567,6 +572,67 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Enables Vodafone Sınırsız Modu's safe diagnostics for the current network.
+    /// </summary>
+    /// <remarks>
+    /// This deliberately records only the network identity and enables diagnostic
+    /// checks. It does not install a packet filter, change TTL/hop-limit values, block
+    /// IPv6 or attempt to influence carrier accounting.
+    /// </remarks>
+    public void EnableVodafoneModeHere()
+        => EnableVodafoneMode(NetworkFingerprint.Capture());
+
+    internal void EnableVodafoneMode(NetworkFingerprint network)
+    {
+        ArgumentNullException.ThrowIfNull(network);
+
+        if (!network.IsOnline)
+        {
+            throw new InvalidOperationException("Şu anda bir ağa bağlı değilsiniz.");
+        }
+
+        Network = network;
+        Settings.RememberVodafoneNetwork(
+            network.Key,
+            network.DisplayName,
+            network.AdapterName ?? string.Empty);
+        Settings.VodafoneModeEnabled = true;
+        Settings.HotspotDiagnostics = true;
+        _store.Save(Settings);
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Disables the mode and its automatic runs without erasing remembered networks or
+    /// removing the always-available manual diagnostics.
+    /// </summary>
+    public void DisableVodafoneMode()
+    {
+        if (!Settings.VodafoneModeEnabled && !Settings.HotspotDiagnostics)
+        {
+            return;
+        }
+
+        Settings.VodafoneModeEnabled = false;
+        Settings.HotspotDiagnostics = false;
+        _store.Save(Settings);
+        CancelHotspotDiagnostics();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Forgets one safe per-network registration.</summary>
+    public void ForgetVodafoneNetwork(string key)
+    {
+        if (!Settings.ForgetVodafoneNetwork(key))
+        {
+            return;
+        }
+
+        _store.Save(Settings);
+        Changed?.Invoke();
+    }
+
+    /// <summary>
     /// Removes anything an older build's hotspot TTL mode left behind.
     /// </summary>
     /// <remarks>
@@ -608,7 +674,7 @@ public sealed class ProtectionService : IAsyncDisposable
             return;
         }
 
-        if (Settings.HotspotDiagnostics)
+        if (ShouldRunHotspotDiagnostics(Settings, fingerprint))
         {
             var diagnostics = CreateHotspotDiagnosticsCancellation(token);
             // Always enter the delegate so its finally block disposes the linked source,
@@ -636,6 +702,12 @@ public sealed class ProtectionService : IAsyncDisposable
             }
         }, token);
     }
+
+    internal static bool ShouldRunHotspotDiagnostics(AppSettings settings, NetworkFingerprint fingerprint)
+        => settings.HotspotDiagnostics
+            && (!settings.VodafoneModeEnabled
+                || settings.VodafoneModeNetworks.Count == 0
+                || settings.VodafoneNetworkRegistered(fingerprint.Key));
 
     /// <summary>
     /// Runs the checks after a transition, off the notification thread.

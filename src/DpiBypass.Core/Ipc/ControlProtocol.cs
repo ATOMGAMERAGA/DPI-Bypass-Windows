@@ -60,9 +60,9 @@ public static class ControlProtocol
         /// <summary>Removes anything an older build's hotspot TTL mode left behind.</summary>
         public const string HotspotCleanup = "hotspot.cleanup";
 
-        // Retired: the hotspot TTL rewrite. The names stay so an older shortcut, script
-        // or habit still lands somewhere sensible - "off" performs the cleanup, and "on"
-        // explains what replaced it instead of failing with an unknown command.
+        // Compatibility names retained from the original Vodafone feature. They now
+        // control the safe diagnostics/compatibility mode; none installs the retired TTL
+        // rewrite. The generic hotspot commands remain aliases for diagnostic operations.
         public const string VodafoneOn = "vodafone.on";
         public const string VodafoneOff = "vodafone.off";
         public const string VodafoneStatus = "vodafone.status";

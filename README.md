@@ -137,10 +137,11 @@ Arayüzdeki **Kapsam** sekmesinde dört seçenek var:
   siteler.
 - **Tüm sistem** — bilgisayardaki bütün programlar.
 
-## Mobil hotspot uyumluluğu ve tanılama
+## Vodafone Sınırsız Modu
 
-**DNS ve ayarlar → Mobil hotspot uyumluluğu ve tanılama** kartı, telefon
-paylaşımı ve mobil veri bağlantılarını **kalıcı ağ ayarı değiştirmeden** inceler:
+**DNS ve ayarlar → Vodafone Sınırsız Modu** kartı yeniden ağ bazlı durum,
+tercihler, tanılama ve kurtarma araçlarını birlikte sunar. Mod Vodafone mobil
+bağlantılarını ve telefon paylaşımını **kalıcı ağ ayarı değiştirmeden** inceler:
 
 Tanılama kalıcı ağ ayarı veya trafik sınıflandırma kuralı değiştirmez; ölçüm için
 sıradan ICMP, DNS ve bağlantı denetimi paketleri gönderir.
@@ -157,38 +158,34 @@ sıradan ICMP, DNS ve bağlantı denetimi paketleri gönderir.
 ```powershell
 DpiBypass.exe hotspot            # durum
 DpiBypass.exe hotspot diagnose   # bağlantıyı incele
-DpiBypass.exe hotspot cleanup    # eski TTL yapılandırmasını temizle
+DpiBypass.exe hotspot cleanup    # yalnız eski TTL alt özelliğini temizle
+DpiBypass.exe vodafone           # Vodafone modu durumu
+DpiBypass.exe vodafone on        # bu ağda güvenli modu etkinleştir
+DpiBypass.exe vodafone off       # modu kapat; kayıtlı ağları koru
+DpiBypass.exe vodafone diagnose  # aynı tanılamayı Vodafone adıyla çalıştır
 ```
 
 **Plan / hotspot hakkınız "Bilinmiyor" olarak raporlanır.** TTL, SSID, operatör
 adı, APN ve IP aralığı operatörün kendi sebepleriyle ayarladığı şeylerdir;
 hiçbiri bir aboneliğin neyi kapsadığını göstermez. Uygulama tahmin etmez.
 
-### Kaldırılan: hotspot TTL düzeltmesi ("Vodafone sınırsız modu")
+### Geri yüklenen özellik / geri getirilmeyen alt özellik
 
-Eski sürümlerde, paylaşılan bağdaştırıcıdan çıkan paketlerin TTL'ini yeniden
-yazan ve giden IPv6'yı düşüren bir mod vardı. Amacı operatörün paylaşım
-sayacını tanımaz hale getirmekti. **Bu mekanizma kaldırıldı.**
+**ÖZELLİK GERİ YÜKLENDİ:** Vodafone Sınırsız Modu adı ve ayar girişi, ağ bazlı
+kayıtlar, durum görünümü, otomatik/elle tanılama, temizleme ve komut satırı
+uyumluluğu.
 
-Yükseltme yapan bir kurulumda önemli olan kısım korunur: eski bir ayar dosyası
-**her açılışta** otomatik olarak temizlenir.
+**GERİ GETİRİLMEYEN ALT ÖZELLİK:** Paylaşılan trafiği operatörün hotspot
+sayacından gizlemek amacıyla paket TTL'sini yeniden yazma ve giden IPv6'yı
+düşürme. Bu mekanizma etkinleştirilemez ve paket yoluna geri eklenmemiştir.
 
-```
-eski yapılandırma bulundu
-    ↓
-TTL yeniden yazımı kapatılır
-    ↓
-kayıtlı ağ listesi silinir
-    ↓
-mod kullanılıyorduysa yerine hotspot tanılaması açılır
-    ↓
-temizlenmiş dosya diske yazılır
-```
-
-Geçiş yalnızca eski alanların bir fonksiyonudur ve idempotenttir: ikinci kez
-çalıştırmak hiçbir şey yapmaz, bir işaretçiye bakmadığı için de yedekten dönen
-ya da elle düzenlenen bir dosya modu geri getiremez. `DpiBypass.exe vodafone off`
-komutu çalışmaya devam eder ve aynı temizliği yapar.
+Yükseltmede yalnızca eski TTL/IPv6 paket değiştirme alanları devre dışı bırakılıp
+kaldırılır. Eski ağ kayıtları silinmek yerine güvenli `VodafoneModeNetworks`
+listesine taşınır; kapsam, DNS, başlangıç ve diğer tercihlere dokunulmaz. Geçiş
+idempotenttir. PR #11 tarafından daha önce işlenmiş bir dosyanın Vodafone kimliği
+de bir kez geri yüklenir; kullanıcı daha sonra modu kapatırsa tekrar açılmaz.
+`vodafone off` modu kapatır, `hotspot cleanup` ise yalnız kalmış eski TTL
+alanlarını temizler.
 
 ## Ping düşürme (Beta)
 
@@ -335,8 +332,10 @@ DpiBypass.exe domains             # korunan alan adları
 DpiBypass.exe strategies          # yöntem kataloğu
 DpiBypass.exe isps                # operatör profilleri
 DpiBypass.exe enable / disable    # korumayı aç / kapat
+DpiBypass.exe vodafone on / off   # Vodafone güvenli tanılama modunu aç / kapat
+DpiBypass.exe vodafone diagnose   # Vodafone bağlantısını incele
 DpiBypass.exe hotspot diagnose    # mobil paylaşım bağlantısını incele
-DpiBypass.exe hotspot cleanup     # eski hotspot TTL yapılandırmasını temizle
+DpiBypass.exe hotspot cleanup     # yalnız eski TTL alt özelliğini temizle
 DpiBypass.exe latency status      # düşük-gecikme durumu
 DpiBypass.exe latency on / off    # ölçümlü optimizasyonu aç / kapat
 DpiBypass.exe latency test        # kalıcı ayar değiştirmeden ölç
@@ -388,7 +387,7 @@ o durumda onay istenir. İstemiyorsanız Windows Başlangıç Uygulamaları'ndan
 
 | Dosya | İçerik |
 | --- | --- |
-| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping düşürme ve hotspot tanılaması, başlangıç seçenekleri |
+| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping düşürme, Vodafone ağ tercihleri ve hotspot tanılaması, başlangıç seçenekleri |
 | `networks.json` | Ağ başına öğrenilen yöntem belleği |
 | `learned-domains.json` | Otomatik keşfin bulduğu engelli alan adları |
 | `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |
@@ -463,7 +462,7 @@ src/DpiBypass.Core/
   Diagnostics/StrategyTuner.cs        gerçek bağlantı testleriyle yöntem arama
   Diagnostics/BlockedSiteDiscovery.cs yeni engelli siteleri ölçerek bulma
   MobileHotspot/MobileHotspotDiagnostics.cs salt-okunur bağlantı incelemesi
-  MobileHotspot/HotspotLegacyMigration.cs eski TTL yapılandırmasının temizliği
+  MobileHotspot/HotspotLegacyMigration.cs eski ağ kayıtlarını koruyup yalnız TTL alt özelliğini temizleme
   Ipc/ControlServer.cs        uygulama ↔ komut satırı protokolü
 ```
 
@@ -491,8 +490,8 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
 | Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
 | DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
-| Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Mobil hotspot uyumluluğu ve tanılama** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor ölçülen parçalanmasız sınırı söyler; yalnızca belirti varsa bu sınıra yakın bir MTU denenip yeniden doğrulanmalıdır |
-| "Vodafone sınırsız modu" nereye gitti | Kaldırıldı. Eski ayar dosyanız her açılışta otomatik temizlenir; `DpiBypass.exe vodafone off` de aynı temizliği yapar. Yerine gelen tanılama bağlantıyı değiştirmeden inceler |
+| Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Vodafone Sınırsız Modu** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor ölçülen parçalanmasız sınırı söyler; yalnızca belirti varsa bu sınıra yakın bir MTU denenip yeniden doğrulanmalıdır |
+| "Vodafone sınırsız modu" nereye gitti | **DNS ve ayarlar** içindeki özgün adıyla geri yüklendi. Ağ kayıtları ve tanılama korunur; yalnız hotspot muhasebesini gizlemeye yönelik TTL/IPv6 alt özelliği geri getirilmemiştir |
 | Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 
 ## Yasal not
