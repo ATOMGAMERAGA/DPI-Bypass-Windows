@@ -1,5 +1,6 @@
 using DpiBypass.Core;
 using DpiBypass.Core.Config;
+using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
 using Xunit;
 
@@ -88,6 +89,134 @@ public sealed class ProtectionServiceTests : IDisposable
         catch (IOException)
         {
             // Temp cleanup only.
+        }
+    }
+}
+
+/// <summary>
+/// The service side of the mobile hotspot feature: cleanup that can be called at any
+/// time, from anywhere, twice.
+/// </summary>
+public sealed class ProtectionServiceHotspotTests : IDisposable
+{
+    private readonly TempDirectory _directory = new("dpibypass-hotspot");
+
+    [Fact]
+    public async Task ALegacyConfigIsCleanedAndPersistedWhenTheServiceIsBuilt()
+    {
+        File.WriteAllText(SettingsPath, """
+            {
+              "HotspotTtlFix": true,
+              "HotspotTtlNetworks": [ { "Key": "abc", "DisplayName": "phone", "AdapterName": "Wi-Fi" } ]
+            }
+            """);
+
+        await using var service = Build();
+
+        Assert.False(service.Settings.HotspotTtlFix);
+        Assert.True(service.Settings.HotspotDiagnostics);
+
+        // On disk, not only in memory: the next process to read this file, including the
+        // uninstaller, must see the cleaned version.
+        var onDisk = File.ReadAllText(SettingsPath);
+        Assert.Contains("\"HotspotTtlFix\": false", onDisk, StringComparison.Ordinal);
+        Assert.Contains("\"HotspotDiagnostics\": true", onDisk, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CleanupCanBeCalledTwiceAndOnAMachineThatNeverHadTheOldMode()
+    {
+        await using var service = Build();
+
+        var first = service.CleanUpLegacyHotspotConfiguration();
+        var second = service.CleanUpLegacyHotspotConfiguration();
+
+        Assert.False(first.Changed);
+        Assert.False(second.Changed);
+        Assert.False(service.Settings.HotspotTtlFix);
+    }
+
+    [Fact]
+    public async Task CleanupReportsWhatItActuallyRemoved()
+    {
+        File.WriteAllText(SettingsPath, """{"HotspotTtlFix": true}""");
+        await using var service = Build();
+
+        // The constructor already migrated, so an explicit cleanup finds nothing left -
+        // which is the point: there is no second copy of the state to go stale.
+        Assert.False(service.CleanUpLegacyHotspotConfiguration().Changed);
+        Assert.False(service.Settings.HotspotTtlFix);
+    }
+
+    [Fact]
+    public async Task RunningTheDiagnosticsRemembersTheResultForTheUi()
+    {
+        var diagnostics = new FakeHotspotDiagnostics();
+        await using var service = Build(diagnostics);
+
+        Assert.Null(service.HotspotStatus.LastResult);
+
+        var result = await service.RunHotspotDiagnosticsAsync();
+
+        Assert.Same(result, service.HotspotStatus.LastResult);
+        Assert.Equal(1, diagnostics.Runs);
+    }
+
+    [Fact]
+    public async Task TheDiagnosticsSwitchIsPersisted()
+    {
+        await using var service = Build();
+
+        service.SetHotspotDiagnostics(true);
+
+        Assert.True(new ConfigStore(SettingsPath, ProfilesPath).Load().HotspotDiagnostics);
+    }
+
+    [Fact]
+    public async Task SettingTheSwitchToWhatItAlreadyIsDoesNotWriteAnything()
+    {
+        await using var service = Build();
+        service.SetHotspotDiagnostics(true);
+
+        var written = File.GetLastWriteTimeUtc(SettingsPath);
+        service.SetHotspotDiagnostics(true);
+
+        Assert.Equal(written, File.GetLastWriteTimeUtc(SettingsPath));
+    }
+
+    private string SettingsPath => Path.Combine(_directory.Path, "settings.json");
+
+    private string ProfilesPath => Path.Combine(_directory.Path, "networks.json");
+
+    private ProtectionService Build(IMobileHotspotDiagnostics? diagnostics = null) => new(
+        new ConfigStore(SettingsPath, ProfilesPath),
+        new LearnedDomainStore(Path.Combine(_directory.Path, "learned.json")),
+        hotspotDiagnostics: diagnostics ?? new FakeHotspotDiagnostics());
+
+    public void Dispose() => _directory.Dispose();
+
+    private sealed class FakeHotspotDiagnostics : IMobileHotspotDiagnostics
+    {
+        public int Runs { get; private set; }
+
+        public Task<HotspotDiagnosticResult> RunAsync(
+            NetworkFingerprint network,
+            CancellationToken cancellationToken = default)
+        {
+            Runs++;
+
+            return Task.FromResult(new HotspotDiagnosticResult
+            {
+                NetworkName = network.DisplayName,
+                AdapterName = network.AdapterName ?? "-",
+                HasIpv4 = true,
+                HasIpv6 = false,
+                Ipv4Works = true,
+                Ipv6Works = false,
+                DnsWorks = true,
+                AddressKind = HotspotAddressKind.Private,
+                VpnAdapterActive = false,
+            });
         }
     }
 }

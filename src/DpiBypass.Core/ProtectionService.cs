@@ -4,8 +4,8 @@ using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
 using DpiBypass.Core.Interop;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
-using DpiBypass.Core.Vodafone;
 
 namespace DpiBypass.Core;
 
@@ -20,15 +20,13 @@ public enum ProtectionState
     Stopping = 4,
 }
 
-/// <summary>What the hotspot TTL fix is doing right now.</summary>
-public sealed record HotspotTtlStatus(
-    bool Enabled,
-    bool Active,
-    bool RegisteredHere,
+/// <summary>What the mobile hotspot feature is doing right now.</summary>
+public sealed record HotspotStatus(
+    bool DiagnosticsEnabled,
     string NetworkName,
-    byte TimeToLive,
-    long RewrittenPackets,
-    long DroppedIPv6Packets);
+    string AdapterName,
+    DateTimeOffset? LegacyCleanedAt,
+    HotspotDiagnosticResult? LastResult);
 
 /// <summary>
 /// The one object the UI talks to. Owns the engine, the encrypted resolver, the
@@ -40,7 +38,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly LearnedDomainStore _learned;
     private readonly TargetMatcher _matcher = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly HotspotTtlFix _ttlFix = new(AppLog.InfoSink);
+    private readonly IMobileHotspotDiagnostics _hotspot;
     private readonly LatencyOptimizer _latencyOptimizer;
 
     private DohResolver? _resolver;
@@ -59,13 +57,24 @@ public sealed class ProtectionService : IAsyncDisposable
     public ProtectionService(
         ConfigStore? store = null,
         LearnedDomainStore? learnedDomains = null,
-        LatencyOptimizer? latencyOptimizer = null)
+        LatencyOptimizer? latencyOptimizer = null,
+        IMobileHotspotDiagnostics? hotspotDiagnostics = null)
     {
         _store = store ?? new ConfigStore();
         _learned = learnedDomains ?? new LearnedDomainStore();
         _latencyOptimizer = latencyOptimizer ?? new LatencyOptimizer(log: AppLog.InfoSink);
         _latencyOptimizer.Changed += OnLatencyChanged;
+        _hotspot = hotspotDiagnostics ?? new MobileHotspotDiagnostics(log: AppLog.InfoSink);
+
+        // Load already ran the legacy hotspot migration in memory. Persisting it here
+        // means the cleaned file is on disk from the first run rather than whenever the
+        // user next happens to change a setting.
         Settings = _store.Load();
+        if (Settings.LegacyHotspotCleaned)
+        {
+            _store.Save(Settings);
+        }
+
         ApplySettingsToMatcher();
     }
 
@@ -132,15 +141,16 @@ public sealed class ProtectionService : IAsyncDisposable
         return await _tester.ProbeAsync(host, fetchHttp: true, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Live state of the hotspot TTL fix (Vodafone unlimited mode).</summary>
-    public HotspotTtlStatus TtlFixStatus => new(
-        Enabled: Settings.HotspotTtlFix,
-        Active: _ttlFix.IsActive,
-        RegisteredHere: Settings.HotspotNetworkRegistered(Network.Key),
+    /// <summary>Live state of the mobile hotspot compatibility feature.</summary>
+    public HotspotStatus HotspotStatus => new(
+        DiagnosticsEnabled: Settings.HotspotDiagnostics,
         NetworkName: Network.DisplayName,
-        TimeToLive: _ttlFix.IsActive ? _ttlFix.Settings.TimeToLive : Settings.HotspotTtlValue,
-        RewrittenPackets: _ttlFix.RewrittenPackets,
-        DroppedIPv6Packets: _ttlFix.DroppedIPv6Packets);
+        AdapterName: Network.AdapterName ?? "-",
+        LegacyCleanedAt: Settings.HotspotLegacyMigratedAt,
+        LastResult: LastHotspotDiagnostics);
+
+    /// <summary>The most recent diagnostics pass, if one has run this session.</summary>
+    public HotspotDiagnosticResult? LastHotspotDiagnostics { get; private set; }
 
     public event Action? Changed;
 
@@ -154,8 +164,16 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <summary>
     /// Starts settings that belong to the application rather than the DPI engine.
     /// </summary>
+    /// <remarks>
+    /// Recovery runs first and runs unconditionally. A machine that lost power while a
+    /// candidate was applied is carrying adapter values nothing ever verified, and
+    /// whether the user has since switched the mode off has no bearing on that - gating
+    /// the rollback on the setting is how such a machine keeps them forever.
+    /// </remarks>
     public async Task StartIndependentFeaturesAsync(CancellationToken cancellationToken = default)
     {
+        await _latencyOptimizer.RecoverAsync(cancellationToken).ConfigureAwait(false);
+
         if (!Settings.LowLatencyMode)
         {
             return;
@@ -257,8 +275,6 @@ public sealed class ProtectionService : IAsyncDisposable
                 _monitor.Changed += OnNetworkChanged;
                 _monitor.Start();
                 Network = _monitor.Current;
-
-                ApplyTtlFix();
             }).ConfigureAwait(false);
 
             SetState(ProtectionState.Running, "Koruma etkin");
@@ -481,115 +497,90 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Brings the TTL fix into line with the network we are on now.
+    /// Runs the read-only mobile hotspot checks against the network we are on now.
     /// </summary>
     /// <remarks>
-    /// The rule is tied to the networks the user switched it on for, so walking from
-    /// a phone hotspot to home Wi-Fi takes it down by itself and walking back puts it
-    /// up again - without rewriting TTLs on a network where that makes no sense.
+    /// Nothing is changed by this and nothing is left behind by it, so it is safe to run
+    /// at any time, on any network, however many times.
     /// </remarks>
-    private void ApplyTtlFix()
-    {
-        if (!Settings.HotspotTtlFix)
-        {
-            _ttlFix.Clear();
-            return;
-        }
-
-        if (!Network.IsOnline || !Settings.HotspotNetworkRegistered(Network.Key))
-        {
-            if (_ttlFix.IsActive)
-            {
-                AppLog.Info($"Hotspot TTL düzeltmesi bu ağda kayıtlı değil ({Network.DisplayName}); kaldırıldı.");
-            }
-
-            _ttlFix.Clear();
-            return;
-        }
-
-        if (_ttlFix.IsActive && _ttlFix.InterfaceIndex == Network.InterfaceIndex)
-        {
-            return;
-        }
-
-        try
-        {
-            _ttlFix.Apply(Network.InterfaceIndex, Settings.BuildTtlFixSettings());
-            AppLog.Info($"Hotspot TTL düzeltmesi etkin: {Network.DisplayName} · TTL {Settings.HotspotTtlValue}");
-        }
-        catch (TtlFixException ex)
-        {
-            AppLog.Error("Hotspot TTL düzeltmesi uygulanamadı", ex);
-        }
-    }
-
-    /// <summary>Turns the hotspot TTL fix on for the network we are on right now.</summary>
-    public void EnableTtlFixHere()
+    public async Task<HotspotDiagnosticResult> RunHotspotDiagnosticsAsync(CancellationToken cancellationToken = default)
     {
         Network = NetworkFingerprint.Capture();
 
-        if (!Network.IsOnline)
+        var result = await _hotspot.RunAsync(Network, cancellationToken).ConfigureAwait(false);
+        LastHotspotDiagnostics = result;
+        Changed?.Invoke();
+
+        return result;
+    }
+
+    /// <summary>
+    /// Whether a network change should run the checks by itself.
+    /// </summary>
+    /// <remarks>
+    /// Off by default. When on, moving to a different network costs one short pass -
+    /// nine probes and a handful of reachability checks - and writes the result to the
+    /// log, which is what turns "it stopped working when I switched to my phone" into
+    /// something with a timestamp and an answer next to it. It is switched on for anyone
+    /// the migration found using the retired TTL mode, since that is the audience.
+    /// </remarks>
+    public void SetHotspotDiagnostics(bool enabled)
+    {
+        if (Settings.HotspotDiagnostics == enabled)
         {
-            throw new TtlFixException("Şu anda bir ağa bağlı değilsiniz.");
+            return;
         }
 
-        Settings.RememberHotspotNetwork(Network.Key, Network.DisplayName, Network.AdapterName ?? string.Empty);
-        Settings.HotspotTtlFix = true;
+        Settings.HotspotDiagnostics = enabled;
         _store.Save(Settings);
-
-        ApplyTtlFix();
         Changed?.Invoke();
     }
 
-    public void DisableTtlFix()
+    /// <summary>
+    /// Removes anything an older build's hotspot TTL mode left behind.
+    /// </summary>
+    /// <remarks>
+    /// Idempotent, and safe on a machine that never had the old mode: the migration is a
+    /// pure function of the legacy fields, so calling this twice - or on a clean install -
+    /// does nothing the second time. It exists as its own entry point because "off" has
+    /// to keep working from the command line and the uninstaller, not only through a
+    /// settings load.
+    /// </remarks>
+    public HotspotMigrationResult CleanUpLegacyHotspotConfiguration()
     {
-        Settings.HotspotTtlFix = false;
-        _store.Save(Settings);
-        _ttlFix.Clear();
-        Changed?.Invoke();
-    }
+        var migration = HotspotLegacyMigration.Apply(Settings, DateTimeOffset.UtcNow);
 
-    /// <summary>Removes one network from the list the fix is allowed to run on.</summary>
-    public void ForgetTtlFixNetwork(string key)
-    {
-        if (Settings.ForgetHotspotNetwork(key))
+        if (migration.Changed)
         {
-            _store.Save(Settings);
-            ApplyTtlFix();
-            Changed?.Invoke();
-        }
-    }
-
-    public void ApplyTtlFixOptions(byte timeToLive, bool dropIPv6)
-    {
-        var candidate = new TtlFixSettings { TimeToLive = timeToLive, DropIPv6 = dropIPv6 };
-        candidate.Validate();
-
-        Settings.HotspotTtlValue = timeToLive;
-        Settings.HotspotDropIPv6 = dropIPv6;
-        _store.Save(Settings);
-
-        if (_ttlFix.IsActive)
-        {
-            // Re-apply so the new value is what actually goes on the wire, rather than
-            // showing the user a setting the kernel does not have yet.
-            _ttlFix.Clear();
-            ApplyTtlFix();
+            AppLog.Info($"Eski hotspot yapılandırması temizlendi. {migration.Summary}");
         }
 
+        // Saved either way: the switch is forced off on every pass, and persisting that
+        // is the whole point of an explicit cleanup call.
+        _store.Save(Settings);
         Changed?.Invoke();
+
+        return migration;
     }
 
     private void OnNetworkChanged(NetworkFingerprint fingerprint)
     {
         Network = fingerprint;
-        ApplyTtlFix();
+
+        // A different network means the previous diagnostics describe a link that is no
+        // longer under us, so the panel goes back to "not run here yet".
+        LastHotspotDiagnostics = null;
         Changed?.Invoke();
 
         var token = _lifetime?.Token ?? CancellationToken.None;
         if (token.IsCancellationRequested)
         {
             return;
+        }
+
+        if (Settings.HotspotDiagnostics)
+        {
+            _ = Task.Run(() => RunHotspotDiagnosticsOnTransitionAsync(fingerprint, token), token);
         }
 
         // Re-tuning happens off the event thread so the OS notification returns at once.
@@ -607,6 +598,43 @@ public sealed class ProtectionService : IAsyncDisposable
                 AppLog.Error("Ağ değişikliği sonrası ayarlama başarısız", ex);
             }
         }, token);
+    }
+
+    /// <summary>
+    /// Runs the checks after a transition, off the notification thread.
+    /// </summary>
+    /// <remarks>
+    /// Failure here is worth a log line and nothing else: the diagnostics are an
+    /// explanation of the network, not a part of making it work, so nothing downstream
+    /// waits on them and a network that is still settling simply produces a poor report.
+    /// </remarks>
+    private async Task RunHotspotDiagnosticsOnTransitionAsync(NetworkFingerprint fingerprint, CancellationToken token)
+    {
+        try
+        {
+            AppLog.Info($"hotspot.diagnostics: '{fingerprint.DisplayName}' ağına geçildi; bağlantı inceleniyor.");
+
+            var result = await _hotspot.RunAsync(fingerprint, token).ConfigureAwait(false);
+
+            // Only if we are still on the network this describes. A second transition
+            // while this ran would otherwise leave the panel showing the wrong link.
+            if (string.Equals(Network.Key, fingerprint.Key, StringComparison.Ordinal))
+            {
+                LastHotspotDiagnostics = result;
+                Changed?.Invoke();
+            }
+
+            AppLog.Info($"hotspot.diagnostics: internet {(result.HasInternet ? "var" : "yok")}, "
+                + $"DNS {(result.DnsWorks ? "çalışıyor" : "çalışmıyor")}, IPv6 {(result.Ipv6Works ? "çalışıyor" : "yok")}.");
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down, or a newer network change took over.
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Ağ değişikliği sonrası hotspot tanılaması başarısız", ex);
+        }
     }
 
     private void OnHostRewritten(string host, string strategyId) => HostRewritten?.Invoke(host, strategyId);
@@ -792,10 +820,6 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             await _lifetime.CancelAsync().ConfigureAwait(false);
         }
-
-        // The TTL rule is a system-wide packet rewrite; it goes down with the rest
-        // rather than outliving the app that put it there.
-        _ttlFix.Clear();
 
         if (_discovery is not null)
         {
@@ -1035,7 +1059,6 @@ public sealed class ProtectionService : IAsyncDisposable
 
         _latencyOptimizer.Changed -= OnLatencyChanged;
         await _latencyOptimizer.DisposeAsync().ConfigureAwait(false);
-        _ttlFix.Dispose();
         _lifetime?.Dispose();
         _gate.Dispose();
     }

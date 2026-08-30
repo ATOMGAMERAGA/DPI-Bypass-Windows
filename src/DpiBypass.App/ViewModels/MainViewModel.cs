@@ -11,9 +11,9 @@ using DpiBypass.Core.Diagnostics;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
 using DpiBypass.Core.Startup;
-using DpiBypass.Core.Vodafone;
 
 namespace DpiBypass.App.ViewModels;
 
@@ -48,8 +48,6 @@ public sealed record DomainEntry(string Domain, DomainOrigin Origin)
 
     public bool CanRemove => true;
 }
-
-public sealed record TtlNetworkEntry(string Key, string Display);
 
 public sealed record RecheckOption(int Seconds, string Display)
 {
@@ -98,8 +96,8 @@ public sealed class MainViewModel : ObservableObject
     private RecheckOption _selectedRecheck;
     private string _newDomain = string.Empty;
     private DomainEntry? _selectedDomain;
-    private TtlNetworkEntry? _selectedTtlNetwork;
-    private string _ttlStatusLine = "Kapalı.";
+    private bool _isHotspotBusy;
+    private string _hotspotStatusLine = "Henüz çalıştırılmadı.";
     private bool _lowLatencyMode;
     private bool _isLatencyBusy;
     private string _latencyStatusLine = "Kapalı.";
@@ -202,7 +200,8 @@ public sealed class MainViewModel : ObservableObject
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
         AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
-        ForgetTtlNetworkCommand = new RelayCommand(ForgetSelectedTtlNetwork, () => _selectedTtlNetwork is not null);
+        HotspotDiagnoseCommand = new AsyncRelayCommand(RunHotspotDiagnosticsAsync, () => !_isHotspotBusy);
+        HotspotCleanupCommand = new RelayCommand(CleanUpLegacyHotspot);
         ClearDomainFilterCommand = new RelayCommand(() => DomainFilter = string.Empty, () => HasFilter);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
@@ -214,7 +213,7 @@ public sealed class MainViewModel : ObservableObject
         AppLog.Written += OnLogWritten;
 
         RefreshDomains();
-        RefreshTtlNetworks();
+        RefreshHotspotStatus();
 
         foreach (var entry in AppLog.Snapshot())
         {
@@ -249,8 +248,6 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>The full protected domain list: shipped, discovered and hand-added.</summary>
     public ObservableCollection<DomainEntry> Domains { get; } = [];
 
-    public ObservableCollection<TtlNetworkEntry> TtlNetworks { get; } = [];
-
     public AsyncRelayCommand ToggleCommand { get; }
 
     public AsyncRelayCommand TestCommand { get; }
@@ -269,7 +266,9 @@ public sealed class MainViewModel : ObservableObject
 
     public RelayCommand RemoveDomainCommand { get; }
 
-    public RelayCommand ForgetTtlNetworkCommand { get; }
+    public AsyncRelayCommand HotspotDiagnoseCommand { get; }
+
+    public RelayCommand HotspotCleanupCommand { get; }
 
     public RelayCommand ClearDomainFilterCommand { get; }
 
@@ -757,121 +756,98 @@ public sealed class MainViewModel : ObservableObject
         Raise(nameof(DomainsViewEmpty));
     }
 
-    // --- Vodafone sınırsız modu ----------------------------------------------
+    // --- Mobil hotspot uyumluluğu ve tanılama --------------------------------
 
-    public bool HotspotTtlFix
+    /// <summary>
+    /// Whether moving to a different network runs the checks by itself.
+    /// </summary>
+    /// <remarks>
+    /// Anyone who had the retired TTL mode enabled gets this switched on by the config
+    /// migration, so the upgrade leaves them with the replacement rather than a gap. The
+    /// "Tanıla" button works whatever this is set to.
+    /// </remarks>
+    public bool HotspotDiagnostics
     {
-        get => _service.Settings.HotspotTtlFix;
+        get => _service.Settings.HotspotDiagnostics;
         set
         {
-            if (_service.Settings.HotspotTtlFix == value)
+            if (_service.Settings.HotspotDiagnostics == value)
             {
                 return;
             }
 
-            string? failure = null;
-
-            try
-            {
-                if (value)
-                {
-                    _service.EnableTtlFixHere();
-                }
-                else
-                {
-                    _service.DisableTtlFix();
-                }
-            }
-            catch (TtlFixException ex)
-            {
-                failure = ex.Message;
-            }
-
-            // The checkbox reads the service back, so a refused switch un-ticks itself.
-            Raise();
-            RefreshTtlNetworks();
-
-            // After the refresh, or the computed status line would bury the reason.
-            if (failure is not null)
-            {
-                TtlStatusLine = failure;
-            }
-        }
-    }
-
-    public bool HotspotDropIPv6
-    {
-        get => _service.Settings.HotspotDropIPv6;
-        set
-        {
-            if (_service.Settings.HotspotDropIPv6 == value)
-            {
-                return;
-            }
-
-            try
-            {
-                _service.ApplyTtlFixOptions(_service.Settings.HotspotTtlValue, value);
-            }
-            catch (TtlFixException ex)
-            {
-                TtlStatusLine = ex.Message;
-            }
-
+            _service.SetHotspotDiagnostics(value);
             Raise();
         }
     }
 
-    public string TtlStatusLine { get => _ttlStatusLine; private set => Set(ref _ttlStatusLine, value); }
-
-    public TtlNetworkEntry? SelectedTtlNetwork
+    public bool IsHotspotBusy
     {
-        get => _selectedTtlNetwork;
-        set
+        get => _isHotspotBusy;
+        private set
         {
-            if (Set(ref _selectedTtlNetwork, value))
+            if (Set(ref _isHotspotBusy, value))
             {
-                ForgetTtlNetworkCommand.RaiseCanExecuteChanged();
+                HotspotDiagnoseCommand.RaiseCanExecuteChanged();
             }
         }
     }
 
-    private void ForgetSelectedTtlNetwork()
+    public string HotspotStatusLine
     {
-        if (_selectedTtlNetwork is { } network)
+        get => _hotspotStatusLine;
+        private set => Set(ref _hotspotStatusLine, value);
+    }
+
+    private async Task RunHotspotDiagnosticsAsync()
+    {
+        IsHotspotBusy = true;
+        HotspotStatusLine = "Bağlantı inceleniyor…";
+
+        try
         {
-            _service.ForgetTtlFixNetwork(network.Key);
-            RefreshTtlNetworks();
+            var result = await _service.RunHotspotDiagnosticsAsync().ConfigureAwait(true);
+            HotspotStatusLine = result.ToReport();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Hotspot tanılaması başarısız", ex);
+            HotspotStatusLine = $"Tanılama tamamlanamadı: {ex.Message}";
+        }
+        finally
+        {
+            IsHotspotBusy = false;
         }
     }
 
-    private void RefreshTtlNetworks()
+    private void CleanUpLegacyHotspot()
     {
-        TtlNetworks.Clear();
-        foreach (var network in _service.Settings.HotspotTtlNetworks)
-        {
-            var name = string.IsNullOrWhiteSpace(network.DisplayName) ? network.Key : network.DisplayName;
-            TtlNetworks.Add(new TtlNetworkEntry(network.Key, $"{name}  ({network.AdapterName})"));
-        }
-
-        SelectedTtlNetwork = null;
-        RefreshTtlStatus();
+        var migration = _service.CleanUpLegacyHotspotConfiguration();
+        HotspotStatusLine = migration.Summary;
+        Raise(nameof(HotspotDiagnostics));
     }
 
-    private void RefreshTtlStatus()
+    private void RefreshHotspotStatus()
     {
-        var status = _service.TtlFixStatus;
-
-        TtlStatusLine = status switch
+        // A run in progress owns the panel. Any unrelated service change - a counter, a
+        // state transition - would otherwise replace "checking..." with the stale line.
+        if (IsHotspotBusy)
         {
-            { Enabled: false } => "Kapalı. Telefonunuzun paylaşımına bağlıyken açın.",
-            { Active: true } =>
-                $"Etkin · {status.NetworkName} · TTL {status.TimeToLive} · "
-                    + $"düzeltilen paket: {status.RewrittenPackets:N0}"
-                    + (status.DroppedIPv6Packets > 0 ? $" · engellenen IPv6: {status.DroppedIPv6Packets:N0}" : string.Empty),
-            { RegisteredHere: true } => "Açık ama kural kurulamadı; günlüğe bakın.",
-            _ => $"Açık, ancak bu ağ ('{status.NetworkName}') kayıtlı değil — kural uygulanmıyor.",
-        };
+            return;
+        }
+
+        var status = _service.HotspotStatus;
+
+        if (status.LastResult is { } result)
+        {
+            HotspotStatusLine = result.ToReport();
+            return;
+        }
+
+        HotspotStatusLine = status.LegacyCleanedAt is { } cleaned
+            ? $"Eski hotspot TTL yapılandırması {cleaned.LocalDateTime:yyyy-MM-dd} tarihinde temizlendi.\n"
+                + "Bağlantıyı incelemek için \u201cTanıla\u201d düğmesine basın."
+            : "Henüz çalıştırılmadı. Telefonunuzun paylaşımına bağlıyken \u201cTanıla\u201d düğmesine basın.";
     }
 
     public bool StartEngineOnLaunch
@@ -1053,7 +1029,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         RefreshCounters();
-        RefreshTtlStatus();
+        RefreshHotspotStatus();
         _lowLatencyMode = _service.Settings.LowLatencyMode;
         Raise(nameof(LowLatencyMode));
         LatencyStatusLine = _service.LatencyResult.StatusLine;

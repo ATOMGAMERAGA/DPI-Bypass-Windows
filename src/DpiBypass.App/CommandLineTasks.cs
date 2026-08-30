@@ -40,7 +40,7 @@ internal static class CommandLineTasks
     {
         "install-autostart", "uninstall-autostart", "restore-dns", "dns-watchdog", "health-check",
         "strategies", "isps", "version", "v", "help", "h", "?",
-        "status", "test", "search", "domains", "enable", "disable", "vodafone", "latency",
+        "status", "test", "search", "domains", "enable", "disable", "hotspot", "vodafone", "latency",
     };
 
     /// <summary>
@@ -140,8 +140,13 @@ internal static class CommandLineTasks
             case "disable":
                 return await SendAsync(ControlProtocol.Commands.Disable).ConfigureAwait(false);
 
+            case "hotspot":
+                return await SendAsync(ResolveHotspotCommand(argument)).ConfigureAwait(false);
+
+            // Retired, and kept only so an existing script or habit still lands
+            // somewhere sensible rather than on "unknown command".
             case "vodafone":
-                return await SendAsync(ResolveVodafoneCommand(argument)).ConfigureAwait(false);
+                return await SendAsync(ResolveLegacyHotspotCommand(argument)).ConfigureAwait(false);
 
             case "latency":
                 return await RunLatencyAsync(argument).ConfigureAwait(false);
@@ -161,9 +166,19 @@ internal static class CommandLineTasks
             ? TimeSpan.FromSeconds(seconds)
             : TimeSpan.FromSeconds(60);
 
-    private static string ResolveVodafoneCommand(string? argument) => argument?.Trim().ToLowerInvariant() switch
+    private static string ResolveHotspotCommand(string? argument) => argument?.Trim().ToLowerInvariant() switch
+    {
+        "diagnose" or "tanila" or "tanıla" or "test" => ControlProtocol.Commands.HotspotDiagnose,
+        "cleanup" or "temizle" => ControlProtocol.Commands.HotspotCleanup,
+        _ => ControlProtocol.Commands.HotspotStatus,
+    };
+
+    private static string ResolveLegacyHotspotCommand(string? argument) => argument?.Trim().ToLowerInvariant() switch
     {
         "on" or "ac" or "aç" => ControlProtocol.Commands.VodafoneOn,
+
+        // "off" has to keep working exactly as before, because that is the command
+        // somebody reaches for to get their machine back to normal.
         "off" or "kapat" => ControlProtocol.Commands.VodafoneOff,
         _ => ControlProtocol.Commands.VodafoneStatus,
     };
@@ -190,8 +205,19 @@ internal static class CommandLineTasks
                     return true;
                 }
 
-                var measurement = await new LatencyProbe().MeasureAsync(network).ConfigureAwait(false);
-                WriteConsole(LatencyOptimizer.FormatMeasurement(network, measurement));
+                // Survey first so the benchmark pass and any later comparison all use
+                // the one target that actually answers on this network.
+                var probe = new LatencyProbe();
+                var survey = await probe
+                    .MeasureAsync(network, LatencyProbeRequest.Survey)
+                    .ConfigureAwait(false);
+                var measurement = survey.HasRemoteConnectivity
+                    ? await probe
+                        .MeasureAsync(network, LatencyProbeRequest.Benchmark.For(survey.RemoteEndpoint))
+                        .ConfigureAwait(false)
+                    : survey;
+
+                WriteConsole(LatencyReport.Measurement(network, measurement, LatencyPathAnalysis.Describe(measurement)));
                 return true;
             }
 
@@ -262,7 +288,9 @@ internal static class CommandLineTasks
           DpiBypass.exe strategies          yöntem kataloğu
           DpiBypass.exe isps                operatör profilleri
           DpiBypass.exe enable | disable    korumayı aç / kapat
-          DpiBypass.exe vodafone [on|off]   hotspot TTL düzeltmesi (argümansız: durum)
+          DpiBypass.exe hotspot diagnose    mobil paylaşım bağlantısını incele (hiçbir şeyi değiştirmez)
+          DpiBypass.exe hotspot cleanup     eski hotspot TTL yapılandırmasını temizle
+          DpiBypass.exe hotspot             hotspot durumunu göster
           DpiBypass.exe latency status      düşük-gecikme durumunu göster
           DpiBypass.exe latency on | off    ölçümlü düşük-gecikme modunu aç / kapat
           DpiBypass.exe latency test        hiçbir ayar değiştirmeden RTT/jitter ölç

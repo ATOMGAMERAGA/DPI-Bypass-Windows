@@ -58,6 +58,16 @@ public sealed class BypassEngine : IDisposable
     /// <summary>Used if the driver rejects payload indexing in a filter.</summary>
     private const string QuicFilterFallback = "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
 
+    /// <summary>
+    /// Exposed so the fast-path tests can pin how narrow the UDP side stays.
+    /// </summary>
+    /// <remarks>
+    /// Ordinary UDP is what games and voice use. Everything here is destination port 443
+    /// and, on the preferred filter, a QUIC long header Initial byte - so an established
+    /// QUIC session, and every game protocol, is never copied to user mode at all.
+    /// </remarks>
+    internal static IReadOnlyList<string> QuicFilterLadder => [QuicFilter, QuicFilterFallback];
+
     private const int MaxPacket = 65535;
 
     private readonly TargetMatcher _matcher;
@@ -148,7 +158,7 @@ public sealed class BypassEngine : IDisposable
 
     private WinDivertHandle? TryOpenQuicHandle()
     {
-        foreach (var filter in new[] { QuicFilter, QuicFilterFallback })
+        foreach (var filter in QuicFilterLadder)
         {
             WinDivertHandle? handle = null;
 

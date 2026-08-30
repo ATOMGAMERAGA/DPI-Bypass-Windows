@@ -137,86 +137,148 @@ Arayüzdeki **Kapsam** sekmesinde dört seçenek var:
   siteler.
 - **Tüm sistem** — bilgisayardaki bütün programlar.
 
-## Vodafone sınırsız modu (hotspot TTL düzeltmesi)
+## Mobil hotspot uyumluluğu ve tanılama
 
-Vodafone'un "Red Sınırsız" tarifelerinde mobil veri sınırsızdır, ancak
-**hotspot/tethering ayrı bir kotadan düşer**. Operatör paylaşımı paketin **TTL**
-değerinden anlar: telefonun kendi trafiği operatöre `64` ile ulaşır, laptoptan
-gelen paket ise telefonda bir kez yönlendirildiği için `63` olarak varır.
+**DNS ve ayarlar → Mobil hotspot uyumluluğu ve tanılama** kartı, telefon
+paylaşımı ve mobil veri bağlantılarını **hiçbir şeyi değiştirmeden** inceler:
 
-Bu mod, bu bilgisayardan çıkan paketleri **TTL 65** ile yollar. Telefon bir
-düşürünce operatöre tam `64` gider.
-
-**Nasıl açılır:** DNS ve ayarlar → *Vodafone sınırsız modu*. Komut satırından:
+- IPv4 ve IPv6 adresi var mı, trafik geçiyor mu;
+- ad çözümleme (DNS) çalışıyor mu;
+- median / p95 RTT ve paket kaybı;
+- 1500 baytlık paketler geçiyor mu (MTU sorunu, "sayfa yarım yükleniyor"in
+  en sık sebebi);
+- adres operatör NAT'ı (100.64/10) aralığında mı — gelen bağlantı ve port
+  yönlendirme çalışmaz;
+- etkin bir VPN/tünel bağdaştırıcısı var mı.
 
 ```powershell
-DpiBypass.exe vodafone status
-DpiBypass.exe vodafone on
-DpiBypass.exe vodafone off
+DpiBypass.exe hotspot            # durum
+DpiBypass.exe hotspot diagnose   # bağlantıyı incele
+DpiBypass.exe hotspot cleanup    # eski TTL yapılandırmasını temizle
 ```
 
-**Yalnızca kaydedildiği ağda çalışır.** Modu açtığınız andaki ağın parmak izi
-kaydedilir; ev Wi-Fi'ına ya da Ethernet'e geçtiğinizde kural kendiliğinden
-kalkar, telefona döndüğünüzde geri gelir. Kural tek bir ağ bağdaştırıcısına
-bağlıdır.
+**Plan / hotspot hakkınız "Bilinmiyor" olarak raporlanır.** TTL, SSID, operatör
+adı, APN ve IP aralığı operatörün kendi sebepleriyle ayarladığı şeylerdir;
+hiçbiri bir aboneliğin neyi kapsadığını göstermez. Uygulama tahmin etmez.
 
-**Atlatma bozulmaz.** Sahte paket stratejileri kasıtlı olarak düşük TTL'li
-(3-8) paketler gönderir; bu paketlerin sunucuya *ulaşmaması* atlatmanın çalışma
-ilkesidir. Bu yüzden TTL yeniden yazımı yalnızca TTL'i **32'nin üstünde** olan
-paketlere uygulanır — hem çekirdek süzgecinde hem de kodda. Eşik bir testle
-(`TheGuardSitsAboveEveryDecoyTtlInTheLibrary`) korunur: ileride daha yüksek
-TTL'li bir strateji eklenirse derleme kırılır.
+### Kaldırılan: hotspot TTL düzeltmesi ("Vodafone sınırsız modu")
 
-**IPv6.** Telefon tethering yaparken bilgisayara kendi global IPv6 adresini
-verir; o zaman operatör aynı aboneden iki farklı kaynak görür ve TTL ne olursa
-olsun paylaşım anlaşılır. Bu yüzden mod, varsayılan olarak paylaşılan
-bağdaştırıcıda giden IPv6 trafiğini engeller. Kural kalktığında bu da anında
-kalkar — sistemde kalıcı bir değişiklik yapılmaz.
+Eski sürümlerde, paylaşılan bağdaştırıcıdan çıkan paketlerin TTL'ini yeniden
+yazan ve giden IPv6'yı düşüren bir mod vardı. Amacı operatörün paylaşım
+sayacını tanımaz hale getirmekti. **Bu mekanizma kaldırıldı.**
 
-> **Kullanım koşulları uyarısı:** Bu mod, operatör sözleşmenizin kullanım
-> koşullarına aykırıdır. Otomatik sayacı atlatır, ancak çok yüksek kullanım
-> adil kullanım incelemesine takılabilir — orada TTL'in bir etkisi olmaz.
-> Sorumluluk kullanıcıya aittir.
+Yükseltme yapan bir kurulumda önemli olan kısım korunur: eski bir ayar dosyası
+**her açılışta** otomatik olarak temizlenir.
+
+```
+eski yapılandırma bulundu
+    ↓
+TTL yeniden yazımı kapatılır
+    ↓
+kayıtlı ağ listesi silinir
+    ↓
+mod kullanılıyorduysa yerine hotspot tanılaması açılır
+    ↓
+temizlenmiş dosya diske yazılır
+```
+
+Geçiş yalnızca eski alanların bir fonksiyonudur ve idempotenttir: ikinci kez
+çalıştırmak hiçbir şey yapmaz, bir işaretçiye bakmadığı için de yedekten dönen
+ya da elle düzenlenen bir dosya modu geri getiremez. `DpiBypass.exe vodafone off`
+komutu çalışmaya devam eder ve aynı temizliği yapar.
 
 ## Ping düşürme (Beta)
 
 **DNS ve ayarlar → Ping düşürme** kartındaki özellik, aktif fiziksel ağ
-bağdaştırıcısının desteklediği güvenli NIC seçeneklerini tek tek sınar. Önce
-gateway ve doğrudan IP adresli internet uçlarında birden çok batch ölçüm yapar;
-minimum, median, p95, jitter ve paket kaybını hesaplar. ICMP engelliyse internet
-ölçümü açıkça `TCP/443` olarak etiketlenen bağlantı süresiyle devam eder.
+bağdaştırıcısının desteklediği güvenli NIC seçeneklerini **eşli A/B ölçümüyle**
+tek tek sınar.
 
-Her aday için süreç aynıdır: özgün değer atomik snapshot'a yazılır, **yalnız bir
-ayar** `-NoRestart` ile uygulanır, bağlantı denetlenir ve aynı uzak IP yeniden
-ölçülür. Paket kaybı artarsa, median belirgin kötüleşirse veya median/jitter/p95
-birlikte doğrulanabilir kazanç göstermiyorsa o değişiklik hemen geri alınır.
-Son bir doğrulama ölçümü kazancı tekrarlamazsa tutulan değişikliklerin tamamı
-ters sırada geri yüklenir. Arayüz yalnız gerçek önce/sonra örneklerini gösterir;
-rastgele kazanç yüzdesi ya da sahte milisaniye üretmez.
+### Ölçüm
 
-Beta sürümünün dokunabildiği özellikler, sürücü gerçekten destekliyorsa:
+Her ölçüm, aynı hedefe **peş peşe ve sabit aralıkla** 24 ICMP probe'u gönderir
+(batch hâlinde değil: eşzamanlı gönderim ağ kadar makinenin kendi gönderim
+kuyruğunu da ölçer). Hesaplananlar: minimum, **median, p95, p99**, jitter
+(ardışık farkların ortalaması), paket kaybı, gateway median/p95 ve ölçüm
+sırasında bağdaştırıcının taşıdığı trafik. ICMP engelliyse internet ölçümü
+açıkça `TCP/443` olarak etiketlenen bağlantı süresiyle devam eder.
+
+### Eşli A/B
+
+Tek bir önce/sonra çifti, 2 ms'lik bir iyileşmeyi 2 ms'lik bir dalgalanmadan
+ayıramaz. Bu yüzden her aday için tur tur ölçülür:
+
+```
+A1 ölç (ayarsız) → uygula → B1 ölç → geri al
+A2 ölç (ayarsız) → uygula → B2 ölç → geri al
+                 ...
+```
+
+Bir ayar ancak **aynı metrikteki kazanç turların çoğunda tekrarlanır ve turların
+birbiriyle olan uyuşmazlığından büyükse** kabul edilir. Sonuç kararsızsa
+(kazanç var ama tutarsız) fazladan tur çalıştırılır; hâlâ kararsızsa cevap
+"hayır"dır. Kabul edilen bir ayar, bir sonraki adayın ölçüldüğü zemin olur, ve
+kullanıcıya gösterilen iyileşme **eşli turların** sonucudur — tek bir son
+örneğin değil.
+
+Bir çiftin iki yarısı farklı yük altında ölçüldüyse (biri boşta, diğeri indirme
+sırasında) o tur **atılır ve tekrarlanır**: aksi hâlde ölçülen şey ayar değil,
+indirmedir.
+
+### Reddetme
+
+Şunlardan herhangi biri adayı anında bitirir: uzak ucun yanıt vermemesi, paket
+kaybının bir probe'dan fazla artması, median / p95 / p99'da anlamlı gerileme,
+sürücünün değeri canlı uygulamaması, geri alınamayan bir yazma. CPU maliyeti
+olan bir ayar (Interrupt Moderation kapalı) **iki kat** büyük bir kazanç
+göstermek zorundadır.
+
+### Nerede olduğunu söyler
+
+Gecikmenin ne kadarının ilk atlamada, ne kadarının operatör ve internet yolunda
+olduğu ayrıştırılır. İlk atlama 1 ms ve uzak uç 70 ms ise hiçbir bağdaştırıcı
+ayarı bunu değiştirmez — ve bunu söylemek sekiz ayarı deneyip bir şey bulamamaktan
+daha faydalıdır. Kendi trafiğiniz aktifken gecikme belirgin artıyorsa bu
+**kuyruklanma** olarak raporlanır; çözümü gönderim hızını sınırlamaktır, NIC
+ayarı değil.
+
+### Dokunulan ve dokunulmayan
+
+Sürücü gerçekten destekliyorsa denenenler:
 
 - `SelectiveSuspend`, `DeviceSleepOnDisconnect` ve `D0PacketCoalescing`
   (`Get/Set-NetAdapterPowerManagement`);
 - yalnız fiziksel Ethernet'te NDIS `*InterruptModeration` registry keyword'ü
-  (`Get/Set-NetAdapterAdvancedProperty`). Bu seçenek daha düşük gecikme karşılığında
-  CPU kullanımını bir miktar artırabilir.
+  (`Get/Set-NetAdapterAdvancedProperty`).
 
 RSS, checksum/LSO/RSC offload, MTU, TCP autotuning, ECN, Nagle/registry hack'leri,
 HPET/timer ayarları, DNS, IPv6, route/metric, QoS, firewall ve işlem önceliği
 değiştirilmez. Bağdaştırıcı kapatılıp açılmaz ve yeniden başlatılmaz. VPN,
-TAP/TUN, Hyper-V, Docker ve WSL sanal bağdaştırıcıları atlanır.
+TAP/TUN, Hyper-V, Docker ve WSL sanal bağdaştırıcıları atlanır. Paket yoluna
+hiç dokunulmaz: bu özellik tek bir WinDivert tanıtıcısı açmaz, oyun ve ses
+trafiği normal Windows ağ yolunda kalır.
 
 Bu özellik ISP rotasını değiştirmez, VPN değildir ve uzaktaki oyun sunucusunu
-fiziksel olarak yakınlaştırmaz. Her bağlantıda daha düşük RTT garanti edemez;
-bilgisayarın NIC/power-management kaynaklı latency ve jitter payını hedefler.
-Doğrulanmış kazanç yoksa doğru sonuç **“Kazanç doğrulanamadı; sistem özgün
-ayarlarına geri döndürüldü.”** mesajıdır.
+fiziksel olarak yakınlaştırmaz. Doğrulanmış kazanç yoksa doğru sonuç
+**"Bu ağda doğrulanmış bir gecikme iyileşmesi bulunamadı. Özgün ayarlar geri
+yüklendi."** mesajıdır.
 
-Özgün değerler `C:\ProgramData\DPI Bypass\latency-snapshot.json` içinde tutulur.
-Mod kapatıldığında, ağ değiştiğinde, uygulama normal kapandığında ve kaldırma
-başlamadan önce geri yüklenir. Bir crash sonrasında dosya sonraki açılışta önce
-restore edilir; kayıp bağdaştırıcı varsa kurtarma bilgisi silinmez.
+### Profil ve kurtarma
+
+Doğrulanan sonuç **ağ + bağdaştırıcı + sürücü yetenek parmak izi** üçlüsüne
+bağlanarak `latency-profiles.json` içinde saklanır. Aynı ağa dönüldüğünde
+tam ölçüm yerine kayıtlı ayarlar yeniden uygulanır ve tek bir doğrulama ölçümüyle
+onaylanır; onaylanmazsa geri alınır ve profil silinir. Farklı bir bağdaştırıcı,
+sürücü güncellemesi veya bir aydan eski bir kayıt geçersizdir — Ethernet'te
+kanıtlanan bir ayar yanındaki Wi-Fi kartı için hiçbir şey söylemez. Dosyada
+adres, SSID veya BSSID tutulmaz ve hiçbir yere gönderilmez.
+
+Özgün değerler `C:\ProgramData\DPI Bypass\latency-snapshot.json` içinde,
+her adımdan **önce** yazılan bir durum damgasıyla tutulur
+(`SnapshotCreated → CandidateApplied → Verifying → Committed`). Mod
+kapatıldığında, ağ değiştiğinde, uygulama normal kapandığında ve kaldırma
+başlamadan önce geri yüklenir. Yarım kalmış bir çalışma — crash, elektrik
+kesintisi, süreç sonlandırma — sonraki açılışta **modun açık olup olmadığına
+bakılmaksızın** geri alınır; kayıp bağdaştırıcı varsa kurtarma bilgisi silinmez.
 
 ## Ping ve hıza etkisi
 
@@ -270,7 +332,8 @@ DpiBypass.exe domains             # korunan alan adları
 DpiBypass.exe strategies          # yöntem kataloğu
 DpiBypass.exe isps                # operatör profilleri
 DpiBypass.exe enable / disable    # korumayı aç / kapat
-DpiBypass.exe vodafone [on|off]   # hotspot TTL düzeltmesi
+DpiBypass.exe hotspot diagnose    # mobil paylaşım bağlantısını incele
+DpiBypass.exe hotspot cleanup     # eski hotspot TTL yapılandırmasını temizle
 DpiBypass.exe latency status      # düşük-gecikme durumu
 DpiBypass.exe latency on / off    # ölçümlü optimizasyonu aç / kapat
 DpiBypass.exe latency test        # kalıcı ayar değiştirmeden ölç
@@ -322,11 +385,12 @@ o durumda onay istenir. İstemiyorsanız Windows Başlangıç Uygulamaları'ndan
 
 | Dosya | İçerik |
 | --- | --- |
-| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping/Vodafone modları, başlangıç seçenekleri |
+| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping düşürme ve hotspot tanılaması, başlangıç seçenekleri |
 | `networks.json` | Ağ başına öğrenilen yöntem belleği |
 | `learned-domains.json` | Otomatik keşfin bulduğu engelli alan adları |
 | `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |
-| `latency-snapshot.json` | Ping düşürmenin değiştirdiği NIC özelliklerinin tam özgün değerleri |
+| `latency-snapshot.json` | Ping düşürmenin değiştirdiği NIC özelliklerinin tam özgün değerleri ve işlem durumu |
+| `latency-profiles.json` | Ağ + bağdaştırıcı + sürücü başına doğrulanmış ölçüm sonuçları (yalnız yerel) |
 | `logs\` | Günlük kayıtları (14 gün saklanır) |
 
 ## Kaldırma
@@ -366,9 +430,9 @@ python3 tools/generate_assets.py assets/logo/source.png
 
 | Yol | İçerik |
 | --- | --- |
-| `src/DpiBypass.Core` | Paket motoru, DNS, operatör profilleri, otomatik ayarlama, TTL düzeltmesi, denetim kanalı |
+| `src/DpiBypass.Core` | Paket motoru, DNS, operatör profilleri, otomatik ayarlama, gecikme ölçümü, hotspot tanılaması, denetim kanalı |
 | `src/DpiBypass.App` | WPF arayüzü, tepsi simgesi, otomatik başlatma, komut satırı |
-| `tests/DpiBypass.Tests` | Birim testleri (224 test) |
+| `tests/DpiBypass.Tests` | Birim testleri |
 | `installer/` | Inno Setup betiği ve sihirbaz görselleri |
 | `tools/` | Sürücü indirme ve logo üretme betikleri |
 | `.github/workflows/` | Derleme, test ve sürüm yayınlama hattı |
@@ -387,11 +451,16 @@ src/DpiBypass.Core/
   Dns/DnsProxyServer.cs       yerel DNS köprüsü
   Dns/DnsConfigurator.cs      sistem DNS ayarları (ve geri alma)
   Network/IspProfile.cs       operatör profilleri
-  Network/LatencyOptimizer.cs ölç, tek tek uygula, doğrula ve rollback et
-  Network/LatencyProbe.cs     gateway/uzak IP RTT, p95, jitter ve kayıp ölçümü
+  Network/LatencyOptimizer.cs eşli A/B turlarıyla ölç, uygula, doğrula, rollback et
+  Network/LatencyComparison.cs bir adayın kabul/ret kuralı
+  Network/LatencyStatistics.cs median, p95, p99, jitter, kayıp
+  Network/LatencyProbe.cs     sıralı ve sabit aralıklı RTT ölçümü
+  Network/LatencyProfileStore.cs ağ + bağdaştırıcı + sürücü başına doğrulanmış sonuç
+  Network/NetworkLoadSampler.cs ölçüm penceresinde hattın ne kadar meşgul olduğu
   Diagnostics/StrategyTuner.cs        gerçek bağlantı testleriyle yöntem arama
   Diagnostics/BlockedSiteDiscovery.cs yeni engelli siteleri ölçerek bulma
-  Vodafone/HotspotTtlFix.cs   hotspot TTL düzeltmesi (eşik korumalı)
+  MobileHotspot/MobileHotspotDiagnostics.cs salt-okunur bağlantı incelemesi
+  MobileHotspot/HotspotLegacyMigration.cs eski TTL yapılandırmasının temizliği
   Ipc/ControlServer.cs        uygulama ↔ komut satırı protokolü
 ```
 
@@ -419,7 +488,8 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
 | Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
 | DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
-| Vodafone modu "kayıtlı değil" diyor | Mod yalnızca açtığınız ağlarda çalışır. Telefonun paylaşımına bağlıyken onay kutusunu yeniden işaretleyin |
+| Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Mobil hotspot uyumluluğu ve tanılama** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor bunu ve önerilen MTU'yu söyler |
+| "Vodafone sınırsız modu" nereye gitti | Kaldırıldı. Eski ayar dosyanız her açılışta otomatik temizlenir; `DpiBypass.exe vodafone off` de aynı temizliği yapar. Yerine gelen tanılama bağlantıyı değiştirmeden inceler |
 | Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 
 ## Yasal not

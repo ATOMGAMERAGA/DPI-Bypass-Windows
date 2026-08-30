@@ -1,7 +1,6 @@
-using System.Net.NetworkInformation;
-using System.Text.Json;
 using DpiBypass.Core.Config;
 using DpiBypass.Core.Network;
+using DpiBypass.Tests.Latency;
 using Xunit;
 
 namespace DpiBypass.Tests;
@@ -15,27 +14,21 @@ public sealed class LatencyModelTests
     [Fact]
     public void AnOlderSettingsFileLoadsWithLatencyModeOff()
     {
-        var directory = NewDirectory();
-        try
-        {
-            var settingsPath = Path.Combine(directory, "settings.json");
-            File.WriteAllText(settingsPath, "{\"StartWithWindows\":false}");
+        using var directory = new TempDirectory();
+        var settingsPath = Path.Combine(directory.Path, "settings.json");
+        File.WriteAllText(settingsPath, "{\"StartWithWindows\":false}");
 
-            var settings = new ConfigStore(settingsPath, Path.Combine(directory, "networks.json")).Load();
+        var settings = new ConfigStore(settingsPath, Path.Combine(directory.Path, "networks.json")).Load();
 
-            Assert.False(settings.LowLatencyMode);
-            Assert.False(settings.StartWithWindows);
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        Assert.False(settings.LowLatencyMode);
+        Assert.False(settings.StartWithWindows);
     }
 
     [Fact]
     public void VirtualAdaptersAreNeverCandidates()
     {
-        var capability = Capability(Network("virtual")) with { IsPhysical = false, IsVirtual = true };
+        var capability = Fake.Capability(Fake.Network("virtual")) with { IsPhysical = false, IsVirtual = true };
+
         Assert.False(capability.IsEligible);
         Assert.Empty(capability.BuildSafeCandidates());
     }
@@ -43,7 +36,7 @@ public sealed class LatencyModelTests
     [Fact]
     public void InterruptModerationUsesRegistryKeywordNotALocalisedDisplayName()
     {
-        var capability = Capability(Network("ethernet")) with
+        var capability = Fake.Capability(Fake.Network("ethernet")) with
         {
             PowerManagement = [],
             AdvancedProperties =
@@ -61,12 +54,16 @@ public sealed class LatencyModelTests
 
         Assert.Equal("*InterruptModeration", candidate.PropertyName);
         Assert.Equal(["0"], candidate.DesiredValues);
+
+        // Turning moderation off costs an interrupt per packet, so it has to clear a
+        // higher bar than a change that costs nothing.
+        Assert.True(candidate.CpuSensitive);
     }
 
     [Fact]
     public void UnsupportedAndAlreadyDisabledPropertiesAreSkipped()
     {
-        var capability = Capability(Network("unsupported")) with
+        var capability = Fake.Capability(Fake.Network("unsupported")) with
         {
             PowerManagement = new Dictionary<string, int>
             {
@@ -80,231 +77,332 @@ public sealed class LatencyModelTests
         Assert.Empty(capability.BuildSafeCandidates());
     }
 
+    /// <summary>
+    /// The fingerprint is what stops a result verified against one driver from being
+    /// replayed against another.
+    /// </summary>
     [Fact]
-    public void PacketLossIncreaseCanNeverBeCalledAnImprovement()
-        => Assert.False(LatencyOptimizer.HasVerifiedImprovement(
-            Measurement(25, 4, 34, loss: 0),
-            Measurement(19, 2, 26, loss: 8)));
-
-    [Fact]
-    public void AClearlyWorseMedianCanNeverBeCalledAnImprovement()
-        => Assert.False(LatencyOptimizer.HasVerifiedImprovement(
-            Measurement(20, 3, 28),
-            Measurement(25, 2, 30)));
-
-    [Fact]
-    public void AOneMillisecondNoiseSampleIsNotPresentedAsAGain()
-        => Assert.False(LatencyOptimizer.HasVerifiedImprovement(
-            Measurement(21, 3, 29),
-            Measurement(20, 3, 29)));
-
-    [Fact]
-    public void MeasurementCalculatesMedianP95JitterLossAndGatewaySeparately()
+    public void TheCapabilityFingerprintTracksTheDriverSurface()
     {
-        var measurement = LatencyMeasurement.Create(
-            "1.1.1.1",
-            "ICMP",
-            [10, 12, 14, 16],
-            remoteAttempts: 5,
-            gatewaySamples: [1, 2, 3],
-            gatewayAttempts: 3);
+        var capability = Fake.Capability(Fake.Network("finger"));
+        var same = Fake.Capability(Fake.Network("finger"));
 
-        Assert.Equal(10, measurement.MinimumRttMs);
-        Assert.Equal(13, measurement.MedianRttMs);
-        Assert.Equal(15.7, measurement.P95RttMs, precision: 1);
-        Assert.Equal(2, measurement.JitterMs);
-        Assert.Equal(20, measurement.PacketLossPercent);
-        Assert.Equal(2, measurement.GatewayMedianRttMs);
+        Assert.Equal(capability.CapabilityFingerprint, same.CapabilityFingerprint);
+
+        Assert.NotEqual(
+            capability.CapabilityFingerprint,
+            (capability with { InterfaceDescription = "Intel I225-V (driver 2.1)" }).CapabilityFingerprint);
+
+        Assert.NotEqual(
+            capability.CapabilityFingerprint,
+            (capability with
+            {
+                AdvancedProperties =
+                [
+                    new AdapterAdvancedPropertyCapability
+                    {
+                        RegistryKeyword = "*InterruptModeration",
+                        RegistryValues = ["1"],
+                        ValidRegistryValues = ["0", "1"],
+                    },
+                ],
+            }).CapabilityFingerprint);
     }
 
     [Fact]
     public async Task SnapshotWritesAreAtomicAndRoundTripEveryOriginalValue()
     {
-        var directory = NewDirectory();
-        var path = Path.Combine(directory, "latency-snapshot.json");
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "latency-snapshot.json");
         var store = new LatencySnapshotStore(path);
-        var snapshot = Snapshot("adapter", "*InterruptModeration", LatencySettingKind.AdvancedProperty);
+        var snapshot = Fake.Snapshot("adapter", "*InterruptModeration", LatencySettingKind.AdvancedProperty);
 
-        try
-        {
-            await store.SaveAsync(snapshot);
-            var loaded = await store.LoadAsync();
+        await store.SaveAsync(snapshot);
+        var loaded = await store.LoadAsync();
 
-            Assert.NotNull(loaded);
-            Assert.Equal(snapshot.AdapterId, loaded!.AdapterId);
-            Assert.Equal(snapshot.NetworkKey, loaded.NetworkKey);
-            Assert.Equal(snapshot.Settings[0].PropertyName, loaded.Settings[0].PropertyName);
-            Assert.Equal(snapshot.Settings[0].OriginalValues, loaded.Settings[0].OriginalValues);
-            Assert.False(File.Exists(path + ".tmp"));
+        Assert.NotNull(loaded);
+        Assert.Equal(snapshot.AdapterId, loaded!.AdapterId);
+        Assert.Equal(snapshot.NetworkKey, loaded.NetworkKey);
+        Assert.Equal(snapshot.State, loaded.State);
+        Assert.Equal(snapshot.Settings[0].PropertyName, loaded.Settings[0].PropertyName);
+        Assert.Equal(snapshot.Settings[0].OriginalValues, loaded.Settings[0].OriginalValues);
+        Assert.False(File.Exists(path + ".tmp"));
 
-            await store.SaveAsync(snapshot with { AdapterName = "renamed" });
-            Assert.Equal("renamed", (await store.LoadAsync())!.AdapterName);
-            Assert.False(File.Exists(path + ".tmp"));
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        await store.SaveAsync(snapshot with { AdapterName = "renamed" });
+        Assert.Equal("renamed", (await store.LoadAsync())!.AdapterName);
+        Assert.False(File.Exists(path + ".tmp"));
     }
 
-    private static string NewDirectory()
+    /// <summary>A file written by an older build has to be rolled back, never trusted.</summary>
+    [Fact]
+    public async Task ASnapshotFromAnOlderSchemaCountsAsIncomplete()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"dpibypass-latency-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(path);
-        return path;
-    }
-
-    internal static NetworkFingerprint Network(string suffix, bool online = true) => new()
-    {
-        AdapterId = $"adapter-{suffix}",
-        AdapterName = $"Intel {suffix}",
-        AdapterType = NetworkInterfaceType.Ethernet,
-        InterfaceIndex = online ? 10 : 0,
-        GatewayAddress = online ? $"192.0.2.{Math.Abs((long)suffix.GetHashCode()) % 200 + 1}" : null,
-    };
-
-    internal static AdapterLatencyCapability Capability(NetworkFingerprint network, params string[] powerProperties)
-    {
-        powerProperties = powerProperties.Length == 0 ? ["SelectiveSuspend"] : powerProperties;
-        return new AdapterLatencyCapability
-        {
-            AdapterId = network.AdapterId!,
-            AdapterName = network.AdapterName!,
-            AdapterType = network.AdapterType,
-            IsPhysical = true,
-            IsVirtual = false,
-            IsUp = true,
-            PowerManagement = powerProperties.ToDictionary(property => property, _ => 2, StringComparer.OrdinalIgnoreCase),
-        };
-    }
-
-    internal static LatencyMeasurement Measurement(double median, double jitter, double p95, double loss = 0) => new()
-    {
-        MeasuredAt = DateTimeOffset.UtcNow,
-        RemoteEndpoint = "1.1.1.1",
-        Protocol = "ICMP",
-        RemoteAttempts = 12,
-        RemoteReplies = loss == 0 ? 12 : 11,
-        GatewayAttempts = 6,
-        GatewayReplies = 6,
-        MinimumRttMs = Math.Max(0.1, median - 3),
-        MedianRttMs = median,
-        P95RttMs = p95,
-        JitterMs = jitter,
-        PacketLossPercent = loss,
-        GatewayMedianRttMs = 1.2,
-    };
-
-    internal static LatencyOptimizationSnapshot Snapshot(
-        string adapterId,
-        string property,
-        LatencySettingKind kind = LatencySettingKind.PowerManagement) => new()
-    {
-        AdapterId = adapterId,
-        AdapterName = adapterId,
-        NetworkKey = "network",
-        CreatedAt = DateTimeOffset.UtcNow,
-        Settings =
-        [
-            new LatencySettingSnapshot
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "latency-snapshot.json");
+        await File.WriteAllTextAsync(path, """
             {
-                AdapterId = adapterId,
-                AdapterName = adapterId,
-                Kind = kind,
-                PropertyName = property,
-                OriginalPowerValue = kind == LatencySettingKind.PowerManagement ? 2 : null,
-                OriginalValues = kind == LatencySettingKind.AdvancedProperty ? ["1"] : [],
-                AppliedDescription = property,
-                CapturedAt = DateTimeOffset.UtcNow,
-            },
-        ],
-    };
+              "AdapterId": "adapter",
+              "AdapterName": "adapter",
+              "NetworkKey": "network",
+              "CreatedAt": "2026-01-01T00:00:00+00:00",
+              "SchemaVersion": 1,
+              "State": "Committed",
+              "Settings": []
+            }
+            """);
+
+        var loaded = await new LatencySnapshotStore(path).LoadAsync();
+
+        Assert.NotNull(loaded);
+        Assert.True(loaded!.IsIncomplete);
+    }
+
+    [Theory]
+    [InlineData(LatencyTransactionState.SnapshotCreated, true)]
+    [InlineData(LatencyTransactionState.CandidateApplied, true)]
+    [InlineData(LatencyTransactionState.Verifying, true)]
+    [InlineData(LatencyTransactionState.Committed, false)]
+    public void OnlyACommittedSnapshotDescribesSettingsSomebodyChose(LatencyTransactionState state, bool incomplete)
+        => Assert.Equal(incomplete, Fake.Snapshot("adapter", "SelectiveSuspend", state: state).IsIncomplete);
 }
 
+/// <summary>
+/// The run itself: what gets applied, what gets put back, and what the user is told.
+/// </summary>
 public sealed class LatencyOptimizerTests
 {
     [Fact]
     public async Task OfflineStateFailsGracefullyWithoutTouchingTheAdapter()
     {
-        var controller = new FakeController();
-        var optimizer = CreateOptimizer(controller, new FakeProbe(), new FakeSnapshotStore());
-
-        var result = await optimizer.OptimizeAsync(LatencyModelTests.Network("offline", online: false));
+        var scenario = new LatencyScenario();
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("offline", online: false));
 
         Assert.Equal(LatencyOptimizationStatus.Offline, result.Status);
-        Assert.Empty(controller.Applied);
+        Assert.Empty(scenario.Controller.Applied);
     }
 
     [Fact]
-    public async Task ConnectivityFailureImmediatelyRollsBack()
+    public async Task AnUnsupportedAdapterIsReportedWithoutMeasuring()
     {
-        var controller = new FakeController();
-        var probe = new FakeProbe(LatencyModelTests.Measurement(25, 5, 36))
-        {
-            Connectivity = new LatencyConnectivity(false, false),
-        };
-        var snapshots = new FakeSnapshotStore();
-        var optimizer = CreateOptimizer(controller, probe, snapshots);
+        var scenario = new LatencyScenario(controller: new FakeController { Detect = _ => null });
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("unsupported"));
 
-        var result = await optimizer.OptimizeAsync(LatencyModelTests.Network("connectivity"));
-
-        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
-        Assert.Equal(["SelectiveSuspend"], controller.Restored);
-        Assert.Null(snapshots.Value);
+        Assert.Equal(LatencyOptimizationStatus.Unsupported, result.Status);
+        Assert.Empty(scenario.Controller.Applied);
     }
 
     [Fact]
-    public async Task NoMeasuredGainRestoresTheCandidate()
+    public async Task ARepeatableGainIsAcceptedKeptAndReportedWithRealNumbers()
     {
-        var controller = new FakeController();
-        var probe = new FakeProbe(
-            LatencyModelTests.Measurement(24, 3, 31),
-            LatencyModelTests.Measurement(23.8, 3.1, 31));
-        var snapshots = new FakeSnapshotStore();
-        var optimizer = CreateOptimizer(controller, probe, snapshots);
-
-        var result = await optimizer.OptimizeAsync(LatencyModelTests.Network("noise"));
-
-        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
-        Assert.Contains("geri alındı", result.StatusLine, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(["SelectiveSuspend"], controller.Restored);
-        Assert.Null(snapshots.Value);
-    }
-
-    [Fact]
-    public async Task RealRepeatableGainKeepsTheExactSnapshot()
-    {
-        var controller = new FakeController();
-        var probe = new FakeProbe(
-            LatencyModelTests.Measurement(26, 5, 38),
-            LatencyModelTests.Measurement(21, 2.5, 29),
-            LatencyModelTests.Measurement(21.2, 2.6, 29.5));
-        var snapshots = new FakeSnapshotStore();
-        var optimizer = CreateOptimizer(controller, probe, snapshots);
-
-        var result = await optimizer.OptimizeAsync(LatencyModelTests.Network("gain"));
+        var scenario = LatencyScenario.WithImprovement(gain: 5);
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("gain"));
 
         Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
         Assert.True(result.HasVerifiedGain);
-        Assert.NotNull(snapshots.Value);
-        Assert.Single(snapshots.Value!.Settings);
-        Assert.Empty(controller.Restored);
-        Assert.Contains("26.0 → 21.2", result.StatusLine, StringComparison.Ordinal);
+        Assert.Equal(["Seçmeli askıya alma kapalı"], result.AppliedChanges);
+
+        // The number the user is shown is the one the paired cycles measured.
+        Assert.NotNull(result.VerifiedImprovement);
+        Assert.Equal(5, result.VerifiedImprovement!.MedianMs, precision: 3);
+        Assert.Contains("Doğrulanmış iyileşme", result.StatusLine, StringComparison.Ordinal);
+        Assert.Contains("-5.0 ms", result.StatusLine, StringComparison.Ordinal);
+
+        // The setting is left on the adapter, and the snapshot says so.
+        Assert.Contains("SelectiveSuspend", scenario.Controller.Live);
+        Assert.NotNull(scenario.Snapshots.Value);
+        Assert.Equal(LatencyTransactionState.Committed, scenario.Snapshots.Value!.State);
     }
 
     [Fact]
-    public async Task PacketLossIncreaseRollsBackEvenWhenMedianLooksBetter()
+    public async Task ALinkNoSettingChangesIsLeftExactlyAsItWasFound()
     {
-        var controller = new FakeController();
-        var probe = new FakeProbe(
-            LatencyModelTests.Measurement(26, 5, 38),
-            LatencyModelTests.Measurement(20, 2, 28, loss: 8));
-        var optimizer = CreateOptimizer(controller, probe, new FakeSnapshotStore());
-
-        var result = await optimizer.OptimizeAsync(LatencyModelTests.Network("loss"));
+        var scenario = new LatencyScenario();
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("flat"));
 
         Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Contains("doğrulanmış bir gecikme iyileşmesi bulunamadı", result.StatusLine, StringComparison.Ordinal);
+        Assert.Contains("Özgün ayarlar geri yüklendi", result.StatusLine, StringComparison.Ordinal);
+        Assert.Empty(scenario.Controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
+        Assert.Null(result.VerifiedImprovement);
+    }
+
+    /// <summary>
+    /// The heart of the paired design: a network that simply gets quieter halfway through
+    /// the run must not be reported as a setting that worked.
+    /// </summary>
+    [Fact]
+    public async Task ANetworkThatQuietensDownOnItsOwnIsNotCreditedToTheCandidate()
+    {
+        var controller = new FakeController();
+
+        // Latency falls steadily with every measurement regardless of what is applied.
+        var probe = new FakeProbe(controller, (_, call) => Fake.Measurement(40 - call));
+        var scenario = new LatencyScenario(controller, probe);
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("drifting"));
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Empty(controller.Live);
+    }
+
+    [Fact]
+    public async Task EveryCandidateGetsAtLeastTwoPairedCycles()
+    {
+        var scenario = LatencyScenario.WithImprovement(gain: 6);
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("cycles"));
+
+        var verdict = Assert.Single(scenario.Optimizer.Current.Verdicts);
+
+        Assert.True(verdict.Accepted);
+        Assert.True(verdict.Cycles >= 2, $"only {verdict.Cycles} cycle(s) were run");
+
+        // Applied and restored once per cycle, plus the apply that keeps it.
+        Assert.True(scenario.Controller.Applied.Count >= 3);
+        Assert.True(scenario.Controller.Restored.Count >= 2);
+    }
+
+    [Fact]
+    public async Task ANoisyLinkGetsExtraCyclesAndThenAClearNo()
+    {
+        var controller = new FakeController();
+
+        // The first cycle looks like a large win and every later one like a small loss:
+        // the mean stays above the gain threshold while the cycles never agree.
+        var probe = new FakeProbe(controller, (live, call) => live.Contains("SelectiveSuspend")
+            ? Fake.Measurement(call == 3 ? 18 : 32)
+            : Fake.Measurement(30));
+        var scenario = new LatencyScenario(controller, probe, new LatencyOptimizerOptions
+        {
+            MinimumCycles = 2,
+            MaximumCycles = 4,
+        });
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("noisy"));
+        var verdict = Assert.Single(result.Verdicts);
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.False(verdict.Accepted);
+        Assert.True(verdict.Cycles > 2, "a noisy link should have been given more than the minimum");
+        Assert.Empty(controller.Live);
+    }
+
+    /// <summary>
+    /// A candidate measured while a download runs, against a baseline measured on an idle
+    /// link, is a measurement of the download. The cycle is thrown away and re-run.
+    /// </summary>
+    [Fact]
+    public async Task ACycleWhereOnlyOneHalfRanOnABusyLinkIsDiscardedAndRepeated()
+    {
+        var controller = new FakeController();
+
+        // Every "with the setting" window happens to be busy, and looks enormously
+        // better for it. None of those pairs may count.
+        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+            ? Fake.Measurement(12, load: LatencyLoadState.DownlinkLoaded)
+            : Fake.Measurement(40, load: LatencyLoadState.Idle));
+        var scenario = new LatencyScenario(controller, probe, new LatencyOptimizerOptions
+        {
+            MinimumCycles = 2,
+            MaximumCycles = 3,
+            MaximumLoadRetries = 2,
+        });
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("busy"));
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Empty(controller.Live);
+        Assert.Contains(scenario.Logs, line => line.Contains("latency.cycle.discarded", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The operational log is what an incident is reconstructed from, so the event names
+    /// are part of the contract rather than decoration.
+    /// </summary>
+    [Fact]
+    public async Task EveryStageOfARunIsLoggedUnderAStableEventName()
+    {
+        var scenario = LatencyScenario.WithImprovement(gain: 6);
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("logged"));
+
+        foreach (var expected in new[]
+        {
+            "latency.baseline.started",
+            "latency.baseline.completed",
+            "latency.candidate.applied",
+            "latency.cycle.completed",
+            "latency.candidate.accepted",
+            "latency.verification.completed",
+            "latency.committed",
+        })
+        {
+            Assert.Contains(scenario.Logs, line => line.Contains(expected, StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public async Task ARollbackIsLoggedFromStartToFinish()
+    {
+        var controller = new FakeController();
+        var probe = new FakeProbe(controller, (_, _) => Fake.Measurement(30))
+        {
+            BreaksConnectivity = "SelectiveSuspend",
+        };
+        var scenario = new LatencyScenario(controller, probe);
+
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("logged-rollback"));
+
+        Assert.Contains(scenario.Logs, line => line.Contains("latency.rollback.started", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ACandidateThatAddsPacketLossIsRolledBack()
+    {
+        var controller = new FakeController();
+        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+            ? Fake.Measurement(20, loss: 12)
+            : Fake.Measurement(30));
+        var scenario = new LatencyScenario(controller, probe);
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("loss"));
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Empty(controller.Live);
+        Assert.Contains("paket kaybı", result.StatusLine, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LosingConnectivityRollsEverythingBackAtOnce()
+    {
+        var controller = new FakeController();
+        var probe = new FakeProbe(controller, (_, _) => Fake.Measurement(30))
+        {
+            BreaksConnectivity = "SelectiveSuspend",
+        };
+        var scenario = new LatencyScenario(controller, probe);
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("dead"));
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Contains("Bağlantı denetimi", result.StatusLine, StringComparison.Ordinal);
         Assert.Equal(["SelectiveSuspend"], controller.Restored);
+        Assert.Empty(controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
+    }
+
+    [Fact]
+    public async Task ADriverThatDeclinesTheWriteEndsThatCandidateWithoutAVerdict()
+    {
+        var controller = new FakeController { RefuseApply = "SelectiveSuspend" };
+        var scenario = new LatencyScenario(controller, FakeProbe.Flat(controller));
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("refused"));
+        var verdict = Assert.Single(result.Verdicts);
+
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Contains("uygulamadı", verdict.Reason, StringComparison.Ordinal);
+        Assert.Empty(controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
     }
 
     [Fact]
@@ -315,96 +413,177 @@ public sealed class LatencyOptimizerTests
             PowerProperties = ["SelectiveSuspend", "DeviceSleepOnDisconnect"],
             ThrowOnApply = "DeviceSleepOnDisconnect",
         };
-        var probe = new FakeProbe(
-            LatencyModelTests.Measurement(28, 6, 40),
-            LatencyModelTests.Measurement(22, 3, 31));
-        var snapshots = new FakeSnapshotStore();
-        var optimizer = CreateOptimizer(controller, probe, snapshots);
+        var probe = FakeProbe.Improves(controller, gain: 6);
+        var scenario = new LatencyScenario(controller, probe);
 
-        var result = await optimizer.OptimizeAsync(LatencyModelTests.Network("throw"));
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("throw"));
 
         Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
-        Assert.Equal(["DeviceSleepOnDisconnect", "SelectiveSuspend"], controller.Restored);
-        Assert.Null(snapshots.Value);
+        Assert.Contains("DeviceSleepOnDisconnect", controller.Restored);
+        Assert.Contains("SelectiveSuspend", controller.Restored);
+        Assert.Empty(controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
     }
 
     [Fact]
-    public async Task MissingAdapterKeepsSnapshotForLaterRecovery()
+    public async Task AnAdapterThatDisappearsMidRunKeepsTheSnapshotForLater()
     {
-        var snapshots = new FakeSnapshotStore
+        var scenario = new LatencyScenario(new FakeController { RestoreOutcome = LatencyRestoreOutcome.MissingAdapter })
         {
-            Value = LatencyModelTests.Snapshot("missing", "SelectiveSuspend"),
+            Snapshots = { Value = Fake.Snapshot("missing", "SelectiveSuspend") },
         };
-        var controller = new FakeController { RestoreOutcome = LatencyRestoreOutcome.MissingAdapter };
-        var optimizer = CreateOptimizer(controller, new FakeProbe(), snapshots);
 
-        var result = await optimizer.RestoreAsync();
+        var result = await scenario.Optimizer.RestoreAsync();
 
         Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
-        Assert.NotNull(snapshots.Value);
+        Assert.NotNull(scenario.Snapshots.Value);
     }
 
     [Fact]
-    public async Task MissingPropertyDoesNotPreventTheRemainingSnapshotFromClearing()
+    public async Task APropertyThatNoLongerExistsDoesNotBlockTheSnapshotFromClearing()
     {
-        var snapshots = new FakeSnapshotStore
+        var scenario = new LatencyScenario(new FakeController { RestoreOutcome = LatencyRestoreOutcome.MissingProperty })
         {
-            Value = LatencyModelTests.Snapshot("updated-driver", "SelectiveSuspend"),
+            Snapshots = { Value = Fake.Snapshot("updated-driver", "SelectiveSuspend") },
         };
-        var controller = new FakeController { RestoreOutcome = LatencyRestoreOutcome.MissingProperty };
-        var optimizer = CreateOptimizer(controller, new FakeProbe(), snapshots);
 
-        var result = await optimizer.RestoreAsync();
+        var result = await scenario.Optimizer.RestoreAsync();
 
         Assert.Equal(LatencyOptimizationStatus.Disabled, result.Status);
-        Assert.Null(snapshots.Value);
+        Assert.Null(scenario.Snapshots.Value);
     }
 
     [Fact]
     public async Task ModeOffPerformsAFullRestore()
     {
-        var controller = new FakeController();
-        var snapshots = new FakeSnapshotStore();
-        var optimizer = CreateSuccessfulOptimizer(controller, snapshots, "mode-off");
+        var scenario = LatencyScenario.WithImprovement();
 
-        await optimizer.OptimizeAsync(LatencyModelTests.Network("mode-off"));
-        var result = await optimizer.StopAndRestoreAsync();
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("mode-off"));
+        var result = await scenario.Optimizer.StopAndRestoreAsync();
 
         Assert.Equal(LatencyOptimizationStatus.Disabled, result.Status);
-        Assert.Equal(["SelectiveSuspend"], controller.Restored);
-        Assert.Null(snapshots.Value);
+        Assert.Empty(scenario.Controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
     }
 
     [Fact]
     public async Task AppShutdownRestoresPersistentNicSettings()
     {
-        var controller = new FakeController();
-        var snapshots = new FakeSnapshotStore();
-        var optimizer = CreateSuccessfulOptimizer(controller, snapshots, "shutdown");
+        var scenario = LatencyScenario.WithImprovement();
 
-        await optimizer.OptimizeAsync(LatencyModelTests.Network("shutdown"));
-        await optimizer.DisposeAsync();
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("shutdown"));
+        await scenario.Optimizer.DisposeAsync();
 
-        Assert.Equal(["SelectiveSuspend"], controller.Restored);
-        Assert.Null(snapshots.Value);
+        Assert.Empty(scenario.Controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
     }
+
+    // --- crash recovery ---------------------------------------------------------------
+
+    [Fact]
+    public async Task AnInterruptedRunIsRolledBackOnTheNextLaunch()
+    {
+        var scenario = new LatencyScenario
+        {
+            Snapshots =
+            {
+                Value = Fake.Snapshot("adapter-crash", "SelectiveSuspend", state: LatencyTransactionState.CandidateApplied),
+            },
+        };
+
+        Assert.True(await scenario.Optimizer.RecoverAsync());
+
+        Assert.Equal(["SelectiveSuspend"], scenario.Controller.Restored);
+        Assert.Null(scenario.Snapshots.Value);
+    }
+
+    /// <summary>
+    /// Recovery is not gated on the mode being on. A machine that crashed mid-run has
+    /// values on it nobody verified, whatever the settings file says now.
+    /// </summary>
+    [Fact]
+    public async Task RecoveryLeavesACommittedSnapshotAloneForTheModeToOwn()
+    {
+        var scenario = new LatencyScenario
+        {
+            Snapshots = { Value = Fake.Snapshot("adapter-live", "SelectiveSuspend") },
+        };
+
+        Assert.True(await scenario.Optimizer.RecoverAsync());
+
+        Assert.Empty(scenario.Controller.Restored);
+        Assert.NotNull(scenario.Snapshots.Value);
+    }
+
+    [Fact]
+    public async Task RecoveryWithNothingToDoIsAQuietSuccess()
+    {
+        var scenario = new LatencyScenario();
+
+        Assert.True(await scenario.Optimizer.RecoverAsync());
+        Assert.Empty(scenario.Controller.Restored);
+    }
+
+    [Fact]
+    public async Task ARecoveryThatCannotFinishIsReportedAndTheSnapshotIsKept()
+    {
+        var scenario = new LatencyScenario(new FakeController { RestoreOutcome = LatencyRestoreOutcome.Failed })
+        {
+            Snapshots =
+            {
+                Value = Fake.Snapshot("adapter-stuck", "SelectiveSuspend", state: LatencyTransactionState.Verifying),
+            },
+        };
+
+        Assert.False(await scenario.Optimizer.RecoverAsync());
+
+        Assert.NotNull(scenario.Snapshots.Value);
+        Assert.Equal(LatencyOptimizationStatus.Failed, scenario.Optimizer.Current.Status);
+    }
+
+    [Fact]
+    public async Task AnUnrestorableSnapshotStopsANewRunFromStarting()
+    {
+        var scenario = new LatencyScenario(new FakeController { RestoreOutcome = LatencyRestoreOutcome.Failed })
+        {
+            Snapshots = { Value = Fake.Snapshot("stuck", "SelectiveSuspend") },
+        };
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("blocked"));
+
+        Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
+        Assert.Empty(scenario.Controller.Applied);
+    }
+
+    /// <summary>The original value has to be on disk before it is overwritten, not after.</summary>
+    [Fact]
+    public async Task TheOriginalValueIsRecordedBeforeItIsOverwritten()
+    {
+        var controller = new FakeController();
+        var scenario = new LatencyScenario(controller, FakeProbe.Improves(controller));
+        var snapshotWrites = new List<string?>();
+        var applies = new List<string>();
+
+        scenario.Snapshots.OnSave = snapshot => snapshotWrites.Add(snapshot.PendingProperty);
+        controller.OnApply = property => applies.Add(property);
+
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("ordering"));
+
+        Assert.Contains("SelectiveSuspend", snapshotWrites);
+        Assert.NotEmpty(applies);
+        Assert.Equal(LatencyTransactionState.Committed, scenario.Snapshots.Value!.State);
+    }
+
+    // --- network identity ---------------------------------------------------------------
 
     [Fact]
     public async Task NetworkChangeRestoresTheOldAdapterBeforeApplyingTheNewOne()
     {
         var controller = new FakeController();
-        var snapshots = new FakeSnapshotStore();
-        var probe = new FakeProbe(
-            LatencyModelTests.Measurement(28, 6, 40),
-            LatencyModelTests.Measurement(21, 2, 29),
-            LatencyModelTests.Measurement(21.2, 2.1, 30),
-            LatencyModelTests.Measurement(31, 6, 44),
-            LatencyModelTests.Measurement(24, 3, 34),
-            LatencyModelTests.Measurement(24.2, 3, 34.5));
-        var optimizer = CreateOptimizer(controller, probe, snapshots);
+        var scenario = new LatencyScenario(controller, FakeProbe.Improves(controller, gain: 6));
 
-        await optimizer.OptimizeAsync(LatencyModelTests.Network("old"));
-        await optimizer.OptimizeNetworkChangeAsync(LatencyModelTests.Network("new"));
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("old"));
+        await scenario.Optimizer.OptimizeNetworkChangeAsync(Fake.Network("new"));
 
         Assert.Equal("adapter-old:SelectiveSuspend", controller.Events[0]);
         Assert.Contains("restore:adapter-old:SelectiveSuspend", controller.Events);
@@ -412,33 +591,28 @@ public sealed class LatencyOptimizerTests
     }
 
     [Fact]
-    public async Task DuplicateNetworkNotificationDoesNotApplyTwice()
+    public async Task DuplicateNetworkNotificationDoesNotRunTheBenchmarkTwice()
     {
-        var controller = new FakeController();
-        var snapshots = new FakeSnapshotStore();
-        var network = LatencyModelTests.Network("same");
-        var optimizer = CreateSuccessfulOptimizer(controller, snapshots, "same");
+        var scenario = LatencyScenario.WithImprovement();
+        var network = Fake.Network("same");
 
-        await optimizer.OptimizeAsync(network);
-        await optimizer.OptimizeNetworkChangeAsync(network);
+        await scenario.Optimizer.OptimizeAsync(network);
+        var applies = scenario.Controller.Applied.Count;
 
-        Assert.Single(controller.Applied);
+        await scenario.Optimizer.OptimizeNetworkChangeAsync(network);
+
+        Assert.Equal(applies, scenario.Controller.Applied.Count);
     }
 
     [Fact]
     public async Task ConcurrentOperationsNeverApplyAtTheSameTime()
     {
-        var controller = new FakeController { ApplyDelay = TimeSpan.FromMilliseconds(150) };
-        var probe = new FakeProbe(
-            LatencyModelTests.Measurement(30, 6, 43),
-            LatencyModelTests.Measurement(31, 6, 44),
-            LatencyModelTests.Measurement(24, 3, 34),
-            LatencyModelTests.Measurement(24.2, 3, 34.5));
-        var optimizer = CreateOptimizer(controller, probe, new FakeSnapshotStore());
+        var controller = new FakeController { ApplyDelay = TimeSpan.FromMilliseconds(60) };
+        var scenario = new LatencyScenario(controller, FakeProbe.Flat(controller));
 
-        var first = optimizer.OptimizeAsync(LatencyModelTests.Network("concurrent-a"));
+        var first = scenario.Optimizer.OptimizeAsync(Fake.Network("concurrent-a"));
         await Task.Delay(30);
-        var second = optimizer.OptimizeAsync(LatencyModelTests.Network("concurrent-b"));
+        var second = scenario.Optimizer.OptimizeAsync(Fake.Network("concurrent-b"));
         await Task.WhenAll(first, second);
 
         Assert.Equal(1, controller.MaxConcurrentApplies);
@@ -448,144 +622,101 @@ public sealed class LatencyOptimizerTests
     public async Task CancellationAfterSnapshotCaptureRestoresTheCandidate()
     {
         var controller = new FakeController { ApplyDelay = TimeSpan.FromSeconds(5) };
-        var snapshots = new FakeSnapshotStore();
-        var optimizer = CreateOptimizer(
-            controller,
-            new FakeProbe(LatencyModelTests.Measurement(30, 6, 43)),
-            snapshots);
+        var scenario = new LatencyScenario(controller, FakeProbe.Flat(controller));
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
 
-        var result = await optimizer.OptimizeAsync(LatencyModelTests.Network("cancel"), cancellation.Token);
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("cancel"), cancellation.Token);
 
         Assert.Equal(LatencyOptimizationStatus.Cancelled, result.Status);
         Assert.Equal(["SelectiveSuspend"], controller.Restored);
-        Assert.Null(snapshots.Value);
+        Assert.Empty(controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
     }
 
-    private static LatencyOptimizer CreateSuccessfulOptimizer(
-        FakeController controller,
-        FakeSnapshotStore snapshots,
-        string suffix) => CreateOptimizer(
-        controller,
-        new FakeProbe(
-            LatencyModelTests.Measurement(28, 6, 40),
-            LatencyModelTests.Measurement(21, 2, 29),
-            LatencyModelTests.Measurement(21.2, 2.1, 30)),
-        snapshots);
+    // --- profiles -------------------------------------------------------------------------
 
-    private static LatencyOptimizer CreateOptimizer(
-        FakeController controller,
-        FakeProbe probe,
-        FakeSnapshotStore snapshots)
-        => new(controller, probe, snapshots, log: _ => { });
-
-    private sealed class FakeController : ILatencyAdapterController
+    [Fact]
+    public async Task AVerifiedResultIsRememberedAgainstTheAdapterAndNetwork()
     {
-        private int _concurrentApplies;
+        var scenario = LatencyScenario.WithImprovement();
+        var network = Fake.Network("profiled");
 
-        public string[] PowerProperties { get; init; } = ["SelectiveSuspend"];
-        public string? ThrowOnApply { get; init; }
-        public TimeSpan ApplyDelay { get; init; }
-        public LatencyRestoreOutcome RestoreOutcome { get; init; } = LatencyRestoreOutcome.Restored;
-        public List<string> Applied { get; } = [];
-        public List<string> Restored { get; } = [];
-        public List<string> Events { get; } = [];
-        public int MaxConcurrentApplies { get; private set; }
+        await scenario.Optimizer.OptimizeAsync(network);
+        var profile = Assert.Single(scenario.Profiles.Profiles);
 
-        public Task<AdapterLatencyCapability?> DetectAsync(
-            NetworkFingerprint network,
-            CancellationToken cancellationToken = default)
-            => Task.FromResult<AdapterLatencyCapability?>(LatencyModelTests.Capability(network, PowerProperties));
-
-        public async Task<LatencyApplyResult> ApplyAsync(
-            AdapterLatencyCapability adapter,
-            LatencyOptimizationCandidate candidate,
-            CancellationToken cancellationToken = default)
-        {
-            var concurrent = Interlocked.Increment(ref _concurrentApplies);
-            MaxConcurrentApplies = Math.Max(MaxConcurrentApplies, concurrent);
-            Applied.Add(candidate.PropertyName);
-            Events.Add($"{adapter.AdapterId}:{candidate.PropertyName}");
-
-            try
-            {
-                if (ApplyDelay > TimeSpan.Zero)
-                {
-                    await Task.Delay(ApplyDelay, cancellationToken);
-                }
-
-                if (candidate.PropertyName == ThrowOnApply)
-                {
-                    throw new InvalidOperationException("driver apply failed");
-                }
-
-                return new LatencyApplyResult(true);
-            }
-            finally
-            {
-                Interlocked.Decrement(ref _concurrentApplies);
-            }
-        }
-
-        public Task<LatencyRestoreOutcome> RestoreAsync(
-            LatencySettingSnapshot setting,
-            CancellationToken cancellationToken = default)
-        {
-            Restored.Add(setting.PropertyName);
-            Events.Add($"restore:{setting.AdapterId}:{setting.PropertyName}");
-            return Task.FromResult(RestoreOutcome);
-        }
+        Assert.Equal(network.Key, profile.NetworkKey);
+        Assert.Equal(network.AdapterId, profile.AdapterId);
+        Assert.Equal(["SelectiveSuspend"], profile.AcceptedProperties);
+        Assert.NotNull(profile.Baseline);
+        Assert.NotNull(profile.Optimized);
     }
 
-    private sealed class FakeProbe(params LatencyMeasurement[] measurements) : ILatencyProbe
+    [Fact]
+    public async Task ACandidateAlreadyRejectedOnThisExactNetworkIsNotRetested()
     {
-        private readonly Queue<LatencyMeasurement> _measurements = new(measurements);
+        var scenario = new LatencyScenario();
+        var network = Fake.Network("cached");
 
-        public LatencyConnectivity Connectivity { get; init; } = new(true, true);
+        await scenario.Optimizer.OptimizeAsync(network);
+        Assert.NotEmpty(scenario.Controller.Applied);
 
-        public Task<LatencyMeasurement> MeasureAsync(
-            NetworkFingerprint network,
-            string? remoteEndpoint = null,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (_measurements.Count == 0)
-            {
-                throw new InvalidOperationException("Fake measurement queue is empty.");
-            }
+        var second = new LatencyScenario(new FakeController(), profiles: scenario.Profiles);
+        var result = await second.Optimizer.OptimizeAsync(network);
 
-            return Task.FromResult(_measurements.Dequeue());
-        }
-
-        public Task<LatencyConnectivity> CheckConnectivityAsync(
-            NetworkFingerprint network,
-            string remoteEndpoint,
-            CancellationToken cancellationToken = default)
-            => Task.FromResult(Connectivity);
+        Assert.Empty(second.Controller.Applied);
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+        Assert.Contains("denenecek güvenli bir ayar kalmadı", result.StatusLine, StringComparison.Ordinal);
     }
 
-    private sealed class FakeSnapshotStore : ILatencySnapshotStore
+    /// <summary>
+    /// A profile proved on one adapter must never suppress testing on another. Same
+    /// network, different card.
+    /// </summary>
+    [Fact]
+    public async Task AProfileFromAnotherAdapterIsNotReused()
     {
-        public LatencyOptimizationSnapshot? Value { get; set; }
+        var scenario = new LatencyScenario();
+        await scenario.Optimizer.OptimizeAsync(Fake.Network("shared-net"));
 
-        public Task<LatencyOptimizationSnapshot?> LoadAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(Clone(Value));
-
-        public Task SaveAsync(LatencyOptimizationSnapshot snapshot, CancellationToken cancellationToken = default)
+        var other = new LatencyScenario(new FakeController(), profiles: scenario.Profiles);
+        await other.Optimizer.OptimizeAsync(Fake.Network("shared-net") with
         {
-            Value = Clone(snapshot);
-            return Task.CompletedTask;
-        }
+            AdapterId = "adapter-other",
+            AdapterName = "Realtek Wi-Fi",
+        });
 
-        public Task ClearAsync(CancellationToken cancellationToken = default)
+        Assert.NotEmpty(other.Controller.Applied);
+    }
+
+    [Fact]
+    public async Task ADriverUpdateInvalidatesTheStoredResult()
+    {
+        var scenario = new LatencyScenario();
+        var network = Fake.Network("driver");
+        await scenario.Optimizer.OptimizeAsync(network);
+
+        // Same adapter and network, different capability surface.
+        var updated = new FakeController
         {
-            Value = null;
-            return Task.CompletedTask;
-        }
+            Detect = fingerprint => Fake.Capability(fingerprint) with { InterfaceDescription = "new driver 2.0" },
+        };
+        var second = new LatencyScenario(updated, profiles: scenario.Profiles);
+        await second.Optimizer.OptimizeAsync(network);
 
-        private static LatencyOptimizationSnapshot? Clone(LatencyOptimizationSnapshot? snapshot)
-            => snapshot is null
-                ? null
-                : snapshot with { Settings = snapshot.Settings.Select(setting => setting with { OriginalValues = [.. setting.OriginalValues] }).ToList() };
+        Assert.NotEmpty(second.Controller.Applied);
+    }
+
+    [Fact]
+    public async Task AProfileOlderThanAMonthIsMeasuredAgain()
+    {
+        var scenario = new LatencyScenario();
+        var network = Fake.Network("stale");
+        await scenario.Optimizer.OptimizeAsync(network);
+
+        var later = DateTimeOffset.UtcNow + LatencyProfile.MaximumAge + TimeSpan.FromDays(1);
+        var second = new LatencyScenario(new FakeController(), profiles: scenario.Profiles, now: () => later);
+        await second.Optimizer.OptimizeAsync(network);
+
+        Assert.NotEmpty(second.Controller.Applied);
     }
 }

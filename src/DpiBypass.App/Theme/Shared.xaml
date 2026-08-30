@@ -262,7 +262,27 @@
                                 Width="212"
                                 Background="Transparent"
                                 SnapsToDevicePixels="True">
-                            <TabPanel IsItemsHost="True" Margin="12,6,10,12" />
+                            <!--
+                              StackPanel, not TabPanel. With TabStripPlacement=Left,
+                              TabPanel arranges each item into DesiredSize *minus its
+                              margin* and then advances by the same amount, while
+                              FrameworkElement.ArrangeCore still subtracts that margin
+                              from the slot. The item therefore renders taller than the
+                              rect it was arranged into and WPF applies a layout clip -
+                              which is what sliced the bottom edge and the lower rounded
+                              corners off the selected item's blue chrome, by a differing
+                              number of device pixels at every fractional DPI scale.
+                              A StackPanel gives each item its full measured height, so
+                              the gap between items is real layout space and nothing is
+                              clipped. Nothing here needs TabPanel's multi-row wrapping,
+                              which only ever applies to Top/Bottom placement anyway.
+                            -->
+                            <StackPanel IsItemsHost="True"
+                                        Orientation="Vertical"
+                                        Margin="12,6,10,12"
+                                        UseLayoutRounding="True"
+                                        SnapsToDevicePixels="True"
+                                        KeyboardNavigation.DirectionalNavigation="Cycle" />
                         </Border>
                         <Border Grid.Column="1"
                                 Width="1"
@@ -281,20 +301,38 @@
     <Style x:Key="NavTabItemStyle" TargetType="TabItem">
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
         <Setter Property="FontSize" Value="13" />
-        <Setter Property="Margin" Value="0,0,0,2" />
+        <!--
+          The 2px gap between rail items is deliberately NOT a margin on the TabItem.
+          A margin here is layout the parent panel has to honour, and any panel that
+          measures an item as "desired size minus margin" (WPF's own TabPanel does
+          exactly that for Left/Right placement) arranges the item into a slot smaller
+          than it measured, which WPF resolves with a layout clip across the bottom
+          edge. The gap lives inside the template instead, where it is part of the
+          item's own measured height and can never be dropped.
+        -->
+        <Setter Property="Margin" Value="0" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="UseLayoutRounding" Value="True" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
+                    <!--
+                      Spacer, not a negative margin or a transform: the gap below the
+                      selected chrome is measured layout the item owns, so the blue
+                      background always has its full 38px and its rounded corners
+                      inside the arranged slot.
+                    -->
                     <Border x:Name="Chrome"
                             Background="Transparent"
                             BorderBrush="Transparent"
                             BorderThickness="1"
                             CornerRadius="6"
                             MinHeight="38"
+                            Margin="0,0,0,2"
                             Padding="10,8"
-                            SnapsToDevicePixels="True">
+                            SnapsToDevicePixels="True"
+                            UseLayoutRounding="True">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />

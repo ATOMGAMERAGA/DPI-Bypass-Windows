@@ -252,8 +252,8 @@ jobs:
           - 14 atlatma yöntemi; ağa göre en hızlısı gerçek bağlantı testleriyle ölçülerek seçilir.
           - Ağ değiştiğinde çalışan yöntem arka planda yeniden bulunur, düzenli denetimle doğrulanır.
           - Yeni engelli siteler kendiliğinden ölçülüp listeye eklenir; liste arayüzden düzenlenebilir.
-          - Vodafone sınırsız modu: hotspot TTL düzeltmesi (yalnızca kaydettiğiniz ağlarda).
-          - Beta Ping Düşürme: gerçek RTT/jitter/kayıp ölçümüyle yalnızca güvenli NIC ayarlarını dener; kazanç yoksa geri alır.
+          - Mobil hotspot uyumluluğu ve tanılama: IPv4/IPv6, DNS, RTT, kayıp, MTU ve operatör NAT'ı kontrolü — hiçbir şeyi değiştirmeden.
+          - Beta Ping Düşürme: eşli A/B turlarıyla median/p95/p99/jitter ölçer; kazanç tekrarlanmazsa ayarı geri alır.
           - Şifreli DNS: Cloudflare birincil, Google ve Quad9 yedek.
           - Kapsam seçimi: yalnızca Discord, engelli site listesi, + tarayıcılar veya tüm sistem.
           - Her Windows açılışında yükseltilmiş oturum açma göreviyle başlar.
