@@ -216,13 +216,16 @@ public sealed class LatencyOptimizerTests
     [Fact]
     public async Task TheHeadlineGainComesFromBaselineToFinalRatherThanSummedCandidateDeltas()
     {
+        // Two power properties that are both real candidates. DeviceSleepOnDisconnect
+        // deliberately is not one: the keyword governs what the adapter does when the
+        // media is disconnected, which is not a state a running game is ever in.
         var controller = new FakeController
         {
-            PowerProperties = ["SelectiveSuspend", "DeviceSleepOnDisconnect"],
+            PowerProperties = ["SelectiveSuspend", "D0PacketCoalescing"],
         };
         var probe = new FakeProbe(controller, (live, call) =>
         {
-            if (live.Contains("SelectiveSuspend") && live.Contains("DeviceSleepOnDisconnect"))
+            if (live.Contains("SelectiveSuspend") && live.Contains("D0PacketCoalescing"))
             {
                 // Paired B cycles see 32 ms (a 3 ms incremental gain), while the
                 // independent final state measures 34 ms.
@@ -457,8 +460,8 @@ public sealed class LatencyOptimizerTests
     {
         var controller = new FakeController
         {
-            PowerProperties = ["SelectiveSuspend", "DeviceSleepOnDisconnect"],
-            ThrowOnApply = "DeviceSleepOnDisconnect",
+            PowerProperties = ["SelectiveSuspend", "D0PacketCoalescing"],
+            ThrowOnApply = "D0PacketCoalescing",
         };
         var probe = FakeProbe.Improves(controller, gain: 6);
         var scenario = new LatencyScenario(controller, probe);
@@ -466,7 +469,7 @@ public sealed class LatencyOptimizerTests
         var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("throw"));
 
         Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
-        Assert.Contains("DeviceSleepOnDisconnect", controller.Restored);
+        Assert.Contains("D0PacketCoalescing", controller.Restored);
         Assert.Contains("SelectiveSuspend", controller.Restored);
         Assert.Empty(controller.Live);
         Assert.Null(scenario.Snapshots.Value);

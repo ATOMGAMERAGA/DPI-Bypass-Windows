@@ -2,18 +2,54 @@ using System.Net.NetworkInformation;
 
 namespace DpiBypass.Core.Network;
 
+/// <summary>
+/// What the feature is doing, which is not the same question as whether it is on.
+/// </summary>
+/// <remarks>
+/// The distinction that matters most here is between <see cref="Disabled"/> and
+/// <see cref="NoGain"/>. A user who turned the mode on and got no local win has a mode
+/// that is on and watching the network; showing that as "off" would be a lie about
+/// their own settings, and would invite them to turn it on again and again.
+/// </remarks>
 public enum LatencyOptimizationStatus
 {
+    /// <summary>The user has not turned the mode on.</summary>
     Disabled,
+
+    /// <summary>Working out the adapter, the target and the starting numbers.</summary>
     Measuring,
+
+    /// <summary>Applying and benchmarking candidates.</summary>
     Optimizing,
+
+    /// <summary>At least one change was verified and is in place.</summary>
     Active,
+
+    /// <summary>On, watching, and nothing locally fixable was found.</summary>
     NoGain,
+
+    /// <summary>No supported physical adapter; diagnostics still work.</summary>
     Unsupported,
+
     Offline,
     Restoring,
     Failed,
     Cancelled,
+
+    /// <summary>A short measurement pass with no setting changes.</summary>
+    QuickTesting,
+
+    /// <summary>A controlled experiment with real load on the link.</summary>
+    LoadTesting,
+
+    /// <summary>Only idle latency has been measured; the loaded picture is unknown.</summary>
+    NeedsDeepTest,
+
+    /// <summary>On, changing nothing, reporting what it measures.</summary>
+    MonitoringOnly,
+
+    /// <summary>A QoS policy is in place and verified to reduce loaded latency.</summary>
+    TrafficGuardActive,
 }
 
 /// <summary>
@@ -63,6 +99,9 @@ public enum LatencySettingKind
 {
     PowerManagement,
     AdvancedProperty,
+
+    /// <summary>A policy-based QoS rule this application created and owns.</summary>
+    QosPolicy,
 }
 
 public enum LatencyRestoreOutcome
@@ -186,32 +225,68 @@ public sealed record LatencyPathAnalysis
     /// <summary>Extra median delay seen while the link carried this machine's own traffic.</summary>
     public double? QueueingMs { get; init; }
 
+    /// <summary>Extra median delay measured specifically while sending.</summary>
+    public double? UploadQueueingMs { get; init; }
+
+    /// <summary>Extra median delay measured specifically while receiving.</summary>
+    public double? DownloadQueueingMs { get; init; }
+
     /// <summary>Whether a NIC change has any realistic chance of moving this number.</summary>
     public required bool LocallyImprovable { get; init; }
 
+    /// <summary>
+    /// Whether pacing this machine's own outbound bulk traffic could move it.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately separate from <see cref="LocallyImprovable"/>, which is about adapter
+    /// properties. Queueing on the access link is not something a NIC keyword touches,
+    /// but it is something a send-rate limit can, and conflating the two is how a user
+    /// ends up being told nothing can be done when something can.
+    /// </remarks>
+    public bool TrafficGuardApplicable { get; init; }
+
     public required string Summary { get; init; }
+
+    /// <summary>Whether an idle-versus-loaded comparison was actually available.</summary>
+    public bool HasLoadedEvidence => QueueingMs is not null;
 
     /// <summary>
     /// The gateway has to be answering, and answering with something worth attributing,
     /// before any split is claimed.
     /// </summary>
     public static LatencyPathAnalysis Describe(LatencyMeasurement measurement, LatencyMeasurement? loaded = null)
+        => Describe(
+            measurement,
+            loaded?.Load.State is LatencyLoadState.UplinkLoaded or LatencyLoadState.BidirectionalLoaded ? loaded : null,
+            loaded?.Load.State is LatencyLoadState.DownlinkLoaded or LatencyLoadState.BidirectionalLoaded ? loaded : null);
+
+    /// <summary>
+    /// The full picture: idle against a measured upload window and a measured download one.
+    /// </summary>
+    /// <remarks>
+    /// Reporting the two directions separately matters because they have different
+    /// fixes. Upload queueing is the one this machine can do something about, by pacing
+    /// what it sends; download queueing lives in the operator's equipment, where a rate
+    /// limit set here arrives far too late to help.
+    /// </remarks>
+    public static LatencyPathAnalysis Describe(
+        LatencyMeasurement measurement,
+        LatencyMeasurement? uploadLoaded,
+        LatencyMeasurement? downloadLoaded)
     {
         ArgumentNullException.ThrowIfNull(measurement);
 
         var gateway = measurement.GatewayMedianRttMs;
-        double? queueing = null;
+        var uploadQueueing = QueueingAgainst(measurement, uploadLoaded);
+        var downloadQueueing = QueueingAgainst(measurement, downloadLoaded);
 
-        // Only a like-for-like pair says anything: an idle window against a busy one on
-        // the same path. Anything else is two different networks being subtracted.
-        if (loaded is not null
-            && loaded.HasRemoteConnectivity
-            && measurement.HasRemoteConnectivity
-            && measurement.Load.State == LatencyLoadState.Idle
-            && loaded.Load.IsLoaded)
+        double? queueing = (uploadQueueing, downloadQueueing) switch
         {
-            queueing = Math.Max(0, loaded.MedianRttMs - measurement.MedianRttMs);
-        }
+            (null, null) => null,
+            ({ } up, null) => up,
+            (null, { } down) => down,
+            ({ } up, { } down) => Math.Max(up, down),
+        };
 
         if (!measurement.HasRemoteConnectivity)
         {
@@ -221,6 +296,8 @@ public sealed record LatencyPathAnalysis
                 LocalLinkMs = gateway,
                 RemotePathMs = null,
                 QueueingMs = queueing,
+                UploadQueueingMs = uploadQueueing,
+                DownloadQueueingMs = downloadQueueing,
                 LocallyImprovable = false,
                 Summary = "Uzak uç ölçülemedi; gecikmenin nerede olduğu belirlenemiyor.",
             };
@@ -230,7 +307,7 @@ public sealed record LatencyPathAnalysis
 
         // Queueing that only appears under load is the one local problem a user can
         // actually act on, so it outranks the static split.
-        if (queueing is { } queue && queue >= 15)
+        if (queueing is { } queue && queue >= QueueingThresholdMs)
         {
             return new LatencyPathAnalysis
             {
@@ -238,7 +315,10 @@ public sealed record LatencyPathAnalysis
                 LocalLinkMs = gateway,
                 RemotePathMs = remotePath,
                 QueueingMs = queue,
+                UploadQueueingMs = uploadQueueing,
+                DownloadQueueingMs = downloadQueueing,
                 LocallyImprovable = false,
+                TrafficGuardApplicable = uploadQueueing >= QueueingThresholdMs,
                 Summary = $"Kendi trafiğiniz aktifken gecikme {queue:F0} ms artıyor (kuyruklanma). "
                     + "Bu, yükleme/gönderim hızını sınırlamakla düzelir; NIC ayarıyla düzelmez.",
             };
@@ -256,6 +336,8 @@ public sealed record LatencyPathAnalysis
                     LocalLinkMs = linkMs,
                     RemotePathMs = remotePath,
                     QueueingMs = queueing,
+                    UploadQueueingMs = uploadQueueing,
+                    DownloadQueueingMs = downloadQueueing,
                     LocallyImprovable = true,
                     Summary = $"Gecikmenin büyük kısmı ilk atlamada ({linkMs:F1} ms). "
                         + "Bağdaştırıcı ayarları burada işe yarayabilir.",
@@ -270,6 +352,8 @@ public sealed record LatencyPathAnalysis
                     LocalLinkMs = linkMs,
                     RemotePathMs = remotePath,
                     QueueingMs = queueing,
+                    UploadQueueingMs = uploadQueueing,
+                    DownloadQueueingMs = downloadQueueing,
                     LocallyImprovable = false,
                     Summary = $"İlk atlama {linkMs:F1} ms; gecikmenin {remotePath:F0} ms'i operatör ve "
                         + "internet yolunda. Bunu bilgisayardaki bir ayar değiştiremez.",
@@ -282,6 +366,8 @@ public sealed record LatencyPathAnalysis
                 LocalLinkMs = linkMs,
                 RemotePathMs = remotePath,
                 QueueingMs = queueing,
+                UploadQueueingMs = uploadQueueing,
+                DownloadQueueingMs = downloadQueueing,
                 LocallyImprovable = true,
                 Summary = $"İlk atlama {linkMs:F1} ms, kalan {remotePath:F0} ms erişim hattında ve ötesinde.",
             };
@@ -293,10 +379,41 @@ public sealed record LatencyPathAnalysis
             LocalLinkMs = null,
             RemotePathMs = null,
             QueueingMs = queueing,
+            UploadQueueingMs = uploadQueueing,
+            DownloadQueueingMs = downloadQueueing,
             LocallyImprovable = false,
+            TrafficGuardApplicable = uploadQueueing >= QueueingThresholdMs,
             Summary = "Ağ geçidi ICMP yanıtlamıyor; yerel ve uzak gecikme ayrıştırılamadı. "
                 + "Bu bilinmeyen bir kaynak sınıflandırmasıdır; yerel NIC sorunu olduğu varsayılmaz.",
         };
+    }
+
+    /// <summary>Added delay under load must clear this before it is called queueing.</summary>
+    public const double QueueingThresholdMs = 15;
+
+    /// <summary>
+    /// The added median delay of a loaded window against an idle one, when the pair is
+    /// worth subtracting at all.
+    /// </summary>
+    /// <remarks>
+    /// Both halves have to have reached the same endpoint over the same transport, one
+    /// has to have been idle and the other loaded. Anything else is two measurements of
+    /// two different situations, and their difference is not a queue.
+    /// </remarks>
+    private static double? QueueingAgainst(LatencyMeasurement idle, LatencyMeasurement? loaded)
+    {
+        if (loaded is null
+            || !loaded.HasRemoteConnectivity
+            || !idle.HasRemoteConnectivity
+            || idle.Load.State != LatencyLoadState.Idle
+            || !loaded.Load.IsLoaded
+            || !string.Equals(idle.RemoteEndpoint, loaded.RemoteEndpoint, StringComparison.Ordinal)
+            || !string.Equals(idle.Protocol, loaded.Protocol, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return Math.Max(0, loaded.MedianRttMs - idle.MedianRttMs);
     }
 }
 
@@ -330,6 +447,23 @@ public sealed record AdapterLatencyCapability
     public Dictionary<string, int> PowerManagement { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     public List<AdapterAdvancedPropertyCapability> AdvancedProperties { get; init; } = [];
+
+    /// <summary>
+    /// Whether receive segment coalescing is actually in effect, per address family.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the keyword because the two can disagree: a keyword can say enabled
+    /// while the stack reports the feature as non-operational, and turning off something
+    /// that is not running would be measured as no change - correctly, but at the cost of
+    /// several minutes.
+    /// </remarks>
+    public bool? RscIPv4Operational { get; init; }
+
+    public bool? RscIPv6Operational { get; init; }
+
+    public bool? RssEnabled { get; init; }
+
+    public int? RssMaxProcessors { get; init; }
 
     public bool IsEligible => IsPhysical && !IsVirtual && IsUp
         && AdapterType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211;
@@ -371,70 +505,20 @@ public sealed record AdapterLatencyCapability
         }
     }
 
+    /// <summary>Everything this driver could be asked to change, for any target.</summary>
     public IReadOnlyList<LatencyOptimizationCandidate> BuildSafeCandidates()
-    {
-        if (!IsEligible)
-        {
-            return [];
-        }
+        => AdapterInterventionCatalog.Build(this, LatencyCandidateContext.Unrestricted);
 
-        var candidates = new List<LatencyOptimizationCandidate>();
-        AddPowerCandidate(candidates, "SelectiveSuspend", "Seçmeli askıya alma kapalı");
-        AddPowerCandidate(candidates, "DeviceSleepOnDisconnect", "Bağlantı kesilince aygıt uyutma kapalı");
-        AddPowerCandidate(candidates, "D0PacketCoalescing", "D0 paket birleştirme kapalı");
-
-        // *InterruptModeration is an NDIS registry keyword. DisplayName and
-        // DisplayValue are deliberately ignored because Windows localises them.
-        if (AdapterType == NetworkInterfaceType.Ethernet)
-        {
-            var moderation = AdvancedProperties.FirstOrDefault(property =>
-                string.Equals(property.RegistryKeyword, "*InterruptModeration", StringComparison.OrdinalIgnoreCase));
-
-            if (moderation is not null
-                && moderation.ValidRegistryValues.Contains("0", StringComparer.OrdinalIgnoreCase)
-                && !moderation.RegistryValues.SequenceEqual(["0"], StringComparer.OrdinalIgnoreCase))
-            {
-                candidates.Add(new LatencyOptimizationCandidate
-                {
-                    Kind = LatencySettingKind.AdvancedProperty,
-                    PropertyName = moderation.RegistryKeyword,
-                    OriginalValues = [.. moderation.RegistryValues],
-                    DesiredValues = ["0"],
-                    // Not "lower latency": turning moderation off means an interrupt per
-                    // packet, and on a busy or slow machine the extra interrupt handling
-                    // costs more than the coalescing delay it removes. Which way it goes
-                    // on this adapter is what the paired benchmark is for.
-                    CpuSensitive = true,
-                    Description = "Interrupt Moderation kapalı (ölçümle sınanır · CPU maliyeti olabilir)",
-                });
-            }
-        }
-
-        return candidates;
-    }
-
-    private void AddPowerCandidate(List<LatencyOptimizationCandidate> candidates, string propertyName, string description)
-    {
-        // Disabled and unsupported properties are already safe/no-op. Only an
-        // explicitly enabled setting is ever considered.
-        if (PowerManagement.GetValueOrDefault(propertyName) != 2)
-        {
-            return;
-        }
-
-        candidates.Add(new LatencyOptimizationCandidate
-        {
-            Kind = LatencySettingKind.PowerManagement,
-            PropertyName = propertyName,
-            OriginalPowerValue = 2,
-            DesiredPowerValue = 1,
-            Description = description,
-        });
-    }
+    /// <summary>The candidates worth measuring for one particular target and machine state.</summary>
+    public IReadOnlyList<LatencyOptimizationCandidate> BuildSafeCandidates(LatencyCandidateContext context)
+        => AdapterInterventionCatalog.Build(this, context);
 }
 
 public sealed record LatencyOptimizationCandidate
 {
+    private readonly InterventionDescriptor? _descriptor;
+    private readonly bool? _cpuSensitive;
+
     public required LatencySettingKind Kind { get; init; }
 
     public required string PropertyName { get; init; }
@@ -450,10 +534,30 @@ public sealed record LatencyOptimizationCandidate
     public required string Description { get; init; }
 
     /// <summary>
+    /// What this change is, what it can affect and what keeping it costs.
+    /// </summary>
+    /// <remarks>
+    /// Falls back to the catalogue entry for the property name, so a candidate built by
+    /// hand still carries the right risk and scope rather than a blank one.
+    /// </remarks>
+    public InterventionDescriptor Descriptor
+    {
+        get => _descriptor ?? AdapterInterventionCatalog.DescriptorFor(PropertyName);
+        init => _descriptor = value;
+    }
+
+    /// <summary>
     /// Whether keeping this value costs measurable CPU, so it needs a clearly bigger
     /// win than a free change before it is worth keeping.
     /// </summary>
-    public bool CpuSensitive { get; init; }
+    public bool CpuSensitive
+    {
+        get => _cpuSensitive ?? Descriptor.Cost.HasFlag(InterventionCost.Cpu);
+        init => _cpuSensitive = value;
+    }
+
+    /// <summary>Whether the user pays for this in battery life rather than in CPU.</summary>
+    public bool PowerSensitive => Descriptor.Cost.HasFlag(InterventionCost.Power);
 
     public LatencySettingSnapshot ToSnapshot(AdapterLatencyCapability adapter) => new()
     {
@@ -464,6 +568,7 @@ public sealed record LatencyOptimizationCandidate
         OriginalPowerValue = OriginalPowerValue,
         OriginalValues = [.. OriginalValues],
         AppliedDescription = Description,
+        InterventionId = Descriptor.Id,
         CapturedAt = DateTimeOffset.UtcNow,
     };
 }
@@ -484,13 +589,22 @@ public sealed record LatencySettingSnapshot
 
     public required string AppliedDescription { get; init; }
 
+    /// <summary>The catalogue entry this came from, for the recovery log and reports.</summary>
+    public string InterventionId { get; init; } = string.Empty;
+
     public required DateTimeOffset CapturedAt { get; init; }
 }
 
 public sealed record LatencyOptimizationSnapshot
 {
     /// <summary>Bumped when the shape changes, so an older file is rolled back rather than misread.</summary>
-    public const int CurrentSchemaVersion = 2;
+    /// <remarks>
+    /// 3 added <see cref="Resources"/>, which carries everything that is not an adapter
+    /// property - today that means QoS policies. A version-2 file describes only adapter
+    /// settings, and is treated as an interrupted run and rolled back rather than being
+    /// half-understood by this build.
+    /// </remarks>
+    public const int CurrentSchemaVersion = 3;
 
     public required string AdapterId { get; init; }
 
@@ -514,9 +628,23 @@ public sealed record LatencyOptimizationSnapshot
 
     public List<LatencySettingSnapshot> Settings { get; init; } = [];
 
+    /// <summary>
+    /// Everything changed outside the adapter itself, in apply order.
+    /// </summary>
+    /// <remarks>
+    /// A QoS policy created by this app lives here rather than in
+    /// <see cref="Settings"/> because it is not a property of any adapter and is undone
+    /// by deleting it, not by writing a value back. Recovery walks both lists, and a
+    /// resource that cannot be undone never blocks one that can.
+    /// </remarks>
+    public List<LatencyResourceSnapshot> Resources { get; init; } = [];
+
     /// <summary>True when the values on the adapter were never proved to be wanted.</summary>
     public bool IsIncomplete => State != LatencyTransactionState.Committed
         || SchemaVersion != CurrentSchemaVersion;
+
+    /// <summary>Whether anything at all is recorded as changed.</summary>
+    public bool IsEmpty => Settings.Count == 0 && Resources.Count == 0;
 }
 
 public sealed record LatencyOptimizationResult
@@ -532,6 +660,26 @@ public sealed record LatencyOptimizationResult
     public LatencyMeasurement? Before { get; init; }
 
     public LatencyMeasurement? After { get; init; }
+
+    /// <summary>What was measured, exactly, so "improvement" can never be ambiguous.</summary>
+    public string TargetLabel { get; init; } = string.Empty;
+
+    /// <summary>ICMP, TCP/25565 and so on: the Type-P the numbers belong to.</summary>
+    public string TargetProtocol { get; init; } = string.Empty;
+
+    /// <summary>Set when the number measures the route rather than the application's own RTT.</summary>
+    public bool RouteReferenceOnly { get; init; }
+
+    /// <summary>The loaded windows, when a controlled load experiment produced them.</summary>
+    public LatencyMeasurement? UploadLoaded { get; init; }
+
+    public LatencyMeasurement? DownloadLoaded { get; init; }
+
+    /// <summary>What the Traffic Guard is doing, when it has run.</summary>
+    public TrafficGuardState? TrafficGuard { get; init; }
+
+    /// <summary>Anything the user should know that is not a number.</summary>
+    public IReadOnlyList<string> Notices { get; init; } = [];
 
     public IReadOnlyList<string> AppliedChanges { get; init; } = [];
 

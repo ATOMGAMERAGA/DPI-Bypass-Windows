@@ -320,6 +320,59 @@ internal sealed class FakeSnapshotStore : ILatencySnapshotStore
         };
 }
 
+/// <summary>Resolves every target to one fixed reference address.</summary>
+/// <remarks>
+/// Target resolution touches DNS and the live socket tables, neither of which belongs in
+/// a unit test. Everything downstream only needs the endpoint to be the same one on both
+/// halves of every pair, which is exactly what a fixed answer guarantees.
+/// </remarks>
+internal sealed class FakeTargetResolver : ILatencyTargetResolver
+{
+    public LatencyEndpoint Endpoint { get; init; } = LatencyEndpoint.Icmp(
+        System.Net.IPAddress.Parse("1.1.1.1"),
+        "test hedefi");
+
+    public string? Failure { get; init; }
+
+    public Task<LatencyTargetResolution> ResolveAsync(
+        LatencyTargetSpec spec,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(Failure is null
+            ? new LatencyTargetResolution { Endpoints = [Endpoint] }
+            : LatencyTargetResolution.Failed(Failure));
+}
+
+/// <summary>Reports a machine whose conditions never change.</summary>
+internal sealed class FakeEnvironmentSampler : ILatencyEnvironmentSampler
+{
+    private readonly Queue<LatencyEnvironment>? _script;
+
+    public FakeEnvironmentSampler(params LatencyEnvironment[] script)
+        => _script = script.Length == 0 ? null : new Queue<LatencyEnvironment>(script);
+
+    public LatencyEnvironment Steady { get; init; } = new()
+    {
+        CpuBusyPercent = 12,
+        Power = PowerSource.Mains,
+        InterfaceIndex = 10,
+        RouteHash = "route",
+    };
+
+    public int Samples { get; private set; }
+
+    public LatencyEnvironment Sample(NetworkFingerprint network)
+    {
+        Samples++;
+
+        if (_script is { Count: > 0 })
+        {
+            return _script.Count == 1 ? _script.Peek() : _script.Dequeue();
+        }
+
+        return Steady;
+    }
+}
+
 internal sealed class FakeProfileStore : ILatencyProfileStore
 {
     public List<LatencyProfile> Profiles { get; } = [];
@@ -353,7 +406,9 @@ internal sealed class LatencyScenario
         FakeProbe? probe = null,
         LatencyOptimizerOptions? options = null,
         FakeProfileStore? profiles = null,
-        Func<DateTimeOffset>? now = null)
+        Func<DateTimeOffset>? now = null,
+        ILatencyTargetResolver? targets = null,
+        ILatencyEnvironmentSampler? environment = null)
     {
         Controller = controller ?? new FakeController();
         Probe = probe ?? FakeProbe.Flat(Controller);
@@ -366,7 +421,14 @@ internal sealed class LatencyScenario
             log: line => Logs.Add(line),
             profiles: Profiles,
             options: options ?? new LatencyOptimizerOptions { MinimumCycles = 2, MaximumCycles = 3 },
-            now: now);
+            now: now,
+            targets: targets ?? new FakeTargetResolver(),
+            environmentSampler: environment ?? new FakeEnvironmentSampler(),
+            resourceRestorers: [],
+
+            // Settling pauses are real seconds on a real driver and nothing at all in a
+            // test double, so the wait is injected rather than slept through.
+            delay: (_, _) => Task.CompletedTask);
     }
 
     public FakeController Controller { get; }

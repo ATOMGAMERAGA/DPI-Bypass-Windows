@@ -18,7 +18,8 @@ public static class LatencyReport
         LatencyMeasurement optimized,
         LatencyDelta improvement,
         IReadOnlyList<string> applied,
-        LatencyPathAnalysis? path)
+        LatencyPathAnalysis? path,
+        LatencyEndpoint? endpoint = null)
     {
         ArgumentNullException.ThrowIfNull(baseline);
         ArgumentNullException.ThrowIfNull(optimized);
@@ -27,6 +28,7 @@ public static class LatencyReport
 
         var builder = new StringBuilder();
         builder.AppendLine($"Ağ optimizasyonu · {adapterName}");
+        AppendTarget(builder, endpoint);
         builder.AppendLine();
         AppendBlock(builder, "Başlangıç", baseline);
         builder.AppendLine();
@@ -59,7 +61,8 @@ public static class LatencyReport
         LatencyMeasurement confirmation,
         LatencyDelta improvement,
         IReadOnlyList<string> applied,
-        LatencyPathAnalysis? path)
+        LatencyPathAnalysis? path,
+        LatencyEndpoint? endpoint = null)
     {
         ArgumentNullException.ThrowIfNull(baseline);
         ArgumentNullException.ThrowIfNull(confirmation);
@@ -68,6 +71,7 @@ public static class LatencyReport
 
         var builder = new StringBuilder();
         builder.AppendLine($"Ağ optimizasyonu · {adapterName} (kayıtlı profil)");
+        AppendTarget(builder, endpoint);
         builder.AppendLine();
         AppendBlock(builder, "Başlangıç", baseline);
         builder.AppendLine();
@@ -120,7 +124,12 @@ public static class LatencyReport
     }
 
     /// <summary>The measure-only view, used by the "just measure" button and the CLI.</summary>
-    public static string Measurement(NetworkFingerprint network, LatencyMeasurement measurement, LatencyPathAnalysis? path)
+    public static string Measurement(
+        NetworkFingerprint network,
+        LatencyMeasurement measurement,
+        LatencyPathAnalysis? path,
+        LatencyEndpoint? endpoint = null,
+        string? notice = null)
     {
         ArgumentNullException.ThrowIfNull(network);
         ArgumentNullException.ThrowIfNull(measurement);
@@ -128,13 +137,102 @@ public static class LatencyReport
         var builder = new StringBuilder();
         builder.AppendLine($"Ağ         : {network.DisplayName}");
         builder.AppendLine($"Bağdaştırıcı: {network.AdapterName ?? "-"}");
-        builder.AppendLine($"Hedef      : {measurement.RemoteEndpoint} ({measurement.Protocol})");
+        builder.AppendLine($"Hedef      : {endpoint?.Label ?? measurement.RemoteEndpoint} "
+            + $"({measurement.RemoteEndpoint} · {measurement.Protocol})");
         builder.AppendLine($"Ağ geçidi  : {(measurement.GatewayMedianRttMs is { } gateway ? $"{gateway:F1} ms median" : "yanıt yok")}");
+
+        if (endpoint?.RouteReferenceOnly == true)
+        {
+            builder.AppendLine("Not        : Bu değer uygulamanın kendi gidiş-dönüş süresi değil, aynı adrese rota referansıdır.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(notice))
+        {
+            builder.AppendLine($"Uyarı      : {notice}");
+        }
+
         builder.AppendLine();
-        AppendBlock(builder, "Internet", measurement);
+        AppendBlock(builder, "Boştaki gecikme", measurement);
+        builder.AppendLine();
+        builder.AppendLine("Yük altındaki gecikme ölçülmedi; bunun için \"Yük altında derin test\" gerekir.");
         AppendPath(builder, path);
 
         return builder.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// The loaded-latency view: idle against a real upload and a real download window.
+    /// </summary>
+    /// <remarks>
+    /// The two directions are reported apart because they are two different problems.
+    /// Delay that appears while sending is this machine filling a queue and can be paced
+    /// from here; delay that appears while receiving is filled by the far end into the
+    /// operator's equipment, where nothing set on this computer arrives in time.
+    /// </remarks>
+    public static string Loaded(
+        NetworkFingerprint network,
+        LatencyMeasurement idle,
+        LoadExperimentResult? upload,
+        LoadExperimentResult? download,
+        LatencyPathAnalysis? path,
+        LatencyEndpoint? endpoint,
+        TrafficGuardState? guard)
+    {
+        ArgumentNullException.ThrowIfNull(network);
+        ArgumentNullException.ThrowIfNull(idle);
+
+        var builder = new StringBuilder();
+        builder.AppendLine($"Yük altında derin test · {network.DisplayName}");
+        AppendTarget(builder, endpoint);
+        builder.AppendLine();
+        AppendBlock(builder, "Boşta", idle);
+
+        AppendLoadedBlock(builder, "Gönderim sırasında", upload);
+        AppendLoadedBlock(builder, "İndirme sırasında", download);
+
+        if (guard is not null)
+        {
+            builder.AppendLine();
+            builder.AppendLine($"Traffic Guard: {guard.Summary}");
+        }
+
+        AppendPath(builder, path);
+        return builder.ToString().TrimEnd();
+    }
+
+    private static void AppendLoadedBlock(StringBuilder builder, string title, LoadExperimentResult? result)
+    {
+        builder.AppendLine();
+
+        if (result is null)
+        {
+            builder.AppendLine($"{title}: ölçülmedi.");
+            return;
+        }
+
+        if (!result.Succeeded)
+        {
+            builder.AppendLine($"{title}: {result.Failure ?? "ölçülemedi"}.");
+            return;
+        }
+
+        AppendBlock(builder, title, result.Loaded!);
+        builder.AppendLine($"  Kuyruk : {result.QueueingMs ?? 0,6:F1} ms (boştakine göre artış)");
+    }
+
+    private static void AppendTarget(StringBuilder builder, LatencyEndpoint? endpoint)
+    {
+        if (endpoint is null)
+        {
+            return;
+        }
+
+        builder.AppendLine($"Hedef      : {endpoint.Label} ({endpoint.Address} · {endpoint.ProtocolLabel})");
+
+        if (endpoint.RouteReferenceOnly)
+        {
+            builder.AppendLine("Not        : rota referansı — uygulamanın kendi gidiş-dönüş süresi değil.");
+        }
     }
 
     /// <summary>One line for the command line and the status page summary.</summary>

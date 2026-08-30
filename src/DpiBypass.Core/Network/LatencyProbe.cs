@@ -13,38 +13,101 @@ public sealed record LatencyConnectivity(bool GatewayReachable, bool RemoteReach
 /// <summary>How one measurement should be taken.</summary>
 /// <remarks>
 /// Both halves of an A/B pair must use the same request, or the comparison is between
-/// two different experiments rather than between two adapter settings.
+/// two different experiments rather than between two adapter settings. In the language
+/// of RFC 2681 this is the Type-P: protocol, port, packet size and treatment all belong
+/// to the metric, not to the measurement.
 /// </remarks>
 public sealed record LatencyProbeRequest
 {
     /// <summary>The one target to probe. Null lets the probe pick the best of its list.</summary>
     public string? RemoteEndpoint { get; init; }
 
-    public int ProbeCount { get; init; } = 24;
+    /// <summary>
+    /// The pinned endpoint, when one has been resolved.
+    /// </summary>
+    /// <remarks>
+    /// Preferred over <see cref="RemoteEndpoint"/> because it carries the protocol and
+    /// port as well as the address, and because it was resolved once at the start of the
+    /// experiment rather than looked up again per measurement.
+    /// </remarks>
+    public LatencyEndpoint? Endpoint { get; init; }
+
+    public int ProbeCount { get; init; } = 40;
+
+    /// <summary>
+    /// Probes sent and thrown away before the ones that count.
+    /// </summary>
+    /// <remarks>
+    /// The first packets after a driver setting is written, or after any pause, are not
+    /// representative: an ARP entry may have expired, a radio may be ramping, a queue may
+    /// still be draining. Including them measures the transition rather than the state.
+    /// </remarks>
+    public int WarmupCount { get; init; } = 3;
 
     public int GatewayProbeCount { get; init; } = 8;
 
     /// <summary>Gap between consecutive probes in the same series.</summary>
     public TimeSpan Pacing { get; init; } = TimeSpan.FromMilliseconds(45);
 
+    /// <summary>
+    /// How long a reply may take before the probe counts as lost rather than slow.
+    /// </summary>
+    /// <remarks>
+    /// RFC 2681 requires this to be reported: "the threshold (or methodology to
+    /// distinguish) between a large finite delay and loss MUST be reported". It appears
+    /// in the measurement report for exactly that reason.
+    /// </remarks>
     public int TimeoutMilliseconds { get; init; } = 900;
 
     /// <summary>The short pass that picks a target and shows the user a first number.</summary>
     public static readonly LatencyProbeRequest Survey = new()
     {
         ProbeCount = 9,
+        WarmupCount = 1,
         GatewayProbeCount = 3,
         Pacing = TimeSpan.FromMilliseconds(40),
     };
 
     /// <summary>
-    /// The pass a verdict is allowed to rest on. Twenty-four probes is the smallest
-    /// batch where a p95 is more than "the second worst sample" and one lost probe is
-    /// about four percent rather than a tenth of the result.
+    /// The pass a verdict is allowed to rest on.
     /// </summary>
+    /// <remarks>
+    /// Forty replies is the smallest batch where the p95 is an order statistic rather
+    /// than "the second worst sample", and where one lost probe moves the loss figure by
+    /// 2.5 percent instead of 4. It is still far too few for a p99, which is why a
+    /// tail-only claim needs the deep pass.
+    /// </remarks>
     public static readonly LatencyProbeRequest Benchmark = new();
 
-    public LatencyProbeRequest For(string? endpoint) => this with { RemoteEndpoint = endpoint };
+    /// <summary>
+    /// The pass a p99 claim is allowed to rest on.
+    /// </summary>
+    /// <remarks>
+    /// A p99 estimated from fewer than a hundred replies is the maximum sample wearing a
+    /// percentile's name. This is the only request that produces enough of them, and the
+    /// evaluator will not use p99 as a decision metric without it.
+    /// </remarks>
+    public static readonly LatencyProbeRequest Deep = new()
+    {
+        ProbeCount = 120,
+        WarmupCount = 5,
+        GatewayProbeCount = 12,
+    };
+
+    public LatencyProbeRequest For(string? endpoint) => this with { RemoteEndpoint = endpoint, Endpoint = null };
+
+    public LatencyProbeRequest For(LatencyEndpoint endpoint)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        return this with { RemoteEndpoint = endpoint.Address.ToString(), Endpoint = endpoint };
+    }
+
+    /// <summary>Grows the sample when the result sat too close to the decision threshold.</summary>
+    public LatencyProbeRequest Widened(int probeCount) => this with
+    {
+        ProbeCount = Math.Max(ProbeCount, probeCount),
+        GatewayProbeCount = Math.Max(GatewayProbeCount, Math.Min(24, probeCount / 8)),
+    };
 }
 
 public interface ILatencyProbe
@@ -60,7 +123,7 @@ public interface ILatencyProbe
         CancellationToken cancellationToken = default);
 }
 
-/// <summary>Measures gateway and public-IP latency without involving DNS.</summary>
+/// <summary>Measures gateway and remote latency without involving DNS.</summary>
 /// <remarks>
 /// <para>
 /// Probes in a series are sent one at a time with a fixed gap, the way <c>ping</c> does
@@ -76,12 +139,15 @@ public interface ILatencyProbe
 /// </remarks>
 public sealed class LatencyProbe : ILatencyProbe
 {
-    private static readonly IPAddress[] RemoteEndpoints =
-    [
-        IPAddress.Parse("1.1.1.1"),
-        IPAddress.Parse("8.8.8.8"),
-        IPAddress.Parse("9.9.9.9"),
-    ];
+    /// <summary>
+    /// TCP handshakes are expensive for the far end, so a series of them is capped well
+    /// below the ICMP count and paced more slowly, whatever the request asked for.
+    /// </summary>
+    public const int MaximumTcpProbes = 24;
+
+    private static readonly TimeSpan MinimumTcpPacing = TimeSpan.FromMilliseconds(120);
+
+    private static IReadOnlyList<IPAddress> ReferenceEndpoints => LatencyTargetResolver.ReferenceAddresses;
 
     private readonly INetworkLoadSampler _load;
 
@@ -99,27 +165,18 @@ public sealed class LatencyProbe : ILatencyProbe
         var gateway = IPAddress.TryParse(network.GatewayAddress, out var parsedGateway) ? parsedGateway : null;
         var loadStart = _load.Read(network);
 
-        var endpoints = ResolveEndpoints(request.RemoteEndpoint);
-        var perEndpoint = Math.Max(1, request.ProbeCount / endpoints.Length);
-
         var gatewayTask = gateway is null
             ? Task.FromResult<IReadOnlyList<double>>([])
             : PingSeriesAsync(gateway, request.GatewayProbeCount, GatewayPacing(request), request.TimeoutMilliseconds, cancellationToken);
 
-        var samples = new Dictionary<IPAddress, IReadOnlyList<double>>();
+        SeriesResult series;
         IReadOnlyList<double> gatewaySamples;
 
         try
         {
-            foreach (var endpoint in endpoints)
-            {
-                samples[endpoint] = await PingSeriesAsync(
-                    endpoint,
-                    perEndpoint,
-                    request.Pacing,
-                    request.TimeoutMilliseconds,
-                    cancellationToken).ConfigureAwait(false);
-            }
+            series = request.Endpoint is { Protocol: LatencyProtocol.Tcp, Port: > 0 } tcp
+                ? await MeasureTcpAsync(tcp, request, cancellationToken).ConfigureAwait(false)
+                : await MeasureIcmpAsync(request, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -128,30 +185,11 @@ public sealed class LatencyProbe : ILatencyProbe
             gatewaySamples = await Observed(gatewayTask).ConfigureAwait(false);
         }
 
-        var selected = endpoints
-            .OrderByDescending(endpoint => samples[endpoint].Count)
-            .ThenBy(endpoint => MedianOrInfinity(samples[endpoint]))
-            .First();
-        var selectedSamples = samples[selected];
-        var protocol = "ICMP";
-        var attempts = perEndpoint;
-
-        // Some networks drop ICMP while ordinary HTTPS works. TCP connect latency is a
-        // real fallback measurement; it is labelled and never mixed with ICMP.
-        if (selectedSamples.Count == 0)
-        {
-            var tcp = await MeasureTcpFallbackAsync(endpoints, request, cancellationToken).ConfigureAwait(false);
-            selected = tcp.Endpoint;
-            selectedSamples = tcp.Samples;
-            attempts = tcp.Attempts;
-            protocol = "TCP/443";
-        }
-
         return LatencyMeasurement.Create(
-            selected.ToString(),
-            protocol,
-            selectedSamples,
-            attempts,
+            series.Endpoint,
+            series.Protocol,
+            series.Samples,
+            series.Attempts,
             gatewaySamples,
             gateway is null ? 0 : request.GatewayProbeCount,
             NetworkLoadSample.Between(loadStart, _load.Read(network)));
@@ -166,7 +204,7 @@ public sealed class LatencyProbe : ILatencyProbe
 
         var remote = IPAddress.TryParse(remoteEndpoint, out var parsedRemote)
             ? parsedRemote
-            : RemoteEndpoints[0];
+            : ReferenceEndpoints[0];
         var gateway = IPAddress.TryParse(network.GatewayAddress, out var parsedGateway) ? parsedGateway : null;
 
         var remotePing = TryPingAsync(remote, 900, cancellationToken);
@@ -179,10 +217,78 @@ public sealed class LatencyProbe : ILatencyProbe
         var remoteReachable = remotePing.Result is not null;
         if (!remoteReachable)
         {
-            remoteReachable = await TryTcpConnectAsync(remote, cancellationToken).ConfigureAwait(false) is not null;
+            remoteReachable = await TryTcpConnectAsync(remote, 443, cancellationToken).ConfigureAwait(false) is not null;
         }
 
         return new LatencyConnectivity(gatewayPing.Result is not null, remoteReachable);
+    }
+
+    private sealed record SeriesResult(string Endpoint, string Protocol, IReadOnlyList<double> Samples, int Attempts);
+
+    private async Task<SeriesResult> MeasureIcmpAsync(
+        LatencyProbeRequest request,
+        CancellationToken cancellationToken)
+    {
+        var endpoints = ResolveEndpoints(request);
+        var perEndpoint = Math.Max(1, request.ProbeCount / endpoints.Count);
+        var samples = new Dictionary<IPAddress, IReadOnlyList<double>>();
+
+        foreach (var endpoint in endpoints)
+        {
+            samples[endpoint] = await PingSeriesAsync(
+                endpoint,
+                perEndpoint,
+                request.Pacing,
+                request.TimeoutMilliseconds,
+                cancellationToken,
+                request.WarmupCount).ConfigureAwait(false);
+        }
+
+        var selected = endpoints
+            .OrderByDescending(endpoint => samples[endpoint].Count)
+            .ThenBy(endpoint => MedianOrInfinity(samples[endpoint]))
+            .First();
+
+        var selectedSamples = samples[selected];
+        if (selectedSamples.Count > 0)
+        {
+            return new SeriesResult(selected.ToString(), "ICMP", selectedSamples, perEndpoint);
+        }
+
+        // Some networks drop ICMP while ordinary HTTPS works. TCP connect latency is a
+        // real fallback measurement; it is labelled and never mixed with ICMP.
+        var fallback = await MeasureTcpFallbackAsync(endpoints, request, cancellationToken).ConfigureAwait(false);
+        return new SeriesResult(fallback.Endpoint.ToString(), "TCP/443", fallback.Samples, fallback.Attempts);
+    }
+
+    private static async Task<SeriesResult> MeasureTcpAsync(
+        LatencyEndpoint endpoint,
+        LatencyProbeRequest request,
+        CancellationToken cancellationToken)
+    {
+        var port = endpoint.Port ?? 443;
+        var attempts = Math.Clamp(request.ProbeCount, 3, MaximumTcpProbes);
+        var pacing = request.Pacing > MinimumTcpPacing ? request.Pacing : MinimumTcpPacing;
+        var warmup = Math.Clamp(request.WarmupCount, 0, 2);
+        var samples = new List<double>(attempts);
+
+        for (var index = 0; index < attempts + warmup; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var elapsed = await TryTcpConnectAsync(endpoint.Address, port, cancellationToken).ConfigureAwait(false);
+            if (index >= warmup && elapsed is { } value)
+            {
+                samples.Add(value);
+            }
+
+            if (index + 1 < attempts + warmup)
+            {
+                await Task.Delay(pacing, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return new SeriesResult(endpoint.Address.ToString(), $"TCP/{port}", samples, attempts);
     }
 
     /// <summary>Waits for a series to finish, treating cancellation as "no samples".</summary>
@@ -210,15 +316,20 @@ public sealed class LatencyProbe : ILatencyProbe
         return window / request.GatewayProbeCount;
     }
 
-    private static IPAddress[] ResolveEndpoints(string? requested)
+    private static IReadOnlyList<IPAddress> ResolveEndpoints(LatencyProbeRequest request)
     {
-        if (IPAddress.TryParse(requested, out var address)
+        if (request.Endpoint is { } endpoint)
+        {
+            return [endpoint.Address];
+        }
+
+        if (IPAddress.TryParse(request.RemoteEndpoint, out var address)
             && address.AddressFamily == AddressFamily.InterNetwork)
         {
             return [address];
         }
 
-        return RemoteEndpoints;
+        return ReferenceEndpoints;
     }
 
     private static async Task<IReadOnlyList<double>> PingSeriesAsync(
@@ -226,20 +337,23 @@ public sealed class LatencyProbe : ILatencyProbe
         int count,
         TimeSpan pacing,
         int timeoutMilliseconds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int warmupCount = 0)
     {
         var samples = new List<double>(count);
+        var total = count + Math.Max(0, warmupCount);
 
-        for (var index = 0; index < count; index++)
+        for (var index = 0; index < total; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (await TryPingAsync(address, timeoutMilliseconds, cancellationToken).ConfigureAwait(false) is { } rtt)
+            var rtt = await TryPingAsync(address, timeoutMilliseconds, cancellationToken).ConfigureAwait(false);
+            if (index >= warmupCount && rtt is { } value)
             {
-                samples.Add(rtt);
+                samples.Add(value);
             }
 
-            if (index + 1 < count && pacing > TimeSpan.Zero)
+            if (index + 1 < total && pacing > TimeSpan.Zero)
             {
                 await Task.Delay(pacing, cancellationToken).ConfigureAwait(false);
             }
@@ -264,7 +378,7 @@ public sealed class LatencyProbe : ILatencyProbe
 
             foreach (var endpoint in endpoints)
             {
-                if (await TryTcpConnectAsync(endpoint, cancellationToken).ConfigureAwait(false) is { } elapsed)
+                if (await TryTcpConnectAsync(endpoint, 443, cancellationToken).ConfigureAwait(false) is { } elapsed)
                 {
                     samples[endpoint].Add(elapsed);
                 }
@@ -317,13 +431,16 @@ public sealed class LatencyProbe : ILatencyProbe
         }
     }
 
-    private static async Task<double?> TryTcpConnectAsync(IPAddress address, CancellationToken cancellationToken)
+    private static async Task<double?> TryTcpConnectAsync(
+        IPAddress address,
+        int port,
+        CancellationToken cancellationToken)
     {
         try
         {
-            using var client = new TcpClient(AddressFamily.InterNetwork);
+            using var client = new TcpClient(address.AddressFamily);
             var started = Stopwatch.GetTimestamp();
-            await client.ConnectAsync(address, 443, cancellationToken).ConfigureAwait(false);
+            await client.ConnectAsync(address, port, cancellationToken).ConfigureAwait(false);
             return Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         }
         catch (OperationCanceledException)

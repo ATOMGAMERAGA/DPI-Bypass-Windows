@@ -2,7 +2,7 @@ using DpiBypass.Core.Logging;
 
 namespace DpiBypass.Core.Network;
 
-/// <summary>How thorough a run is allowed to be.</summary>
+/// <summary>How thorough a run is allowed to be, and what it is allowed to measure.</summary>
 public sealed record LatencyOptimizerOptions
 {
     public static readonly LatencyOptimizerOptions Default = new();
@@ -22,6 +22,21 @@ public sealed record LatencyOptimizerOptions
 
     /// <summary>Skip candidates a fresh profile already measured and rejected here.</summary>
     public bool UseProfileCache { get; init; } = true;
+
+    /// <summary>What to measure. The default is the general-internet reference.</summary>
+    public LatencyTargetSpec Target { get; init; } = LatencyTargetSpec.Reference;
+
+    /// <summary>Fixes the A/B ordering sequence, so a run can be reproduced exactly.</summary>
+    public int Seed { get; init; }
+
+    /// <summary>Wall-clock ceiling for one candidate's experiment.</summary>
+    public TimeSpan CandidateBudget { get; init; } = TimeSpan.FromMinutes(4);
+
+    /// <summary>Sample size an inconclusive experiment grows to before giving up.</summary>
+    public int AdaptiveProbeCount { get; init; } = LatencyProbeRequest.Deep.ProbeCount;
+
+    /// <summary>The acceptance rules. Production keeps every guard on.</summary>
+    public LatencyEvaluationOptions Evaluation { get; init; } = LatencyEvaluationOptions.Strict;
 }
 
 /// <summary>
@@ -31,9 +46,15 @@ public sealed record LatencyOptimizerOptions
 /// <para>
 /// The shape of a run is measure, change one thing, measure again, keep or put back -
 /// never apply a list of settings and assume. Each candidate is judged by repeated
-/// paired cycles against the same target under the same load, and the aggregate has to
-/// beat how much the cycles disagree with each other before anything is kept. See
-/// <see cref="LatencyComparison"/> for the rule itself.
+/// alternating cycles against the same pinned endpoint under the same load and the same
+/// machine conditions, and the aggregate has to beat how much the cycles disagree with
+/// each other before anything is kept. See <see cref="LatencyComparison"/> for the rule
+/// and <see cref="PairedLatencyExperimentRunner"/> for how a cycle is run.
+/// </para>
+/// <para>
+/// Accepting each change on its own does not prove the machine is better with all of
+/// them, so the accepted set is re-measured as a bundle, alternating original against
+/// optimised, before anything is committed.
 /// </para>
 /// <para>
 /// This subsystem never touches the packet path. It has no WinDivert handle, opens no
@@ -49,6 +70,10 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private readonly ILatencyProbe _probe;
     private readonly ILatencySnapshotStore _snapshots;
     private readonly ILatencyProfileStore _profiles;
+    private readonly ILatencyTargetResolver _targets;
+    private readonly ILatencyEnvironmentSampler _environmentSampler;
+    private readonly ILatencyExperimentRunner _runner;
+    private readonly LatencySnapshotRestorer _restorer;
     private readonly Func<NetworkMonitor> _monitorFactory;
     private readonly LatencyOptimizerOptions _options;
     private readonly Func<DateTimeOffset> _now;
@@ -71,13 +96,26 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         Action<string>? log = null,
         ILatencyProfileStore? profiles = null,
         LatencyOptimizerOptions? options = null,
-        Func<DateTimeOffset>? now = null)
+        Func<DateTimeOffset>? now = null,
+        ILatencyTargetResolver? targets = null,
+        ILatencyEnvironmentSampler? environmentSampler = null,
+        ILatencyExperimentRunner? runner = null,
+        IReadOnlyList<ILatencyResourceRestorer>? resourceRestorers = null,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         _log = log ?? AppLog.InfoSink;
         _controller = controller ?? new WindowsLatencyAdapterController(_log);
         _probe = probe ?? new LatencyProbe();
         _snapshots = snapshots ?? new LatencySnapshotStore();
         _profiles = profiles ?? new LatencyProfileStore(log: _log);
+        _targets = targets ?? new LatencyTargetResolver(log: _log);
+        _environmentSampler = environmentSampler ?? new WindowsLatencyEnvironmentSampler(_log);
+        _runner = runner ?? new PairedLatencyExperimentRunner(_probe, _environmentSampler, delay, _log);
+        _restorer = new LatencySnapshotRestorer(
+            _snapshots,
+            _controller,
+            resourceRestorers ?? [new QosResourceRestorer(new WindowsQosController(_log), _log)],
+            _log);
         _monitorFactory = monitorFactory ?? (() => new NetworkMonitor(log: _log));
         _options = options ?? LatencyOptimizerOptions.Default;
         _now = now ?? (() => DateTimeOffset.UtcNow);
@@ -91,7 +129,12 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
     public bool IsBusy => Current.Status is LatencyOptimizationStatus.Measuring
         or LatencyOptimizationStatus.Optimizing
+        or LatencyOptimizationStatus.QuickTesting
+        or LatencyOptimizationStatus.LoadTesting
         or LatencyOptimizationStatus.Restoring;
+
+    /// <summary>What the last run measured, so the loaded lane can reuse the same target.</summary>
+    public LatencyTargetSpec Target => _options.Target;
 
     public event Action<LatencyOptimizationResult>? Changed;
 
@@ -168,7 +211,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         _log?.Invoke(
             $"latency.recovery.started: yarım kalmış ayarlama bulundu (durum {snapshot.State}, "
-            + $"{snapshot.Settings.Count} ayar, bekleyen '{snapshot.PendingProperty ?? "-"}').");
+            + $"{snapshot.Settings.Count} ayar, {snapshot.Resources.Count} kaynak, "
+            + $"bekleyen '{snapshot.PendingProperty ?? "-"}').");
 
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -184,7 +228,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 return true;
             }
 
-            var restored = await RestoreSnapshotCoreAsync(cancellationToken).ConfigureAwait(false);
+            var restored = await _restorer.RestoreAllAsync(cancellationToken).ConfigureAwait(false);
             _log?.Invoke(restored
                 ? "latency.recovery.completed: özgün NIC ayarları geri yüklendi."
                 : "latency.recovery.failed: bazı ayarlar geri yüklenemedi; anlık görüntü korundu.");
@@ -238,7 +282,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 StatusLine = "Özgün NIC ayarları geri yükleniyor…",
             });
 
-            var restored = await RestoreSnapshotCoreAsync(cancellationToken).ConfigureAwait(false);
+            var restored = await _restorer.RestoreAllAsync(cancellationToken).ConfigureAwait(false);
             var result = new LatencyOptimizationResult
             {
                 Status = restored ? LatencyOptimizationStatus.Disabled : LatencyOptimizationStatus.Failed,
@@ -270,7 +314,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 StatusLine = "Özgün NIC ayarları geri yükleniyor…",
             });
 
-            var restored = await RestoreSnapshotCoreAsync(cancellationToken).ConfigureAwait(false);
+            var restored = await _restorer.RestoreAllAsync(cancellationToken).ConfigureAwait(false);
             var result = new LatencyOptimizationResult
             {
                 Status = restored ? LatencyOptimizationStatus.Disabled : LatencyOptimizationStatus.Failed,
@@ -288,7 +332,21 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     }
 
     /// <summary>Measures only; it never captures or changes a NIC property.</summary>
-    public async Task<LatencyOptimizationResult> TestAsync(CancellationToken cancellationToken = default)
+    public Task<LatencyOptimizationResult> TestAsync(CancellationToken cancellationToken = default)
+        => TestAsync(null, cancellationToken);
+
+    /// <summary>
+    /// The quick test: where the delay is right now, against a target the user chose.
+    /// </summary>
+    /// <remarks>
+    /// Nothing is applied and nothing is captured, so this is safe to run at any time and
+    /// in any state. What it cannot do is say anything about latency under load, which is
+    /// where most of a home connection's worst numbers live - that needs the user to
+    /// start a transfer, and therefore needs the deep test.
+    /// </remarks>
+    public async Task<LatencyOptimizationResult> TestAsync(
+        LatencyTargetSpec? target,
+        CancellationToken cancellationToken = default)
     {
         var network = NetworkFingerprint.Capture();
         if (!network.IsOnline)
@@ -301,27 +359,84 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             };
         }
 
-        var survey = await _probe.MeasureAsync(network, _options.Survey, cancellationToken).ConfigureAwait(false);
-        var measurement = survey.HasRemoteConnectivity
-            ? await _probe.MeasureAsync(
-                network,
-                _options.Benchmark.For(survey.RemoteEndpoint),
-                cancellationToken).ConfigureAwait(false)
-            : survey;
+        var spec = target ?? _options.Target;
+        var resolution = await _targets.ResolveAsync(spec, cancellationToken).ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            return new LatencyOptimizationResult
+            {
+                Status = LatencyOptimizationStatus.Offline,
+                StatusLine = resolution.Failure ?? "Ölçüm hedefi çözümlenemedi.",
+                NetworkKey = network.Key,
+                TargetLabel = spec.Describe(),
+            };
+        }
 
+        var (measurement, endpoint) = await MeasureTargetAsync(network, resolution, cancellationToken)
+            .ConfigureAwait(false);
         var path = LatencyPathAnalysis.Describe(measurement);
 
         return new LatencyOptimizationResult
         {
             Status = measurement.HasRemoteConnectivity
-                ? LatencyOptimizationStatus.Disabled
+                ? LatencyOptimizationStatus.NeedsDeepTest
                 : LatencyOptimizationStatus.Offline,
-            StatusLine = LatencyReport.Measurement(network, measurement, path),
+            StatusLine = LatencyReport.Measurement(network, measurement, path, endpoint, resolution.Notice),
             AdapterName = network.AdapterName ?? network.DisplayName,
             NetworkKey = network.Key,
             After = measurement,
             Path = path,
+            TargetLabel = endpoint.Label,
+            TargetProtocol = endpoint.ProtocolLabel,
+            RouteReferenceOnly = endpoint.RouteReferenceOnly,
+            Notices = resolution.Notice is null ? [] : [resolution.Notice],
         };
+    }
+
+    /// <summary>
+    /// Picks the endpoint that answers, then measures it properly.
+    /// </summary>
+    /// <remarks>
+    /// The survey exists to choose; everything after it uses the one endpoint it chose,
+    /// because two measurements of two different addresses cannot be subtracted.
+    /// </remarks>
+    private async Task<(LatencyMeasurement Measurement, LatencyEndpoint Endpoint)> MeasureTargetAsync(
+        NetworkFingerprint network,
+        LatencyTargetResolution resolution,
+        CancellationToken cancellationToken)
+    {
+        LatencyMeasurement? best = null;
+        LatencyEndpoint? chosen = null;
+
+        foreach (var candidate in resolution.Endpoints)
+        {
+            var survey = await _probe
+                .MeasureAsync(network, _options.Survey.For(candidate), cancellationToken)
+                .ConfigureAwait(false);
+
+            if (best is null || (survey.HasRemoteConnectivity && !best.HasRemoteConnectivity))
+            {
+                best = survey;
+                chosen = candidate;
+            }
+
+            if (survey.HasRemoteConnectivity)
+            {
+                break;
+            }
+        }
+
+        var endpoint = chosen ?? resolution.Endpoints[0];
+        if (best is null || !best.HasRemoteConnectivity)
+        {
+            return (best!, endpoint);
+        }
+
+        var measurement = await _probe
+            .MeasureAsync(network, _options.Benchmark.For(endpoint), cancellationToken)
+            .ConfigureAwait(false);
+
+        return (measurement, endpoint);
     }
 
     private async Task<LatencyOptimizationResult> RunForNetworkAsync(
@@ -400,7 +515,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         // A crash or an earlier network must be returned to its exact baseline before a
         // fresh baseline is measured. Never overwrite an unrestorable snapshot with
         // values from another adapter.
-        if (!await RestoreSnapshotCoreAsync(token).ConfigureAwait(false))
+        if (!await _restorer.RestoreAllAsync(token).ConfigureAwait(false))
         {
             return Publish(new LatencyOptimizationResult
             {
@@ -435,21 +550,31 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             return Publish(new LatencyOptimizationResult
             {
                 Status = LatencyOptimizationStatus.Unsupported,
-                StatusLine = "Desteklenen aktif fiziksel düşük-gecikme NIC ayarı bulunamadı.",
+                StatusLine = "Desteklenen aktif fiziksel düşük-gecikme NIC ayarı bulunamadı."
+                    + " Hedef ve yük tanılaması yine kullanılabilir.",
                 AdapterName = adapter?.AdapterName ?? network.AdapterName ?? network.DisplayName,
                 NetworkKey = network.Key,
             });
         }
 
-        // One short pass settles which target answers here; every later measurement in
-        // this run uses that same target so the numbers can be subtracted from each other.
-        _log?.Invoke($"latency.baseline.started: {adapter.AdapterName} · ağ {network.Key}");
-        var survey = await _probe.MeasureAsync(network, _options.Survey, token).ConfigureAwait(false);
-        var benchmark = _options.Benchmark.For(survey.RemoteEndpoint);
+        var resolution = await _targets.ResolveAsync(_options.Target, token).ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            return Publish(new LatencyOptimizationResult
+            {
+                Status = LatencyOptimizationStatus.Offline,
+                StatusLine = resolution.Failure ?? "Ölçüm hedefi çözümlenemedi; hiçbir NIC ayarı değiştirilmedi.",
+                AdapterName = adapter.AdapterName,
+                NetworkKey = network.Key,
+                TargetLabel = _options.Target.Describe(),
+            });
+        }
 
-        var baseline = survey.HasRemoteConnectivity
-            ? await _probe.MeasureAsync(network, benchmark, token).ConfigureAwait(false)
-            : survey;
+        // One short pass settles which endpoint answers here; every later measurement in
+        // this run uses that same pinned endpoint so the numbers can be subtracted.
+        _log?.Invoke($"latency.baseline.started: {adapter.AdapterName} · ağ {network.Key}");
+        var (baseline, endpoint) = await MeasureTargetAsync(network, resolution, token).ConfigureAwait(false);
+        var benchmark = _options.Benchmark.For(endpoint);
 
         if (!baseline.HasRemoteConnectivity)
         {
@@ -461,13 +586,17 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 AdapterName = adapter.AdapterName,
                 NetworkKey = network.Key,
                 Before = baseline,
+                TargetLabel = endpoint.Label,
+                TargetProtocol = endpoint.ProtocolLabel,
             });
         }
 
         var path = LatencyPathAnalysis.Describe(baseline);
         _log?.Invoke($"latency.baseline.completed: {LatencyReport.Compact(baseline)} · {path.Bottleneck}");
 
-        var profile = await LoadUsableProfileAsync(network, adapter, token).ConfigureAwait(false);
+        var environment = _environmentSampler.Sample(network);
+        var context = LatencyProfileContext.From(_options.Target, environment, loadedEvidence: false, qosAvailable: false);
+        var profile = await LoadUsableProfileAsync(network, adapter, context, token).ConfigureAwait(false);
 
         // A profile verified here, on this adapter, against this driver is worth
         // re-applying rather than re-earning: a full paired benchmark on every logon
@@ -476,8 +605,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         // measurement, and a profile that no longer holds up is deleted on the spot.
         if (profile is { AcceptedProperties.Count: > 0 })
         {
-            var replayed = await ReplayProfileAsync(network, adapter, profile, baseline, benchmark, path, token)
-                .ConfigureAwait(false);
+            var replayed = await ReplayProfileAsync(
+                network, adapter, profile, baseline, benchmark, path, endpoint, token).ConfigureAwait(false);
 
             if (replayed is not null)
             {
@@ -490,7 +619,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             profile = null;
         }
 
-        var candidates = SelectCandidates(adapter, profile);
+        var candidates = SelectCandidates(adapter, profile, endpoint, environment, context);
         if (candidates.Count == 0)
         {
             return Publish(new LatencyOptimizationResult
@@ -506,10 +635,15 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 Before = baseline,
                 After = baseline,
                 Path = path,
+                TargetLabel = endpoint.Label,
+                TargetProtocol = endpoint.ProtocolLabel,
+                RouteReferenceOnly = endpoint.RouteReferenceOnly,
+                Notices = resolution.Notice is null ? [] : [resolution.Notice],
             });
         }
 
-        return await RunCandidatesAsync(network, adapter, baseline, benchmark, path, candidates, token)
+        return await RunCandidatesAsync(
+            network, adapter, baseline, benchmark, path, candidates, endpoint, environment, context, resolution, token)
             .ConfigureAwait(false);
     }
 
@@ -520,6 +654,10 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         LatencyProbeRequest benchmark,
         LatencyPathAnalysis path,
         IReadOnlyList<LatencyOptimizationCandidate> candidates,
+        LatencyEndpoint endpoint,
+        LatencyEnvironment environment,
+        LatencyProfileContext context,
+        LatencyTargetResolution resolution,
         CancellationToken token)
     {
         var snapshot = new LatencyOptimizationSnapshot
@@ -534,6 +672,11 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         var verdicts = new List<LatencyVerdict>();
         var accepted = new List<LatencyOptimizationCandidate>();
         var reference = baseline;
+        var notices = new List<string>();
+        if (resolution.Notice is not null)
+        {
+            notices.Add(resolution.Notice);
+        }
 
         for (var index = 0; index < candidates.Count; index++)
         {
@@ -551,15 +694,32 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 AppliedChanges = [.. accepted.Select(entry => entry.Description)],
                 Path = path,
                 Verdicts = [.. verdicts],
+                TargetLabel = endpoint.Label,
+                TargetProtocol = endpoint.ProtocolLabel,
             });
 
-            var outcome = await RunPairedCyclesAsync(network, adapter, snapshot, candidate, benchmark, token)
-                .ConfigureAwait(false);
+            var plan = new LatencyExperimentPlan
+            {
+                Network = network,
+                Candidate = candidate,
+                Probe = benchmark,
+                MinimumCycles = _options.MinimumCycles,
+                MaximumCycles = _options.MaximumCycles,
+                MaximumDiscardedCycles = _options.MaximumLoadRetries,
+                Budget = _options.CandidateBudget,
+                Seed = _options.Seed + index,
+                Evaluation = _options.Evaluation,
+                AdaptiveProbeCount = _options.AdaptiveProbeCount,
+                Reference = environment,
+            };
+
+            var arm = new CandidateArm(this, adapter, snapshot, candidate, network, endpoint);
+            var outcome = await _runner.RunAsync(plan, arm, token).ConfigureAwait(false);
 
             if (outcome.LostConnectivity)
             {
                 _log?.Invoke("latency.rollback.started: NIC değişikliğinden sonra ağ yanıt vermedi.");
-                var restored = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                var restored = await _restorer.RestoreAllAsync(CancellationToken.None).ConfigureAwait(false);
                 _log?.Invoke(restored ? "latency.rollback.completed" : "latency.rollback.failed");
 
                 if (!restored)
@@ -584,7 +744,9 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     null,
                     path,
                     verdicts,
-                    "Bağlantı denetimi başarısız oldu; özgün NIC ayarları geri yüklendi."));
+                    "Bağlantı denetimi başarısız oldu; özgün NIC ayarları geri yüklendi.",
+                    endpoint,
+                    notices));
             }
 
             verdicts.Add(outcome.Verdict);
@@ -610,7 +772,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             }
 
             accepted.Add(candidate);
-            reference = outcome.Last ?? reference;
+            reference = outcome.LastOptimised ?? reference;
         }
 
         if (accepted.Count == 0)
@@ -619,7 +781,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             // cycles, so this is normally a no-op - but clearing a snapshot that still
             // described a value on the adapter would abandon it, and the whole point of
             // the file is that this cannot happen.
-            if (!await RestoreSnapshotCoreAsync(token).ConfigureAwait(false))
+            if (!await _restorer.RestoreAllAsync(token).ConfigureAwait(false))
             {
                 return Publish(new LatencyOptimizationResult
                 {
@@ -635,7 +797,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 });
             }
 
-            await SaveProfileAsync(network, adapter, baseline, null, verdicts, path, token).ConfigureAwait(false);
+            await SaveProfileAsync(network, adapter, baseline, null, verdicts, path, context, token).ConfigureAwait(false);
 
             return Publish(NoGain(
                 adapter,
@@ -644,28 +806,26 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 reference,
                 path,
                 verdicts,
-                "Bu ağda doğrulanmış bir gecikme iyileşmesi bulunamadı. Özgün ayarlar geri yüklendi."));
+                "Bu ağda doğrulanmış bir gecikme iyileşmesi bulunamadı. Özgün ayarlar geri yüklendi.",
+                endpoint,
+                notices));
         }
 
-        // Everything accepted is on the adapter now. One last independent measurement
-        // decides whether the machine as a whole is better, not just each step.
+        // Everything accepted is on the adapter now. The whole set is re-measured the
+        // same way a single candidate is - alternating original against optimised - so
+        // the headline is a paired result rather than one reading taken minutes after
+        // the baseline it is compared with.
         await SaveSnapshotAsync(snapshot with { State = LatencyTransactionState.Verifying }, token).ConfigureAwait(false);
 
-        var connectivity = await _probe
-            .CheckConnectivityAsync(network, baseline.RemoteEndpoint, token)
-            .ConfigureAwait(false);
+        var confirmation = await ConfirmBundleAsync(
+            network, adapter, snapshot, accepted, benchmark, endpoint, environment, token).ConfigureAwait(false);
 
-        var final = connectivity.IsUsable
-            ? await _probe.MeasureAsync(network, benchmark, token).ConfigureAwait(false)
-            : null;
-
-        var hasCpuSensitiveChange = accepted.Any(candidate => candidate.CpuSensitive);
-        if (final is null
-            || !LatencyComparison.ConfirmsMeaningfulImprovement(baseline, final, hasCpuSensitiveChange))
+        var final = confirmation.Final;
+        if (!confirmation.Confirmed)
         {
-            _log?.Invoke("latency.verification.completed: son ölçüm anlamlı bir uçtan uca kazancı doğrulamadı.");
+            _log?.Invoke("latency.verification.completed: eşli paket doğrulaması uçtan uca kazancı doğrulamadı.");
             _log?.Invoke("latency.rollback.started: son doğrulama geçilemedi.");
-            var undone = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            var undone = await _restorer.RestoreAllAsync(CancellationToken.None).ConfigureAwait(false);
             _log?.Invoke(undone ? "latency.rollback.completed" : "latency.rollback.failed");
 
             if (!undone)
@@ -684,6 +844,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 });
             }
 
+            await SaveProfileAsync(network, adapter, baseline, null, verdicts, path, context, token).ConfigureAwait(false);
+
             return Publish(NoGain(
                 adapter,
                 network,
@@ -693,23 +855,26 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 verdicts,
                 final is null
                     ? "Son doğrulamada bağlantı ölçülemedi; özgün NIC ayarları geri yüklendi."
-                    : "Son doğrulamada anlamlı bir uçtan uca iyileşme kanıtlanamadı; özgün NIC ayarları geri yüklendi."));
+                    : "Tüm paket birlikte ölçüldüğünde anlamlı bir uçtan uca iyileşme kanıtlanamadı; "
+                        + "özgün NIC ayarları geri yüklendi.",
+                endpoint,
+                notices));
         }
 
-        _log?.Invoke($"latency.verification.completed: {LatencyReport.Compact(final)}");
+        _log?.Invoke($"latency.verification.completed: {LatencyReport.Compact(final!)}");
 
         await SaveSnapshotAsync(
             snapshot with { State = LatencyTransactionState.Committed, PendingProperty = null },
             token).ConfigureAwait(false);
 
-        await SaveProfileAsync(network, adapter, baseline, final, verdicts, path, token).ConfigureAwait(false);
+        await SaveProfileAsync(network, adapter, baseline, final, verdicts, path, context, token).ConfigureAwait(false);
 
         _lastNetworkKey = network.Key;
 
         // Per-candidate paired deltas remain in Verdicts for diagnostics. The headline
-        // is what the machine actually measured from the original baseline to the final
-        // state; summing noisy interacting candidate estimates can overstate that result.
-        var improvement = LatencyDelta.Between(baseline, final);
+        // is the paired difference the bundle confirmation measured, which is the only
+        // number that describes the machine as it is actually being left.
+        var improvement = LatencyDelta.Between(baseline, final!);
         var applied = accepted.Select(candidate => candidate.Description).ToArray();
 
         _log?.Invoke($"latency.committed: {applied.Length} ayar · median {improvement.MedianMs:F1} ms · p95 {improvement.P95Ms:F1} ms");
@@ -717,7 +882,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         return Publish(new LatencyOptimizationResult
         {
             Status = LatencyOptimizationStatus.Active,
-            StatusLine = LatencyReport.Verified(adapter.AdapterName, baseline, final, improvement, applied, path),
+            StatusLine = LatencyReport.Verified(adapter.AdapterName, baseline, final!, improvement, applied, path, endpoint),
             AdapterName = adapter.AdapterName,
             NetworkKey = network.Key,
             Before = baseline,
@@ -726,106 +891,187 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             Path = path,
             Verdicts = verdicts,
             VerifiedImprovement = improvement,
+            TargetLabel = endpoint.Label,
+            TargetProtocol = endpoint.ProtocolLabel,
+            RouteReferenceOnly = endpoint.RouteReferenceOnly,
+            Notices = notices,
         });
     }
 
-    private sealed record CandidateOutcome(LatencyVerdict Verdict, LatencyMeasurement? Last, bool LostConnectivity);
-
     /// <summary>
-    /// Runs paired A/B cycles for one candidate, leaving the adapter exactly as it found it.
+    /// Re-measures the whole accepted set against the machine's own original state.
     /// </summary>
     /// <remarks>
-    /// Each cycle measures the machine without the change and then with it, back to back
-    /// against the same target. Alternating like this - rather than one baseline followed
-    /// by every candidate - is what keeps a network that simply got quieter halfway
-    /// through the run from being reported as an improvement.
+    /// Runs through the same experiment machinery as a single candidate, with the
+    /// "candidate" being every accepted change at once. That gives the bundle the same
+    /// alternating order, the same settling and the same validity checks, and it means
+    /// the number the user is shown was measured minutes after the baseline only in the
+    /// sense that both halves were.
     /// </remarks>
-    private async Task<CandidateOutcome> RunPairedCyclesAsync(
+    private async Task<(bool Confirmed, LatencyMeasurement? Final)> ConfirmBundleAsync(
         NetworkFingerprint network,
         AdapterLatencyCapability adapter,
         LatencyOptimizationSnapshot snapshot,
-        LatencyOptimizationCandidate candidate,
+        IReadOnlyList<LatencyOptimizationCandidate> accepted,
         LatencyProbeRequest benchmark,
+        LatencyEndpoint endpoint,
+        LatencyEnvironment environment,
         CancellationToken token)
     {
-        var pairs = new List<LatencyPair>();
-        var loadRetries = 0;
-        LatencyMeasurement? last = null;
-        var verdict = LatencyComparison.Evaluate(candidate, pairs, _options.MinimumCycles, _options.MaximumCycles);
-
-        while (pairs.Count < _options.MaximumCycles)
+        // The experiment expects to start from the original state, and the accepted set
+        // is currently applied, so it is taken off first and put back at the end.
+        foreach (var candidate in accepted.AsEnumerable().Reverse())
         {
-            token.ThrowIfCancellationRequested();
+            await RestoreCandidateAndTrimAsync(snapshot, candidate, token).ConfigureAwait(false);
+        }
 
-            var before = await _probe.MeasureAsync(network, benchmark, token).ConfigureAwait(false);
+        var bundle = new LatencyOptimizationCandidate
+        {
+            Kind = LatencySettingKind.AdvancedProperty,
+            PropertyName = "bundle",
+            Description = string.Join(" · ", accepted.Select(candidate => candidate.Description)),
+            CpuSensitive = accepted.Any(candidate => candidate.CpuSensitive),
+            Descriptor = new InterventionDescriptor
+            {
+                Id = "bundle",
+                Title = "Kabul edilen tüm değişiklikler",
+                Mechanism = "Tek tek kabul edilen ayarların tamamı birlikte.",
+                SettlingTime = accepted.Max(candidate => candidate.Descriptor.SettlingTime),
+            },
+        };
 
+        var plan = new LatencyExperimentPlan
+        {
+            Network = network,
+            Candidate = bundle,
+            Probe = benchmark,
+            MinimumCycles = _options.MinimumCycles,
+            MaximumCycles = _options.MaximumCycles,
+            MaximumDiscardedCycles = _options.MaximumLoadRetries,
+            Budget = _options.CandidateBudget,
+            Seed = _options.Seed,
+            Evaluation = _options.Evaluation,
+            AdaptiveProbeCount = _options.AdaptiveProbeCount,
+            Reference = environment,
+        };
+
+        var arm = new BundleArm(this, adapter, snapshot, accepted, network, endpoint);
+        var outcome = await _runner.RunAsync(plan, arm, token).ConfigureAwait(false);
+
+        if (!outcome.Verdict.Accepted)
+        {
+            return (false, outcome.LastOptimised);
+        }
+
+        // Confirmed: put the set back on and leave it there.
+        foreach (var candidate in accepted)
+        {
             if (!await ApplyAndTrackAsync(adapter, snapshot, candidate, token).ConfigureAwait(false))
             {
-                return new CandidateOutcome(
-                    verdict with
-                    {
-                        Outcome = LatencyVerdictOutcome.Rejected,
-                        Reason = "sürücü değeri canlı olarak uygulamadı",
-                        Cycles = pairs.Count,
-                    },
-                    last,
-                    LostConnectivity: false);
+                return (false, outcome.LastOptimised);
             }
+        }
 
-            var connectivity = await _probe
-                .CheckConnectivityAsync(network, before.RemoteEndpoint, token)
+        return (true, outcome.LastOptimised);
+    }
+
+    /// <summary>Applies and restores one candidate, with the snapshot kept in step.</summary>
+    private sealed class CandidateArm : ILatencyExperimentArm
+    {
+        private readonly LatencyOptimizer _owner;
+        private readonly AdapterLatencyCapability _adapter;
+        private readonly LatencyOptimizationSnapshot _snapshot;
+        private readonly LatencyOptimizationCandidate _candidate;
+        private readonly NetworkFingerprint _network;
+        private readonly LatencyEndpoint _endpoint;
+
+        public CandidateArm(
+            LatencyOptimizer owner,
+            AdapterLatencyCapability adapter,
+            LatencyOptimizationSnapshot snapshot,
+            LatencyOptimizationCandidate candidate,
+            NetworkFingerprint network,
+            LatencyEndpoint endpoint)
+        {
+            _owner = owner;
+            _adapter = adapter;
+            _snapshot = snapshot;
+            _candidate = candidate;
+            _network = network;
+            _endpoint = endpoint;
+        }
+
+        public Task<bool> ApplyAsync(CancellationToken cancellationToken = default)
+            => _owner.ApplyAndTrackAsync(_adapter, _snapshot, _candidate, cancellationToken);
+
+        public Task RestoreAsync(CancellationToken cancellationToken = default)
+            => _owner.RestoreCandidateAndTrimAsync(_snapshot, _candidate, cancellationToken);
+
+        public async Task<bool> IsUsableAsync(CancellationToken cancellationToken = default)
+        {
+            var connectivity = await _owner._probe
+                .CheckConnectivityAsync(_network, _endpoint.Address.ToString(), cancellationToken)
                 .ConfigureAwait(false);
 
-            if (!connectivity.IsUsable)
-            {
-                return new CandidateOutcome(
-                    verdict with { Outcome = LatencyVerdictOutcome.Rejected, Reason = "bağlantı koptu" },
-                    last,
-                    LostConnectivity: true);
-            }
-
-            var after = await _probe.MeasureAsync(network, benchmark, token).ConfigureAwait(false);
-            last = after;
-
-            await RestoreCandidateAndTrimAsync(snapshot, candidate, token).ConfigureAwait(false);
-
-            var pair = new LatencyPair { Baseline = before, Candidate = after };
-
-            // The link being busy for one half only makes the pair a measurement of the
-            // traffic rather than of the setting. Re-run it a bounded number of times
-            // before giving up on getting a clean window.
-            if (!pair.IsComparable && loadRetries < _options.MaximumLoadRetries)
-            {
-                loadRetries++;
-                _log?.Invoke(
-                    $"latency.cycle.discarded: {candidate.PropertyName} · "
-                    + $"yük durumu eşleşmedi ({before.Load.State} / {after.Load.State}), tekrarlanıyor.");
-                continue;
-            }
-
-            pairs.Add(pair);
-            verdict = LatencyComparison.Evaluate(candidate, pairs, _options.MinimumCycles, _options.MaximumCycles);
-
-            _log?.Invoke(
-                $"latency.cycle.completed: {candidate.PropertyName} · tur {pairs.Count} · "
-                + $"median {pair.Delta.MedianMs:+0.0;-0.0;0.0} ms · karar {verdict.Outcome}");
-
-            if (verdict.Outcome != LatencyVerdictOutcome.Inconclusive)
-            {
-                break;
-            }
+            return connectivity.IsUsable;
         }
+    }
 
-        if (verdict.Outcome == LatencyVerdictOutcome.Inconclusive)
+    /// <summary>Applies and restores the whole accepted set as one unit.</summary>
+    private sealed class BundleArm : ILatencyExperimentArm
+    {
+        private readonly LatencyOptimizer _owner;
+        private readonly AdapterLatencyCapability _adapter;
+        private readonly LatencyOptimizationSnapshot _snapshot;
+        private readonly IReadOnlyList<LatencyOptimizationCandidate> _candidates;
+        private readonly NetworkFingerprint _network;
+        private readonly LatencyEndpoint _endpoint;
+
+        public BundleArm(
+            LatencyOptimizer owner,
+            AdapterLatencyCapability adapter,
+            LatencyOptimizationSnapshot snapshot,
+            IReadOnlyList<LatencyOptimizationCandidate> candidates,
+            NetworkFingerprint network,
+            LatencyEndpoint endpoint)
         {
-            verdict = verdict with
-            {
-                Outcome = LatencyVerdictOutcome.Rejected,
-                Reason = $"{pairs.Count} turda kararlı bir sonuç çıkmadı ({verdict.Reason})",
-            };
+            _owner = owner;
+            _adapter = adapter;
+            _snapshot = snapshot;
+            _candidates = candidates;
+            _network = network;
+            _endpoint = endpoint;
         }
 
-        return new CandidateOutcome(verdict, last, LostConnectivity: false);
+        public async Task<bool> ApplyAsync(CancellationToken cancellationToken = default)
+        {
+            foreach (var candidate in _candidates)
+            {
+                if (!await _owner.ApplyAndTrackAsync(_adapter, _snapshot, candidate, cancellationToken).ConfigureAwait(false))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public async Task RestoreAsync(CancellationToken cancellationToken = default)
+        {
+            foreach (var candidate in _candidates.AsEnumerable().Reverse())
+            {
+                await _owner.RestoreCandidateAndTrimAsync(_snapshot, candidate, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public async Task<bool> IsUsableAsync(CancellationToken cancellationToken = default)
+        {
+            var connectivity = await _owner._probe
+                .CheckConnectivityAsync(_network, _endpoint.Address.ToString(), cancellationToken)
+                .ConfigureAwait(false);
+
+            return connectivity.IsUsable;
+        }
     }
 
     /// <summary>
@@ -875,14 +1121,14 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         }
 
         var outcome = await _controller.RestoreAsync(setting, cancellationToken).ConfigureAwait(false);
-        if (!IsTerminalRestore(outcome))
+        if (!LatencySnapshotRestorer.IsTerminal(outcome))
         {
             throw new InvalidOperationException($"'{setting.PropertyName}' özgün değerine geri alınamadı ({outcome}).");
         }
 
         snapshot.Settings.Remove(setting);
 
-        if (snapshot.Settings.Count == 0)
+        if (snapshot.IsEmpty)
         {
             await _snapshots.ClearAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -897,65 +1143,12 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private Task SaveSnapshotAsync(LatencyOptimizationSnapshot snapshot, CancellationToken cancellationToken)
         => _snapshots.SaveAsync(snapshot, cancellationToken);
 
-    private async Task<bool> RestoreSnapshotCoreAsync(CancellationToken cancellationToken)
-    {
-        var snapshot = await _snapshots.LoadAsync(cancellationToken).ConfigureAwait(false);
-        if (snapshot is null)
-        {
-            return true;
-        }
-
-        var unresolved = new List<LatencySettingSnapshot>();
-        foreach (var setting in snapshot.Settings.AsEnumerable().Reverse())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            LatencyRestoreOutcome outcome;
-            try
-            {
-                outcome = await _controller.RestoreAsync(setting, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _log?.Invoke($"latency.rollback.failed: '{setting.PropertyName}' ({ex.Message}).");
-                outcome = LatencyRestoreOutcome.Failed;
-            }
-
-            if (!IsTerminalRestore(outcome))
-            {
-                // Add at the front to preserve original apply order in the retained file.
-                unresolved.Insert(0, setting);
-            }
-        }
-
-        if (unresolved.Count == 0)
-        {
-            await _snapshots.ClearAsync(cancellationToken).ConfigureAwait(false);
-            return true;
-        }
-
-        await _snapshots.SaveAsync(
-            snapshot with
-            {
-                Settings = unresolved,
-                State = LatencyTransactionState.CandidateApplied,
-                PendingProperty = unresolved[0].PropertyName,
-            },
-            cancellationToken).ConfigureAwait(false);
-
-        return false;
-    }
-
     private async Task<bool> TryRestoreAfterFailureAsync()
     {
         try
         {
             _log?.Invoke("latency.rollback.started: hata veya iptal sonrası geri yükleme.");
-            var restored = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            var restored = await _restorer.RestoreAllAsync(CancellationToken.None).ConfigureAwait(false);
             _log?.Invoke(restored ? "latency.rollback.completed" : "latency.rollback.failed");
             return restored;
         }
@@ -967,17 +1160,19 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     }
 
     /// <summary>
-    /// The saved result for this exact network, adapter and driver, if there is one.
+    /// The saved result for this exact network, adapter, driver and target, if there is one.
     /// </summary>
     /// <remarks>
-    /// All three have to match, and the answer has to be recent. A different adapter, a
-    /// driver update or a month-old result is treated as unknown and measured again,
-    /// because a setting proved on an Ethernet card says nothing about the Wi-Fi one
-    /// next to it.
+    /// All of them have to match, and the answer has to be recent. A different adapter, a
+    /// driver update, a different game server or a month-old result is treated as unknown
+    /// and measured again, because a setting proved on an Ethernet card says nothing about
+    /// the Wi-Fi one next to it, and a setting proved against one server says nothing
+    /// about the route to another.
     /// </remarks>
     private async Task<LatencyProfile?> LoadUsableProfileAsync(
         NetworkFingerprint network,
         AdapterLatencyCapability adapter,
+        LatencyProfileContext context,
         CancellationToken token)
     {
         if (!_options.UseProfileCache)
@@ -991,23 +1186,43 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             return null;
         }
 
-        if (!profile.Matches(network.Key, adapter) || !profile.IsFresh(_now()))
+        if (!profile.Matches(network.Key, adapter, context) || !profile.IsFresh(_now()))
         {
-            _log?.Invoke("latency.profile: kayıtlı sonuç bu bağdaştırıcı/sürücü için geçersiz; yeniden ölçülecek.");
+            _log?.Invoke("latency.profile: kayıtlı sonuç bu bağdaştırıcı/sürücü/hedef için geçersiz; yeniden ölçülecek.");
             return null;
         }
 
         return profile;
     }
 
-    /// <summary>Drops candidates a matching profile already measured and turned down.</summary>
+    /// <summary>Drops candidates a matching, still-current profile already turned down.</summary>
     private IReadOnlyList<LatencyOptimizationCandidate> SelectCandidates(
         AdapterLatencyCapability adapter,
-        LatencyProfile? profile)
+        LatencyProfile? profile,
+        LatencyEndpoint endpoint,
+        LatencyEnvironment environment,
+        LatencyProfileContext context)
     {
-        var candidates = adapter.BuildSafeCandidates();
+        var candidates = adapter.BuildSafeCandidates(new LatencyCandidateContext
+        {
+            Scope = ScopeOf(endpoint.Protocol),
+            ApplicationScope = ScopeOf(endpoint.ApplicationProtocol ?? endpoint.Protocol),
+            Power = environment.Power,
+            IsWireless = adapter.AdapterType == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211,
+            AllowPowerCost = environment.Power != PowerSource.Battery,
+            IncludeThroughputSensitive = false,
+        });
+
         if (candidates.Count == 0 || profile is null)
         {
+            return candidates;
+        }
+
+        // A rejection is never re-proved, only obeyed, so it expires far sooner than an
+        // acceptance and only holds while the conditions it was reached under still do.
+        if (!profile.RejectionsUsable(_now(), context))
+        {
+            _log?.Invoke("latency.profile: eski elemeler bu koşullar için geçerli değil; adaylar yeniden ölçülecek.");
             return candidates;
         }
 
@@ -1023,6 +1238,13 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         return remaining;
     }
 
+    private static LatencyTrafficScope ScopeOf(LatencyProtocol protocol) => protocol switch
+    {
+        LatencyProtocol.Tcp => LatencyTrafficScope.Tcp,
+        LatencyProtocol.Udp => LatencyTrafficScope.Udp,
+        _ => LatencyTrafficScope.Icmp,
+    };
+
     /// <summary>
     /// Re-applies a previously verified profile and freshly proves it is still beneficial.
     /// </summary>
@@ -1034,6 +1256,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         LatencyMeasurement baseline,
         LatencyProbeRequest benchmark,
         LatencyPathAnalysis path,
+        LatencyEndpoint endpoint,
         CancellationToken token)
     {
         var wanted = new HashSet<string>(profile.AcceptedProperties, StringComparer.OrdinalIgnoreCase);
@@ -1073,7 +1296,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         {
             if (!await ApplyAndTrackAsync(adapter, snapshot, candidate, token).ConfigureAwait(false))
             {
-                var restored = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                var restored = await _restorer.RestoreAllAsync(CancellationToken.None).ConfigureAwait(false);
                 if (!restored)
                 {
                     await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
@@ -1088,7 +1311,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         await SaveSnapshotAsync(snapshot with { State = LatencyTransactionState.Verifying }, token).ConfigureAwait(false);
 
         var connectivity = await _probe
-            .CheckConnectivityAsync(network, baseline.RemoteEndpoint, token)
+            .CheckConnectivityAsync(network, endpoint.Address.ToString(), token)
             .ConfigureAwait(false);
 
         var confirmation = connectivity.IsUsable
@@ -1100,7 +1323,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             || !LatencyComparison.ConfirmsMeaningfulImprovement(baseline, confirmation, cpuSensitive))
         {
             _log?.Invoke("latency.profile: kayıtlı ayarlar bu oturumda anlamlı kazanç göstermedi; geri alınıp baştan ölçülecek.");
-            var restored = await RestoreSnapshotCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            var restored = await _restorer.RestoreAllAsync(CancellationToken.None).ConfigureAwait(false);
             if (!restored)
             {
                 await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
@@ -1132,7 +1355,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         return Publish(new LatencyOptimizationResult
         {
             Status = LatencyOptimizationStatus.Active,
-            StatusLine = LatencyReport.Replayed(adapter.AdapterName, baseline, confirmation, improvement, applied, path),
+            StatusLine = LatencyReport.Replayed(adapter.AdapterName, baseline, confirmation, improvement, applied, path, endpoint),
             AdapterName = adapter.AdapterName,
             NetworkKey = network.Key,
             Before = baseline,
@@ -1140,6 +1363,9 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             AppliedChanges = applied,
             Path = path,
             VerifiedImprovement = improvement,
+            TargetLabel = endpoint.Label,
+            TargetProtocol = endpoint.ProtocolLabel,
+            RouteReferenceOnly = endpoint.RouteReferenceOnly,
         });
     }
 
@@ -1195,6 +1421,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         LatencyMeasurement? optimized,
         IReadOnlyList<LatencyVerdict> verdicts,
         LatencyPathAnalysis path,
+        LatencyProfileContext context,
         CancellationToken token)
     {
         try
@@ -1212,6 +1439,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     Baseline = LatencySummary.From(baseline),
                     Optimized = optimized is null ? null : LatencySummary.From(optimized),
                     Bottleneck = path.Bottleneck,
+                    Context = context,
                 },
                 token).ConfigureAwait(false);
         }
@@ -1226,11 +1454,6 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         }
     }
 
-    private static bool IsTerminalRestore(LatencyRestoreOutcome outcome) => outcome is
-        LatencyRestoreOutcome.Restored
-        or LatencyRestoreOutcome.AlreadyOriginal
-        or LatencyRestoreOutcome.MissingProperty;
-
     private static LatencyOptimizationResult NoGain(
         AdapterLatencyCapability adapter,
         NetworkFingerprint network,
@@ -1238,7 +1461,9 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         LatencyMeasurement? after,
         LatencyPathAnalysis path,
         IReadOnlyList<LatencyVerdict> verdicts,
-        string headline) => new()
+        string headline,
+        LatencyEndpoint? endpoint = null,
+        IReadOnlyList<string>? notices = null) => new()
         {
             Status = LatencyOptimizationStatus.NoGain,
             StatusLine = LatencyReport.NoGain(headline, after ?? before, verdicts, path),
@@ -1248,6 +1473,10 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             After = after,
             Path = path,
             Verdicts = verdicts,
+            TargetLabel = endpoint?.Label ?? string.Empty,
+            TargetProtocol = endpoint?.ProtocolLabel ?? string.Empty,
+            RouteReferenceOnly = endpoint?.RouteReferenceOnly ?? false,
+            Notices = notices ?? [],
         };
 
     private LatencyOptimizationResult Publish(LatencyOptimizationResult result)
