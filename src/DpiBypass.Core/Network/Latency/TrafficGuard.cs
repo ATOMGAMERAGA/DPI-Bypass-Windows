@@ -131,7 +131,15 @@ public sealed record TrafficGuardRequest
     public TrafficGuardMode Mode { get; init; } = TrafficGuardMode.Balanced;
 
     /// <summary>How many caps the search is allowed to apply and measure.</summary>
-    public int MaximumTrials { get; init; } = 2;
+    /// <remarks>
+    /// Two by default. Each one costs the user a stop and a restart of their transfer, so
+    /// the search is deliberately short: the shares are ordered least-disruptive first and
+    /// the confirmation round is what actually decides.
+    /// </remarks>
+    public int MaximumTrials { get; init; } = DefaultMaximumTrials;
+
+    /// <summary>The default, exposed so a caller can bound the search without guessing.</summary>
+    public const int DefaultMaximumTrials = 2;
 
     /// <summary>How long to wait for the paced application to open a new flow.</summary>
     public TimeSpan NewFlowTimeout { get; init; } = TimeSpan.FromSeconds(60);

@@ -385,7 +385,10 @@ public sealed class LatencyProbe : ILatencyProbe
 
         if (!TcpEStats.TryEnable(local, remote))
         {
-            return new SeriesResult(endpoint.Address.ToString(), label, [], request.ProbeCount, StopwatchResolutionMs);
+            // Not supported here, or not permitted. The handshake series is a real
+            // measurement of a different thing, so it is used and said to be different -
+            // never reported under the label of the connection's own round trip.
+            return await MeasureTcpAsync(endpoint, request, cancellationToken).ConfigureAwait(false);
         }
 
         var attempts = Math.Max(1, request.ProbeCount);
@@ -419,6 +422,14 @@ public sealed class LatencyProbe : ILatencyProbe
             {
                 await Task.Delay(pacing, cancellationToken).ConfigureAwait(false);
             }
+        }
+
+        if (samples.Count == 0)
+        {
+            // Collection was enabled but the connection produced nothing usable - it ended,
+            // or the stack has not measured it yet. Fall back rather than report an empty
+            // series as an unreachable target, and label what the fallback actually is.
+            return await MeasureTcpAsync(endpoint, request, cancellationToken).ConfigureAwait(false);
         }
 
         return new SeriesResult(endpoint.Address.ToString(), label, samples, attempts, IcmpResolutionMs);

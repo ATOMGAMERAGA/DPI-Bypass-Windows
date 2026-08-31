@@ -153,11 +153,11 @@ internal static class Fake
         string name = "steam.exe",
         string? path = @"C:\Program Files\Steam\steam.exe",
         params uint[] pids) => new()
-    {
-        ExecutableName = name,
-        VerifiedPath = path,
-        ProcessIds = pids.Length == 0 ? [4242u] : pids,
-    };
+        {
+            ExecutableName = name,
+            VerifiedPath = path,
+            ProcessIds = pids.Length == 0 ? [4242u] : pids,
+        };
 
     /// <summary>A flow the observer would have reported for one process.</summary>
     public static ObservedFlow Flow(
@@ -167,14 +167,14 @@ internal static class Fake
         LatencyProtocol protocol = LatencyProtocol.Udp,
         DateTimeOffset? at = null,
         bool open = true) => new()
-    {
-        ProcessId = pid,
-        Local = new System.Net.IPEndPoint(System.Net.IPAddress.Parse("192.168.1.20"), 50000),
-        Remote = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(remote), remotePort),
-        Protocol = protocol,
-        EstablishedAt = at ?? DateTimeOffset.UtcNow,
-        DeletedAt = open ? null : (at ?? DateTimeOffset.UtcNow).AddSeconds(1),
-    };
+        {
+            ProcessId = pid,
+            Local = new System.Net.IPEndPoint(System.Net.IPAddress.Parse("192.168.1.20"), 50000),
+            Remote = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(remote), remotePort),
+            Protocol = protocol,
+            EstablishedAt = at ?? DateTimeOffset.UtcNow,
+            DeletedAt = open ? null : (at ?? DateTimeOffset.UtcNow).AddSeconds(1),
+        };
 
     public static IReadOnlyList<LatencyPair> Pairs(params (double Baseline, double Candidate)[] medians) =>
     [

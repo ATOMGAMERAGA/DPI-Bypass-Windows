@@ -284,6 +284,32 @@ public sealed class LatencyProbeDeadlineTests
     }
 }
 
+/// <summary>How a flow event's address is read, which is easy to get plausibly wrong.</summary>
+public sealed class FlowAddressTests
+{
+    /// <summary>
+    /// WinDivert stores an IPv4 address as one UINT32 in host byte order.
+    /// </summary>
+    /// <remarks>
+    /// Writing those four bytes the wrong way round produces an address that parses, looks
+    /// entirely valid, and points somewhere else - 203.0.113.9 becomes 9.113.0.203. The
+    /// measurement would then be of a machine nobody is playing against.
+    /// </remarks>
+    [Theory]
+    [InlineData(0xCB007109u, "203.0.113.9")]
+    [InlineData(0x01010101u, "1.1.1.1")]
+    [InlineData(0x08080808u, "8.8.8.8")]
+    [InlineData(0xC0A80114u, "192.168.1.20")]
+    public void AnIPv4FlowAddressIsDecodedInTheOrderWinDivertStoresIt(uint word, string expected)
+    {
+        var endpoint = WinDivertFlowObserver.ToEndPoint(word, 27015);
+
+        Assert.NotNull(endpoint);
+        Assert.Equal(expected, endpoint!.Address.ToString());
+        Assert.Equal(27015, endpoint.Port);
+    }
+}
+
 /// <summary>A policy is only created when the store holds exactly what was asked for.</summary>
 public sealed class QosReadBackTests
 {

@@ -96,7 +96,13 @@ public sealed class ProtectionService : IAsyncDisposable
         _store = store ?? new ConfigStore();
         _learned = learnedDomains ?? new LearnedDomainStore();
         _flowObserver = flowObserver ?? new WinDivertFlowObserver(AppLog.InfoSink);
-        _latencyOptimizer = latencyOptimizer ?? new LatencyOptimizer(log: AppLog.InfoSink);
+
+        // Both lanes resolve application targets, so both need the observer: without it
+        // the idle lane would still be unable to find a UDP game's server, which is the
+        // thing the observer exists for.
+        _latencyOptimizer = latencyOptimizer ?? new LatencyOptimizer(
+            log: AppLog.InfoSink,
+            targets: new LatencyTargetResolver(log: AppLog.InfoSink, flows: _flowObserver));
         _latencyOptimizer.Changed += OnLatencyChanged;
         _loadedLatency = loadedLatency ?? new LoadedLatencyLane(
             log: AppLog.InfoSink,
@@ -290,11 +296,18 @@ public sealed class ProtectionService : IAsyncDisposable
         if (enabled)
         {
             ApplyLatencyPreferences();
+
+            if (Settings.Latency.TargetKind == LatencyTargetKind.Application)
+            {
+                await StartFlowObserverAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return PublishLatency(await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false));
         }
 
         var stopped = await _latencyOptimizer.StopAndRestoreAsync(cancellationToken).ConfigureAwait(false);
         await _loadedLatency.ClearOwnedPoliciesAsync(cancellationToken).ConfigureAwait(false);
+        await StopFlowObserverAsync().ConfigureAwait(false);
         return PublishLatency(stopped);
     }
 
@@ -305,6 +318,11 @@ public sealed class ProtectionService : IAsyncDisposable
         try
         {
             PublishLatency(Working(LatencyOptimizationStatus.QuickTesting, "Hızlı test çalışıyor…"));
+
+            if (Settings.Latency.TargetKind == LatencyTargetKind.Application)
+            {
+                await StartFlowObserverAsync(cancellationToken).ConfigureAwait(false);
+            }
 
             var result = await _latencyOptimizer
                 .TestAsync(Settings.Latency.ToSpec(), cancellationToken)
@@ -351,6 +369,7 @@ public sealed class ProtectionService : IAsyncDisposable
             // closed with it, so nothing is watching connections while nobody asked.
             await StartFlowObserverAsync(run.Token).ConfigureAwait(false);
 
+
             var result = await _loadedLatency.RunAsync(
                 new LoadedLaneRequest
                 {
@@ -366,7 +385,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
         finally
         {
-            await StopFlowObserverAsync().ConfigureAwait(false);
+            await ReleaseFlowObserverAsync().ConfigureAwait(false);
 
             _loadedLatencyBusy = false;
             _loadedLatencyCancellation = null;
@@ -403,6 +422,25 @@ public sealed class ProtectionService : IAsyncDisposable
             // producing a result it has no evidence for.
             AppLog.Info($"latency.flow: gözlem başlatılamadı ({ex.Message}).");
         }
+    }
+
+    /// <summary>
+    /// Closes the observer unless the idle lane still needs it.
+    /// </summary>
+    /// <remarks>
+    /// An application target is re-resolved on every network change, and the flow layer
+    /// cannot report a connection created before the handle opened - so closing it while
+    /// the mode is on and pointed at an application would mean the next run rediscovers
+    /// nothing. Any other target has no use for it and it is closed.
+    /// </remarks>
+    private async Task ReleaseFlowObserverAsync()
+    {
+        if (Settings.LowLatencyMode && Settings.Latency.TargetKind == LatencyTargetKind.Application)
+        {
+            return;
+        }
+
+        await StopFlowObserverAsync().ConfigureAwait(false);
     }
 
     private async Task StopFlowObserverAsync()
@@ -1572,6 +1610,9 @@ public sealed class ProtectionService : IAsyncDisposable
                 // Best effort.
             }
         }
+
+        // Whatever the mode says, nothing is left listening after the service is gone.
+        await _flowObserver.DisposeAsync().ConfigureAwait(false);
 
         _latencyOptimizer.Changed -= OnLatencyChanged;
         await _latencyOptimizer.DisposeAsync().ConfigureAwait(false);

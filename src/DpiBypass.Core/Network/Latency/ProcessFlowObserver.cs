@@ -1,5 +1,5 @@
+using System.Buffers.Binary;
 using System.Net;
-using System.Runtime.InteropServices;
 using DpiBypass.Core.Interop;
 
 namespace DpiBypass.Core.Network;
@@ -247,8 +247,17 @@ public sealed class WinDivertFlowObserver : IProcessFlowObserver
             return;
         }
 
-        var local = ToEndPoint(address.LocalAddr0, address.LocalAddr1, address.LocalAddr2, address.LocalAddr3, address.LocalPort, address.IPv6);
-        var remote = ToEndPoint(address.RemoteAddr0, address.RemoteAddr1, address.RemoteAddr2, address.RemoteAddr3, address.RemotePort, address.IPv6);
+        // IPv6 flows are recorded as seen but not decoded: everything downstream of
+        // discovery - the probe series, the gateway comparison, the extended TCP
+        // statistics - is IPv4, and an address decoded from the wrong word order would be
+        // a plausible-looking endpoint pointing at nothing. Skipping is the honest answer.
+        if (address.IPv6)
+        {
+            return;
+        }
+
+        var local = ToEndPoint(address.LocalAddr0, address.LocalPort);
+        var remote = ToEndPoint(address.RemoteAddr0, address.RemotePort);
 
         if (local is null || remote is null || IsUninteresting(remote.Address))
         {
@@ -287,31 +296,21 @@ public sealed class WinDivertFlowObserver : IProcessFlowObserver
     }
 
     /// <summary>
-    /// Turns WinDivert's four address words into an endpoint.
+    /// Turns WinDivert's first address word into an IPv4 endpoint.
     /// </summary>
     /// <remarks>
-    /// The layer always stores addresses in IPv6 form, with IPv4 appearing as an
-    /// IPv4-mapped address, so the family comes from the address flag rather than from
-    /// guessing at the contents.
+    /// WinDivert stores an IPv4 address as a single UINT32 in host byte order - the same
+    /// form its own filter language and <c>WinDivertHelperFormatIPv4Address</c> use - so
+    /// a.b.c.d is (a &lt;&lt; 24) | (b &lt;&lt; 16) | (c &lt;&lt; 8) | d. <see cref="IPAddress"/>
+    /// wants those four bytes in that order, which is big-endian, and writing them any
+    /// other way produces a reversed address that looks entirely valid.
     /// </remarks>
-    private static IPEndPoint? ToEndPoint(uint word0, uint word1, uint word2, uint word3, ushort port, bool ipv6)
+    internal static IPEndPoint? ToEndPoint(uint word, ushort port)
     {
         try
         {
-            if (!ipv6)
-            {
-                // IPv4 sits in the first word, in host order on this architecture.
-                return new IPEndPoint(new IPAddress(BitConverter.GetBytes(word0)), port);
-            }
-
-            Span<byte> bytes = stackalloc byte[16];
-            MemoryMarshal.Write(bytes[..4], in word0);
-            MemoryMarshal.Write(bytes.Slice(4, 4), in word1);
-            MemoryMarshal.Write(bytes.Slice(8, 4), in word2);
-            MemoryMarshal.Write(bytes.Slice(12, 4), in word3);
-
-            // WinDivert stores the words in reverse order for IPv6.
-            bytes.Reverse();
+            Span<byte> bytes = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(bytes, word);
             return new IPEndPoint(new IPAddress(bytes), port);
         }
         catch (ArgumentException)

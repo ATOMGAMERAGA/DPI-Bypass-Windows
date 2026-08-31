@@ -332,13 +332,7 @@ public sealed class LoadedLatencyLane
                 Capacity = capacity,
                 Mode = request.GuardMode,
                 Probe = request.Probe,
-                MaximumTrials = request.MaximumTrialsForTest ?? new TrafficGuardRequest
-                {
-                    Network = network,
-                    Endpoint = endpoint,
-                    ProfileId = network.Key,
-                    BulkApplication = application,
-                }.MaximumTrials,
+                MaximumTrials = request.MaximumTrialsForTest ?? TrafficGuardRequest.DefaultMaximumTrials,
             },
             cancellationToken).ConfigureAwait(false);
 

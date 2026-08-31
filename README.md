@@ -207,8 +207,17 @@ dosyasında kaynak bağlantılarıyla yazılıdır.
 | Hedef | Ne ölçülür | Ne ölçülmez |
 | --- | --- | --- |
 | **Genel internet referansı** | 1.1.1.1 / 8.8.8.8 / 9.9.9.9 ICMP RTT'si | Oyun sunucunuzun rotası. Bu hedef genel bağlantı sağlığıdır, **oyun sunucusu değildir** |
-| **Çalışan oyun / uygulama** | Programın açık TCP bağlantısındaki **gerçek uzak uç** (IP Helper bağlantı tablosundan) | Yalnız UDP kullanan bir oyunun sunucusu — Windows UDP soketinin uzak adresini bildirmez |
-| **Özel sunucu** | `host`, `host:port`, `tcp://host:port` | `udp://host:port` verilirse aynı adrese **rota referansı** ölçülür ve arayüz bunu böyle etiketler |
+| **Çalışan oyun / uygulama** | Programın **TCP ve UDP** uç noktaları. UDP oturumları WinDivert'in FLOW katmanından (yalnız gözlem) bulunur; birden fazla aday varsa hangisini ölçeceğinizi siz seçersiniz | Gözlem başlamadan **önce** kurulmuş bağlantılar — WinDivert bu olayları göremez, bu yüzden oyuna yeniden bağlanmanız istenir |
+| **Özel sunucu** | `host`, `host:port`, `tcp://host:port`; port 25565 ise Minecraft Java durum sorgusunun **gerçek Ping/Pong süresi** | `udp://host:port` verilirse aynı adrese **rota referansı** ölçülür ve arayüz bunu böyle etiketler |
+
+Bir uç nokta için ölçülen sayının ne olduğu her zaman yazılıdır:
+
+| Araç | Ne ölçer |
+| --- | --- |
+| ICMP | Aynı adrese giden **rotanın** gidiş-dönüş süresi |
+| `TCP/443 (el sıkışma süresi)` | Bağlantı kurma süresi — oturum içi RTT **değildir** |
+| `TCP/… (EStats)` | Uygulamanın **zaten açık** olan bağlantısının, yığının kendi ölçtüğü RTT'si. Hiç paket gönderilmez |
+| `Minecraft/25565` | Sunucunun kendi yanıt süresi (Server List Ping) |
 
 Hedef deney başında bir kez çözülür ve **sabitlenir**. A ve B kolları aynı IP,
 aynı protokol ve aynı portu kullanır — RFC 2681'in Type-P kuralı budur; farklı
@@ -288,16 +297,38 @@ Ev bağlantılarında en büyük ms kazancı genelde boştaki ping'den değil,
 5. gönderim ve indirme kuyruklanmasını **ayrı ayrı** raporlar.
 
 **Uygulama hiçbir veri göndermez veya indirmez.** Yük sizin başlattığınız
-trafiktir; gelmezse cevap "ölçülmedi" olur, tahmin değil. "Yüklü" sayılma eşiği
-sabit bir sayı değil, hattın **ölçülen kapasitesinin** bir payıdır — 256 kbit/s
-5 Mbit'lik bir gönderim hattını doldurur, 500 Mbit'likte gürültüdür.
+trafiktir; gelmezse cevap "ölçülmedi" olur, tahmin değil.
+
+"Yüklü" tek bir durum değildir. Kapasite, aktarımınız hızlanıp **plato yaptığında**
+öğrenilir (tek bir pencereden değil), yön başına ayrı saklanır, ve üç ayrı durum
+raporlanır: *trafik var*, *kapasiteye yaklaştı* (%60) ve *hat doydu* (%85).
+Kuyruklanma iddiası **yalnız doygunlukta** üretilir. Kapasite yeterince
+ölçülemediyse cevap "ölçülemedi"dir — "bufferbloat yok" değildir.
+
+Derin test bir sihirbazdır ve her aşamada ne beklendiğini söyler: hedef
+doğrulama → hattın boşalması → boştaki değer → *gönderimi başlatın* → ölçüm →
+*gönderimi durdurun* → ilke uygulama → *yeni bir gönderim başlatın* → ölçüm →
+indirme aşaması → doğrulama turu. Anlık hız, kapasiteye yaklaşma yüzdesi, kalan
+süre, kullanılan veri ve bir **iptal** düğmesi her aşamada görünür.
 
 ### Traffic Guard (isteğe bağlı, varsayılan kapalı)
 
 Gönderim kuyruklanması bulunursa ve siz açıkça açtıysanız, seçtiğiniz **tek bir**
 uygulamanın giden trafiği Windows'un kendi Policy-based QoS mekanizmasıyla
-ölçülen kapasitenin güvenli bir yüzdesinde sınırlanır, sonra yük altındaki
-gecikme yeniden ölçülür.
+sınırlanır, sonra yük altındaki gecikme yeniden ölçülür.
+
+Sınır sabit bir yüzde **değildir**: birkaç aday sınır uygulanıp ölçülür ve
+sıralama yük altındaki p95 → p99 → kuyruklanma farkı → jitter → kayıp → korunan
+throughput önceliğiyle yapılır. İki mod vardır — *Dengeli* (hızı olabildiğince
+korur) ve *En düşük gecikme* (daha fazla hız kaybını kabul eder ve kaybı size
+gösterir). Kazanan sınır, **aramada kullanılmayan ayrı bir doğrulama turunda**
+yeniden sınanır.
+
+Windows bir QoS ilkesini yalnız **ilke oluşturulduktan sonra açılan** bağlantılara
+uygular. Bu yüzden test sırasında aktarımı durdurup yeniden başlatmanız istenir,
+ve yeni bir bağlantı görülmeden hiçbir sonuç üretilmez. Sınırlanan, **oyununuz
+değil** adını verdiğiniz toplu aktarım uygulamasıdır; uygulama çalışan süreçler
+arasından doğrulanır.
 
 - İlke yalnız **`DPIBypass.Latency.`** ön ekiyle oluşturulur; başka hiçbir ad
   oluşturulmaz, değiştirilmez veya silinmez.
@@ -306,6 +337,11 @@ gecikme yeniden ölçülür.
 - İlke `ActiveStore`'da tutulur: yeniden başlatmadan sonra kalmaz.
 - Kuyruklanma **ölçülerek** azalmazsa, paket kaybı artarsa veya gönderim hızı
   fazla düşerse ilke silinir.
+- İlke oluşturulduktan sonra depodan **her koşul ve eylem** tek tek geri okunur:
+  ad, depo, uygulama eşleşmesi, protokol, hedef öneki ve portu, hız sınırı, DSCP
+  ve öncelik. Biri tutmuyorsa ilke oluşturulmuş sayılmaz.
+- Ölçülen bayt hızı sınırla tutarlı değilse o tur, o sınır hakkında veri
+  sayılmaz — ilke depoda görünüyor olsa bile.
 - DSCP işaretlemesi tek başına kazanç sayılmaz: router'ın onu sınıflandırıp
   sınıflandırmadığı bu uçtan görülemez.
 
@@ -338,12 +374,25 @@ keyword'üyle eşleşir, yerelleştirilmiş görünen ad **hiç okunmaz**):
 - `*RSS` → 1 (yalnız kablolu, ≥4 mantıksal işlemci, şu anda kapalıysa)
 - `*EEE` → 0
 - `*LsoV2IPv4` / `*LsoV2IPv6` → 0 (yalnız toplu gönderim ölçülen lane'de)
-- `SelectiveSuspend`, `D0PacketCoalescing` → Disabled
-  (`Get/Set-NetAdapterPowerManagement`)
 
-`DeviceSleepOnDisconnect` **artık aday değildir**: bu keyword bağlantı
-kesildiğinde ne olduğunu yönetir, oyun oynarken RTT'yi değil. Yalnız eski bir
-kayıt taşıyan makineler için geri yüklenebilir listede kalır.
+**Bir ayar "uygulandı" sayılmaz, kanıtlanır.** Microsoft'un kendi belgesi
+`-NoRestart` için *"Many advanced properties require restarting the network
+adapter before the new settings take effect"* diyor — yani registry'nin yeni
+değeri göstermesi sürücünün onunla çalıştığını kanıtlamaz. Değer önce yeniden
+başlatmadan yazılır; `Get-NetAdapterRsc` / `Get-NetAdapterRss` /
+`Get-NetAdapterLso` ayarın **gerçekten etkin** olduğunu bildirirse ölçüm başlar.
+Bildirmiyorsa ve siz kontrollü yeniden başlatmaya izin vermediyseniz aday
+"yeniden başlatma gerekiyor" olarak raporlanır ve **ölçülmez**. İzin verdiyseniz
+bağdaştırıcı yeniden başlatılır ve aynı bağdaştırıcı, link, IP, gateway, ilk
+atlama ve erişim noktası doğrulanmadan hiçbir ölçüm yapılmaz. Uzak masaüstü
+oturumunda yeniden başlatma **hiçbir koşulda** yapılmaz.
+
+`SelectiveSuspend`, `D0PacketCoalescing` ve `DeviceSleepOnDisconnect` **artık
+aday değildir**. İlki yalnız uzun boşluktan sonraki ilk paketi etkiler ve sürekli
+probe gönderen bir deney o durumu hiç üretmez; ikincisi yayın/çoklu yayın
+alımlarını birleştirir ve unicast oyun trafiğine mekanizması yoktur; üçüncüsü
+bağlantı kesildiğinde ne olduğunu yönetir. Üçü de yalnız eski bir kayıt taşıyan
+makineler için **geri yüklenebilir** listede kalır.
 
 **Checksum offload hiçbir koşulda kapatılmaz.** Microsoft bunların her iş
 yükünde açık kalmasını önerir ve RSS, RSC, LSO bunlara bağımlıdır.
