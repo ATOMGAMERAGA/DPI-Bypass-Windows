@@ -275,7 +275,16 @@ public sealed class LatencyProbeDeadlineTests
         // reports the attempts it really made rather than the number that was planned.
         Assert.True(measurement.GatewayAttempts >= 0);
         Assert.Equal(0, measurement.GatewayReplies);
-        Assert.Equal(LatencyProbe.IcmpResolutionMs, measurement.ClockResolutionMs);
+
+        // And the resolution reported is the one belonging to whichever instrument
+        // actually produced the series. Which that is depends on whether this machine can
+        // send an echo request at all - a container without the privilege falls through to
+        // the handshake series - so the invariant is the pairing, not either value.
+        Assert.Equal(
+            measurement.Protocol.StartsWith("ICMP", StringComparison.Ordinal)
+                ? LatencyProbe.IcmpResolutionMs
+                : LatencyProbe.StopwatchResolutionMs,
+            measurement.ClockResolutionMs);
     }
 
     private sealed class NullLoadSampler : INetworkLoadSampler
