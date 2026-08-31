@@ -93,7 +93,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         _latencyResult = _latencyOptimizer.Current;
-        _latencyOptimizer.Target = Settings.Latency.ToSpec();
+        ApplyLatencyPreferences();
 
         ApplySettingsToMatcher();
     }
@@ -228,7 +228,7 @@ public sealed class ProtectionService : IAsyncDisposable
             return;
         }
 
-        _latencyOptimizer.Target = Settings.Latency.ToSpec();
+        ApplyLatencyPreferences();
         await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -242,7 +242,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         if (enabled)
         {
-            _latencyOptimizer.Target = Settings.Latency.ToSpec();
+            ApplyLatencyPreferences();
             return PublishLatency(await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false));
         }
 
@@ -356,8 +356,22 @@ public sealed class ProtectionService : IAsyncDisposable
 
         Settings.Latency = preferences;
         _store.Save(Settings);
-        _latencyOptimizer.Target = preferences.ToSpec();
+        ApplyLatencyPreferences();
         Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Pushes the saved target and restart consent onto the optimizer before a run.
+    /// </summary>
+    /// <remarks>
+    /// Both are read afresh here rather than captured once, because a user can withdraw
+    /// restart consent between runs and the next run has to honour that, and because the
+    /// remote-session half of the answer can change without any setting changing.
+    /// </remarks>
+    private void ApplyLatencyPreferences()
+    {
+        _latencyOptimizer.Target = Settings.Latency.ToSpec();
+        _latencyOptimizer.Restart = Settings.Latency.ToRestartPolicy();
     }
 
     /// <summary>

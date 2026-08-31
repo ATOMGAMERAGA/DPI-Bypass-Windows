@@ -104,7 +104,7 @@ public sealed class LatencyStatusViewTests
                 new LatencyVerdict
                 {
                     Outcome = LatencyVerdictOutcome.Rejected,
-                    PropertyName = "SelectiveSuspend",
+                    PropertyName = Fake.DefaultKeyword,
                     Description = "Seçmeli askıya alma kapalı",
                     Reason = "bir turda paket kaybı %8.3 arttı",
                     Cycles = 2,
@@ -303,7 +303,7 @@ public sealed class LatencyProfileContextTests
         AdapterId = "adapter",
         CapabilityFingerprint = "fingerprint",
         VerifiedAt = DateTimeOffset.UtcNow,
-        RejectedProperties = ["SelectiveSuspend"],
+        RejectedProperties = [Fake.DefaultKeyword],
         Context = Context(),
     };
 }
@@ -363,9 +363,21 @@ public sealed class LatencyPreferencesTests
     [Fact]
     public void AManualUplinkFigureIsBelievedOverAnyObservation()
     {
-        var capacity = new LatencyPreferences { ManualUplinkMbps = 12 }.ToCapacity();
+        var capacity = new LatencyPreferences { ManualUplinkMbps = 12, ManualDownlinkMbps = 90 }.ToCapacity();
 
-        Assert.True(capacity.UserSupplied);
+        Assert.Equal(LinkCapacityConfidence.UserSupplied, capacity.UplinkConfidence);
         Assert.Equal(12_000, capacity.UplinkKbps);
+        Assert.Equal(90_000, capacity.DownlinkKbps);
+        Assert.True(capacity.IsConfident(LoadDirection.Download));
+    }
+
+    /// <summary>
+    /// Restarting the adapter is never something a preference alone can authorise.
+    /// </summary>
+    [Fact]
+    public void AdapterRestartConsentIsOffByDefaultAndNeverAppliesRemotely()
+    {
+        Assert.False(new LatencyPreferences().ToRestartPolicy().UserConsented);
+        Assert.True(new LatencyPreferences { AllowAdapterRestart = true }.ToRestartPolicy().UserConsented);
     }
 }

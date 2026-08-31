@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using DpiBypass.Core.Interop;
 
 namespace DpiBypass.Core.Network;
 
@@ -145,6 +146,15 @@ public sealed class LatencyProbe : ILatencyProbe
     /// </summary>
     public const int MaximumTcpProbes = 24;
 
+    /// <summary>The same ceiling for application-level exchanges over one connection.</summary>
+    public const int MaximumApplicationProbes = 40;
+
+    /// <summary>How many gateway probes may overshoot the request before the series stops.</summary>
+    private const int MaximumGatewayOvershoot = 4;
+
+    /// <summary>Deadline for the yes/no reachability checks between experiment arms.</summary>
+    private const int ConnectivityTimeoutMs = 900;
+
     private static readonly TimeSpan MinimumTcpPacing = TimeSpan.FromMilliseconds(120);
 
     private static IReadOnlyList<IPAddress> ReferenceEndpoints => LatencyTargetResolver.ReferenceAddresses;
@@ -165,23 +175,32 @@ public sealed class LatencyProbe : ILatencyProbe
         var gateway = IPAddress.TryParse(network.GatewayAddress, out var parsedGateway) ? parsedGateway : null;
         var loadStart = _load.Read(network);
 
+        // The gateway series runs until the remote series says it is finished rather than
+        // for a precomputed number of probes. An earlier build derived the gateway pacing
+        // from the ICMP probe count, so on a TCP series - which is slower per probe and
+        // paced differently - the gateway samples covered only the first part of the
+        // window and were then subtracted from a remote median measured across all of it.
+        using var remoteFinished = new CancellationTokenSource();
         var gatewayTask = gateway is null
-            ? Task.FromResult<IReadOnlyList<double>>([])
-            : PingSeriesAsync(gateway, request.GatewayProbeCount, GatewayPacing(request), request.TimeoutMilliseconds, cancellationToken);
+            ? Task.FromResult<GatewaySeries>(GatewaySeries.Empty)
+            : PingUntilAsync(
+                gateway,
+                request,
+                remoteFinished.Token,
+                cancellationToken);
 
         SeriesResult series;
-        IReadOnlyList<double> gatewaySamples;
+        GatewaySeries gatewaySamples;
 
         try
         {
-            series = request.Endpoint is { Protocol: LatencyProtocol.Tcp, Port: > 0 } tcp
-                ? await MeasureTcpAsync(tcp, request, cancellationToken).ConfigureAwait(false)
-                : await MeasureIcmpAsync(request, cancellationToken).ConfigureAwait(false);
+            series = await MeasureRemoteAsync(request, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             // Awaited on every path, including cancellation: a series left running is an
             // unobserved task still sending echo requests after the caller gave up.
+            await remoteFinished.CancelAsync().ConfigureAwait(false);
             gatewaySamples = await Observed(gatewayTask).ConfigureAwait(false);
         }
 
@@ -190,10 +209,26 @@ public sealed class LatencyProbe : ILatencyProbe
             series.Protocol,
             series.Samples,
             series.Attempts,
-            gatewaySamples,
-            gateway is null ? 0 : request.GatewayProbeCount,
-            NetworkLoadSample.Between(loadStart, _load.Read(network)));
+            gatewaySamples.Samples,
+            gatewaySamples.Attempts,
+            NetworkLoadSample.Between(loadStart, _load.Read(network)),
+            clockResolutionMs: series.ClockResolutionMs);
     }
+
+    /// <summary>Dispatches to the instrument the pinned endpoint actually calls for.</summary>
+    private async Task<SeriesResult> MeasureRemoteAsync(
+        LatencyProbeRequest request,
+        CancellationToken cancellationToken)
+        => request.Endpoint switch
+        {
+            { Protocol: LatencyProtocol.MinecraftStatus } minecraft
+                => await MeasureMinecraftAsync(minecraft, request, cancellationToken).ConfigureAwait(false),
+            { Protocol: LatencyProtocol.TcpEStats, LocalEndpoint: not null } estats
+                => await MeasureEStatsAsync(estats, request, cancellationToken).ConfigureAwait(false),
+            { Protocol: LatencyProtocol.Tcp, Port: > 0 } tcp
+                => await MeasureTcpAsync(tcp, request, cancellationToken).ConfigureAwait(false),
+            _ => await MeasureIcmpAsync(request, cancellationToken).ConfigureAwait(false),
+        };
 
     public async Task<LatencyConnectivity> CheckConnectivityAsync(
         NetworkFingerprint network,
@@ -207,23 +242,49 @@ public sealed class LatencyProbe : ILatencyProbe
             : ReferenceEndpoints[0];
         var gateway = IPAddress.TryParse(network.GatewayAddress, out var parsedGateway) ? parsedGateway : null;
 
-        var remotePing = TryPingAsync(remote, 900, cancellationToken);
+        var remotePing = TryPingAsync(remote, ConnectivityTimeoutMs, cancellationToken);
         var gatewayPing = gateway is null
             ? Task.FromResult<double?>(null)
-            : TryPingAsync(gateway, 900, cancellationToken);
+            : TryPingAsync(gateway, ConnectivityTimeoutMs, cancellationToken);
 
         await Task.WhenAll(remotePing, gatewayPing).ConfigureAwait(false);
 
         var remoteReachable = remotePing.Result is not null;
         if (!remoteReachable)
         {
-            remoteReachable = await TryTcpConnectAsync(remote, 443, cancellationToken).ConfigureAwait(false) is not null;
+            remoteReachable = await TryTcpConnectAsync(remote, 443, ConnectivityTimeoutMs, cancellationToken)
+                .ConfigureAwait(false) is not null;
         }
 
         return new LatencyConnectivity(gatewayPing.Result is not null, remoteReachable);
     }
 
-    private sealed record SeriesResult(string Endpoint, string Protocol, IReadOnlyList<double> Samples, int Attempts);
+    /// <summary>
+    /// One remote series, and how finely the instrument that produced it could see.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="IcmpResolutionMs"/> for echo requests because <see cref="Ping"/> reports
+    /// whole milliseconds; everything else is timed with <see cref="Stopwatch"/> and can
+    /// resolve far below any threshold the evaluator uses.
+    /// </remarks>
+    private sealed record SeriesResult(
+        string Endpoint,
+        string Protocol,
+        IReadOnlyList<double> Samples,
+        int Attempts,
+        double ClockResolutionMs = IcmpResolutionMs);
+
+    /// <summary>The gateway half of a measurement, with the attempts it really made.</summary>
+    private sealed record GatewaySeries(IReadOnlyList<double> Samples, int Attempts)
+    {
+        public static readonly GatewaySeries Empty = new([], 0);
+    }
+
+    /// <summary>Ping reports round trips as whole milliseconds, so that is the resolution.</summary>
+    public const double IcmpResolutionMs = 1.0;
+
+    /// <summary>What a stopwatch-timed instrument can resolve, in milliseconds.</summary>
+    public static double StopwatchResolutionMs => 1000d / Stopwatch.Frequency;
 
     private async Task<SeriesResult> MeasureIcmpAsync(
         LatencyProbeRequest request,
@@ -258,7 +319,12 @@ public sealed class LatencyProbe : ILatencyProbe
         // Some networks drop ICMP while ordinary HTTPS works. TCP connect latency is a
         // real fallback measurement; it is labelled and never mixed with ICMP.
         var fallback = await MeasureTcpFallbackAsync(endpoints, request, cancellationToken).ConfigureAwait(false);
-        return new SeriesResult(fallback.Endpoint.ToString(), "TCP/443", fallback.Samples, fallback.Attempts);
+        return new SeriesResult(
+            fallback.Endpoint.ToString(),
+            "TCP/443 (ICMP yanıtsız; el sıkışma süresi)",
+            fallback.Samples,
+            fallback.Attempts,
+            StopwatchResolutionMs);
     }
 
     private static async Task<SeriesResult> MeasureTcpAsync(
@@ -276,7 +342,9 @@ public sealed class LatencyProbe : ILatencyProbe
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var elapsed = await TryTcpConnectAsync(endpoint.Address, port, cancellationToken).ConfigureAwait(false);
+            var elapsed = await TryTcpConnectAsync(
+                endpoint.Address, port, request.TimeoutMilliseconds, cancellationToken).ConfigureAwait(false);
+
             if (index >= warmup && elapsed is { } value)
             {
                 samples.Add(value);
@@ -288,11 +356,107 @@ public sealed class LatencyProbe : ILatencyProbe
             }
         }
 
-        return new SeriesResult(endpoint.Address.ToString(), $"TCP/{port}", samples, attempts);
+        return new SeriesResult(
+            endpoint.Address.ToString(),
+            $"TCP/{port} (el sıkışma süresi)",
+            samples,
+            attempts,
+            StopwatchResolutionMs);
+    }
+
+    /// <summary>
+    /// Samples what TCP has already measured on a connection the application owns.
+    /// </summary>
+    /// <remarks>
+    /// No packets are sent. Each sample is a read of the stack's smoothed estimate, which
+    /// makes this the only instrument here that reports a running game's own round trip
+    /// without adding a single connection to the server it is talking to. A stack that
+    /// will not enable collection produces no samples at all rather than a fallback
+    /// wearing the same label.
+    /// </remarks>
+    private static async Task<SeriesResult> MeasureEStatsAsync(
+        LatencyEndpoint endpoint,
+        LatencyProbeRequest request,
+        CancellationToken cancellationToken)
+    {
+        var local = endpoint.LocalEndpoint!;
+        var remote = new IPEndPoint(endpoint.Address, endpoint.Port ?? 0);
+        var label = $"TCP/{remote.Port} (EStats)";
+
+        if (!TcpEStats.TryEnable(local, remote))
+        {
+            return new SeriesResult(endpoint.Address.ToString(), label, [], request.ProbeCount, StopwatchResolutionMs);
+        }
+
+        var attempts = Math.Max(1, request.ProbeCount);
+        var samples = new List<double>(attempts);
+        var pacing = request.Pacing > TimeSpan.Zero ? request.Pacing : TimeSpan.FromMilliseconds(45);
+        var previous = double.NaN;
+
+        for (var index = 0; index < attempts + request.WarmupCount; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var sample = TcpEStats.TryRead(local, remote);
+            if (sample is null)
+            {
+                // The connection went away mid-series. What was collected still describes
+                // it; nothing is invented to fill the rest.
+                break;
+            }
+
+            // The smoothed estimate only moves when the stack takes a new measurement, so
+            // repeating an unchanged value would report the same round trip several times
+            // and shrink the apparent variation to nothing.
+            if (index >= request.WarmupCount && !AreClose(sample.SmoothedRttMs, previous))
+            {
+                samples.Add(sample.SmoothedRttMs);
+            }
+
+            previous = sample.SmoothedRttMs;
+
+            if (index + 1 < attempts + request.WarmupCount)
+            {
+                await Task.Delay(pacing, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return new SeriesResult(endpoint.Address.ToString(), label, samples, attempts, IcmpResolutionMs);
+
+        static bool AreClose(double first, double second)
+            => double.IsFinite(second) && Math.Abs(first - second) < 0.0001;
+    }
+
+    /// <summary>Times the Minecraft Java status Ping/Pong exchange: a real application RTT.</summary>
+    private static async Task<SeriesResult> MeasureMinecraftAsync(
+        LatencyEndpoint endpoint,
+        LatencyProbeRequest request,
+        CancellationToken cancellationToken)
+    {
+        var port = endpoint.Port ?? MinecraftStatusProbe.DefaultPort;
+        var host = string.IsNullOrWhiteSpace(endpoint.Host) ? endpoint.Address.ToString() : endpoint.Host;
+        var attempts = Math.Clamp(request.ProbeCount, 3, MaximumApplicationProbes);
+
+        var series = await MinecraftStatusProbe.MeasureAsync(
+            endpoint.Address,
+            port,
+            host,
+            attempts,
+            Math.Clamp(request.WarmupCount, 0, 3),
+            request.Pacing > MinimumTcpPacing ? request.Pacing : MinimumTcpPacing,
+            request.TimeoutMilliseconds,
+            cancellationToken).ConfigureAwait(false);
+
+        return new SeriesResult(
+            endpoint.Address.ToString(),
+            $"Minecraft/{port}",
+            series.Samples,
+            series.Attempts,
+            StopwatchResolutionMs);
     }
 
     /// <summary>Waits for a series to finish, treating cancellation as "no samples".</summary>
-    private static async Task<IReadOnlyList<double>> Observed(Task<IReadOnlyList<double>> series)
+    private static async Task<GatewaySeries> Observed(Task<GatewaySeries> series)
     {
         try
         {
@@ -300,11 +464,62 @@ public sealed class LatencyProbe : ILatencyProbe
         }
         catch (OperationCanceledException)
         {
-            return [];
+            return GatewaySeries.Empty;
         }
     }
 
-    /// <summary>Spread the gateway probes across the whole remote series.</summary>
+    /// <summary>
+    /// Probes the gateway for exactly as long as the remote series runs.
+    /// </summary>
+    /// <remarks>
+    /// Both halves have to describe the same slice of time or their difference is not the
+    /// local part of the path. Rather than guessing how long the remote series will take,
+    /// this simply keeps going until it is told the remote series is over, pacing itself
+    /// from the request's estimate and capped so a very long series cannot turn into a
+    /// flood of echo requests at the router.
+    /// </remarks>
+    private static async Task<GatewaySeries> PingUntilAsync(
+        IPAddress address,
+        LatencyProbeRequest request,
+        CancellationToken stop,
+        CancellationToken cancellationToken)
+    {
+        var target = Math.Max(1, request.GatewayProbeCount);
+        var cap = target * MaximumGatewayOvershoot;
+        var pacing = GatewayPacing(request);
+        var samples = new List<double>(target);
+        var attempts = 0;
+
+        while (attempts < cap && !stop.IsCancellationRequested)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            attempts++;
+            if (await TryPingAsync(address, request.TimeoutMilliseconds, cancellationToken).ConfigureAwait(false)
+                is { } rtt)
+            {
+                samples.Add(rtt);
+            }
+
+            if (pacing <= TimeSpan.Zero)
+            {
+                continue;
+            }
+
+            try
+            {
+                await Task.Delay(pacing, stop).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        return new GatewaySeries(samples, attempts);
+    }
+
+    /// <summary>The gap between gateway probes, from the request's own estimate.</summary>
     private static TimeSpan GatewayPacing(LatencyProbeRequest request)
     {
         if (request.GatewayProbeCount <= 1)
@@ -378,7 +593,8 @@ public sealed class LatencyProbe : ILatencyProbe
 
             foreach (var endpoint in endpoints)
             {
-                if (await TryTcpConnectAsync(endpoint, 443, cancellationToken).ConfigureAwait(false) is { } elapsed)
+                if (await TryTcpConnectAsync(endpoint, 443, request.TimeoutMilliseconds, cancellationToken)
+                    .ConfigureAwait(false) is { } elapsed)
                 {
                     samples[endpoint].Add(elapsed);
                 }
@@ -431,24 +647,41 @@ public sealed class LatencyProbe : ILatencyProbe
         }
     }
 
+    /// <summary>
+    /// One connect attempt with a real deadline of its own.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="LatencyProbeRequest.TimeoutMilliseconds"/> used to apply to echo
+    /// requests only: a TCP attempt inherited nothing but the caller's token, so a
+    /// black-holed SYN sat in the operating system's own retransmit schedule for around
+    /// twenty seconds. That single attempt is longer than the entire series is meant to
+    /// take, and RFC 2681 requires the threshold that separates a large finite delay from
+    /// a loss to be part of the metric - which it cannot be if it is never applied.
+    /// </remarks>
     private static async Task<double?> TryTcpConnectAsync(
         IPAddress address,
         int port,
+        int timeoutMilliseconds,
         CancellationToken cancellationToken)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, timeoutMilliseconds)));
+
         try
         {
             using var client = new TcpClient(address.AddressFamily);
             var started = Stopwatch.GetTimestamp();
-            await client.ConnectAsync(address, port, cancellationToken).ConfigureAwait(false);
+            await client.ConnectAsync(address, port, deadline.Token).ConfigureAwait(false);
             return Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception)
         {
+            // Timed out or refused: a probe that did not come back inside the threshold is
+            // a lost probe, which is what the loss figure is for.
             return null;
         }
     }

@@ -4,12 +4,23 @@ using System.Runtime.InteropServices;
 
 namespace DpiBypass.Core.Interop;
 
+/// <summary>One established TCP connection, both ends, as the stack reports it.</summary>
+/// <remarks>
+/// The local end matters because IP Helper's extended statistics are keyed on the whole
+/// four-tuple: measuring a running game's round trip without opening a new handshake
+/// needs to name the exact connection, not just the server.
+/// </remarks>
+public sealed record ProcessTcpConnection(IPEndPoint Local, IPEndPoint Remote);
+
 /// <summary>The remote endpoints one running program currently has open.</summary>
 public sealed record ProcessEndpointSet
 {
     public bool ProcessFound { get; init; }
 
-    public IReadOnlyList<IPEndPoint> TcpRemoteEndpoints { get; init; } = [];
+    /// <summary>Established TCP connections, both ends.</summary>
+    public IReadOnlyList<ProcessTcpConnection> TcpConnections { get; init; } = [];
+
+    public IReadOnlyList<IPEndPoint> TcpRemoteEndpoints => [.. TcpConnections.Select(connection => connection.Remote)];
 
     /// <summary>
     /// Whether the process holds UDP sockets.
@@ -72,7 +83,12 @@ public sealed class WindowsProcessEndpointProvider : IProcessEndpointProvider
         return new ProcessEndpointSet
         {
             ProcessFound = true,
-            TcpRemoteEndpoints = [.. ReadTcpTable().Where(row => pids.Contains(row.Pid)).Select(row => row.Remote)],
+            TcpConnections =
+            [
+                .. ReadTcpTable()
+                    .Where(row => pids.Contains(row.Pid))
+                    .Select(row => new ProcessTcpConnection(row.Local, row.Remote)),
+            ],
             HasUdpSockets = ReadUdpOwners().Any(pids.Contains),
         };
     }
@@ -151,14 +167,14 @@ public sealed class WindowsProcessEndpointProvider : IProcessEndpointProvider
         }
     }
 
-    private IReadOnlyList<(uint Pid, IPEndPoint Remote)> ReadTcpTable()
+    private IReadOnlyList<(uint Pid, IPEndPoint Local, IPEndPoint Remote)> ReadTcpTable()
     {
         if (!OperatingSystem.IsWindows())
         {
             return [];
         }
 
-        var rows = new List<(uint, IPEndPoint)>();
+        var rows = new List<(uint, IPEndPoint, IPEndPoint)>();
 
         try
         {
@@ -175,7 +191,11 @@ public sealed class WindowsProcessEndpointProvider : IProcessEndpointProvider
                     continue;
                 }
 
-                rows.Add((row.OwningPid, new IPEndPoint(address, NetworkPort(row.RemotePort))));
+                var local = new IPAddress(BitConverter.GetBytes(row.LocalAddress));
+                rows.Add((
+                    row.OwningPid,
+                    new IPEndPoint(local, NetworkPort(row.LocalPort)),
+                    new IPEndPoint(address, NetworkPort(row.RemotePort))));
             }
         }
         catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or OutOfMemoryException)

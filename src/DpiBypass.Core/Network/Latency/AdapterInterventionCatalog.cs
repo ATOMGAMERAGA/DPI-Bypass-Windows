@@ -64,12 +64,22 @@ public static class AdapterInterventionCatalog
         LsoIPv6Keyword,
     ];
 
-    /// <summary>Power-management properties this build is allowed to write.</summary>
-    public static readonly IReadOnlyList<string> WritablePowerProperties =
-    [
-        SelectiveSuspendProperty,
-        D0PacketCoalescingProperty,
-    ];
+    /// <summary>
+    /// Power-management properties this build is allowed to write: none.
+    /// </summary>
+    /// <remarks>
+    /// Both keywords this build once wrote fail the only test that matters for a
+    /// steady-state round-trip experiment - whether the experiment could see the change
+    /// at all. NDIS selective suspend puts an idle adapter into a low-power state after a
+    /// documented idle threshold, so its effect lands on the first packet after a long
+    /// gap, and a probe series that never stops producing traffic never produces one. D0
+    /// packet coalescing batches broadcast and multicast receive indications, which is
+    /// not the path a unicast game packet takes at all. Keeping either on the strength of
+    /// a steady-state A/B result would be keeping it on the strength of noise, so neither
+    /// is offered. <see cref="RestorablePowerProperties"/> is deliberately wider so a
+    /// machine carrying an older snapshot still gets its original values back.
+    /// </remarks>
+    public static readonly IReadOnlyList<string> WritablePowerProperties = [];
 
     /// <summary>
     /// Power-management properties this build is allowed to put back.
@@ -99,6 +109,9 @@ public static class AdapterInterventionCatalog
             Scope = LatencyTrafficScope.All,
             Risk = InterventionRisk.Moderate,
             Cost = InterventionCost.Cpu,
+            // Windows exposes no operational query for interrupt moderation, so the only
+            // way to know the driver is running with the new value is to restart it.
+            MayNeedRestart = true,
             SettlingTime = TimeSpan.FromMilliseconds(1500),
             Reference = "learn.microsoft.com/windows-hardware/drivers/network/interrupt-moderation",
         },
@@ -147,6 +160,8 @@ public static class AdapterInterventionCatalog
             Scope = LatencyTrafficScope.All,
             Risk = InterventionRisk.Low,
             Cost = InterventionCost.Power,
+            // No operational query either; 802.3az state is not reported by NetAdapter.
+            MayNeedRestart = true,
             SettlingTime = TimeSpan.FromMilliseconds(1500),
             Reference = "learn.microsoft.com/windows-hardware/drivers/network/standardized-inf-keywords-for-power-management",
         },
@@ -182,6 +197,7 @@ public static class AdapterInterventionCatalog
             Scope = LatencyTrafficScope.All,
             Risk = InterventionRisk.Low,
             Cost = InterventionCost.Power,
+            AffectsSteadyStateRtt = false,
             SettlingTime = TimeSpan.FromMilliseconds(1000),
             Reference = "learn.microsoft.com/windows-hardware/drivers/network/standardized-inf-keywords-for-ndis-selective-suspend",
         },
@@ -194,6 +210,7 @@ public static class AdapterInterventionCatalog
             Scope = LatencyTrafficScope.All,
             Risk = InterventionRisk.Low,
             Cost = InterventionCost.Power,
+            AffectsSteadyStateRtt = false,
             SettlingTime = TimeSpan.FromMilliseconds(1000),
             Reference = "learn.microsoft.com/powershell/module/netadapter/set-netadapterpowermanagement",
         },
@@ -233,9 +250,6 @@ public static class AdapterInterventionCatalog
 
         var candidates = new List<LatencyOptimizationCandidate>();
 
-        AddPower(candidates, adapter, context, SelectiveSuspendProperty);
-        AddPower(candidates, adapter, context, D0PacketCoalescingProperty);
-
         // Interrupt moderation is the one keyword with a documented effect on measured
         // round-trip time, so it is offered on any eligible adapter rather than being
         // arbitrarily limited to Ethernet.
@@ -271,41 +285,18 @@ public static class AdapterInterventionCatalog
         // run, where by construction there is no large block to segment.
         if (context.IncludeThroughputSensitive)
         {
-            AddKeyword(candidates, adapter, context, LsoIPv4Keyword, "0");
-            AddKeyword(candidates, adapter, context, LsoIPv6Keyword, "0");
+            if (adapter.LsoV2IPv4Enabled != false)
+            {
+                AddKeyword(candidates, adapter, context, LsoIPv4Keyword, "0");
+            }
+
+            if (adapter.LsoV2IPv6Enabled != false)
+            {
+                AddKeyword(candidates, adapter, context, LsoIPv6Keyword, "0");
+            }
         }
 
         return candidates;
-    }
-
-    private static void AddPower(
-        List<LatencyOptimizationCandidate> candidates,
-        AdapterLatencyCapability adapter,
-        LatencyCandidateContext context,
-        string propertyName)
-    {
-        // NetAdapter power values: 0 unsupported, 1 disabled, 2 enabled. Only an
-        // explicitly enabled property is a change worth measuring.
-        if (adapter.PowerManagement.GetValueOrDefault(propertyName) != 2)
-        {
-            return;
-        }
-
-        var descriptor = DescriptorFor(propertyName);
-        if (!IsRelevant(descriptor, context))
-        {
-            return;
-        }
-
-        candidates.Add(new LatencyOptimizationCandidate
-        {
-            Kind = LatencySettingKind.PowerManagement,
-            PropertyName = propertyName,
-            OriginalPowerValue = 2,
-            DesiredPowerValue = 1,
-            Descriptor = descriptor,
-            Description = descriptor.Title,
-        });
     }
 
     private static void AddKeyword(
@@ -349,6 +340,13 @@ public static class AdapterInterventionCatalog
 
     private static bool IsRelevant(InterventionDescriptor descriptor, LatencyCandidateContext context)
     {
+        // A change a continuously probing experiment could not see is never offered to
+        // one: the run would cost minutes and produce a verdict about nothing.
+        if (!descriptor.AffectsSteadyStateRtt)
+        {
+            return false;
+        }
+
         if (!descriptor.IsRelevantTo(context.EffectiveScope))
         {
             return false;

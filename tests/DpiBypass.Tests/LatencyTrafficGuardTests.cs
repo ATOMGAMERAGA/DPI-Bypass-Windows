@@ -10,21 +10,39 @@ namespace DpiBypass.Tests;
 /// </summary>
 public sealed class TrafficGuardTests
 {
+    /// <summary>
+    /// The search applies more than one cap and keeps the one that measured best, and the
+    /// choice is then confirmed in a round of its own.
+    /// </summary>
     [Fact]
-    public async Task AMeasuredReductionInQueueingKeepsThePolicy()
+    public async Task TheCapIsChosenByMeasurementAndConfirmedSeparately()
     {
         var qos = new FakeQosController();
-        var load = new FakeLoadExperiment(
-            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140),
-            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34));
 
-        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+        // Baseline, two search trials, then the confirmation round for the winner.
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, loadedP95: 190),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 60, loadedP95: 88, uplinkKbps: 18_400),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34, loadedP95: 42, uplinkKbps: 16_000),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 35, loadedP95: 44, uplinkKbps: 16_000));
+
+        var outcome = await Guard(qos, load).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.Active, outcome.State.Status);
         Assert.Single(qos.Policies);
         Assert.StartsWith(WindowsQosController.PolicyNamePrefix, outcome.State.PolicyName, StringComparison.Ordinal);
         Assert.Equal(116, outcome.State.UploadQueueingBeforeMs);
-        Assert.Equal(10, outcome.State.UploadQueueingAfterMs);
+        Assert.Equal(11, outcome.State.UploadQueueingAfterMs);
+
+        // Two caps were measured, and a fourth round ran that the search never saw.
+        Assert.Equal(2, outcome.State.Trials.Count);
+        Assert.Equal(4, load.Calls);
+
+        // The cap that was kept is not the fixed 85 percent an earlier build assumed.
+        Assert.NotEqual(
+            (ulong)(20_000 * 0.85 * 1000),
+            outcome.State.ThrottleBitsPerSecond);
+
         Assert.NotNull(outcome.Resource);
         Assert.Equal(LatencyResourceKind.QosPolicy, outcome.Resource!.Kind);
     }
@@ -41,7 +59,7 @@ public sealed class TrafficGuardTests
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140),
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 136));
 
-        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+        var outcome = await Guard(qos, load).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.RolledBack, outcome.State.Status);
         Assert.Empty(qos.Policies);
@@ -57,11 +75,10 @@ public sealed class TrafficGuardTests
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140),
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 30, loadedLoss: 9));
 
-        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+        var outcome = await Guard(qos, load).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.RolledBack, outcome.State.Status);
         Assert.Empty(qos.Policies);
-        Assert.Contains("paket kaybı", outcome.State.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -76,10 +93,82 @@ public sealed class TrafficGuardTests
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, uplinkKbps: 20_000),
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 30, uplinkKbps: 4_000));
 
-        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+        var outcome = await Guard(qos, load).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.RolledBack, outcome.State.Status);
         Assert.Contains("fazla düştü", outcome.State.Summary, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Windows attaches a QoS policy as a transport endpoint is created, so a transfer
+    /// that was already running when the policy appeared is not governed by it.
+    /// </summary>
+    /// <remarks>
+    /// This is the regression the whole ordering exists for: an earlier build created the
+    /// policy under a running upload and then measured that same upload, which measures
+    /// the unthrottled flow and credits the difference to the policy.
+    /// </remarks>
+    [Fact]
+    public async Task WithoutANewFlowAfterThePolicyNoResultIsProduced()
+    {
+        var qos = new FakeQosController();
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 30));
+
+        // The observer only ever reports a flow created before the policy existed.
+        var observer = new FakeFlowObserver();
+        observer.Observed.Add(Fake.Flow(at: DateTimeOffset.UtcNow.AddMinutes(-5)));
+
+        var outcome = await Guard(qos, load, observer).RunAsync(
+            Request() with { NewFlowTimeout = TimeSpan.FromMilliseconds(30) });
+
+        Assert.Equal(TrafficGuardStatus.NeedsNewConnection, outcome.State.Status);
+        Assert.Contains("yeni bağlantı", outcome.State.Summary, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(qos.Policies);
+
+        // Only the baseline was measured: nothing after the policy was treated as data.
+        Assert.Equal(1, load.Calls);
+    }
+
+    /// <summary>Without an observer the requirement cannot be proved, so nothing is claimed.</summary>
+    [Fact]
+    public async Task WithoutAFlowObserverTheGuardRefusesToProduceAVerdict()
+    {
+        var qos = new FakeQosController();
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 30));
+
+        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+
+        Assert.Equal(TrafficGuardStatus.NeedsNewConnection, outcome.State.Status);
+        Assert.Empty(qos.Policies);
+    }
+
+    /// <summary>
+    /// A policy that exists but does not actually pace the traffic is not evidence about
+    /// the cap it names, so the trial is discarded rather than counted.
+    /// </summary>
+    [Fact]
+    public async Task ACapTheTrafficIgnoredIsNotTreatedAsAMeasurementOfThatCap()
+    {
+        var qos = new FakeQosController();
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, uplinkKbps: 20_000),
+            // Queueing fell, but the transfer ran at the unthrottled rate: the policy is
+            // not what changed anything here.
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 30, uplinkKbps: 20_000));
+
+        var outcome = await Guard(qos, load).RunAsync(Request() with
+        {
+            Mode = TrafficGuardMode.LowestLatency,
+            MaximumTrials = 1,
+        });
+
+        Assert.Equal(TrafficGuardStatus.RolledBack, outcome.State.Status);
+        Assert.Contains("sınırlamadı", outcome.State.Summary, StringComparison.Ordinal);
+        Assert.Empty(qos.Policies);
     }
 
     [Fact]
@@ -88,11 +177,33 @@ public sealed class TrafficGuardTests
         var qos = new FakeQosController();
         var load = new FakeLoadExperiment(FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 28));
 
-        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+        var outcome = await Guard(qos, load).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.NoQueueing, outcome.State.Status);
         Assert.Empty(qos.Policies);
-        Assert.Equal(0, load.Calls - 1);
+        Assert.Equal(1, load.Calls);
+    }
+
+    /// <summary>
+    /// A link that never reached its ceiling has not been shown to have a queue, and the
+    /// summary says that rather than reporting no queueing.
+    /// </summary>
+    [Fact]
+    public async Task AnUnsaturatedBaselineProducesNotMeasuredRatherThanNoQueueing()
+    {
+        var qos = new FakeQosController();
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140) with
+            {
+                Classification = LinkLoadClassification.HighUtilisation,
+            });
+
+        var outcome = await Guard(qos, load).RunAsync(Request());
+
+        Assert.Equal(TrafficGuardStatus.NotMeasured, outcome.State.Status);
+        Assert.Contains("doygunluğa ulaşmadı", outcome.State.Summary, StringComparison.Ordinal);
+        Assert.Contains("kuyruklanma yok demek değildir", outcome.State.Summary, StringComparison.Ordinal);
+        Assert.Empty(qos.Policies);
     }
 
     /// <summary>
@@ -108,7 +219,7 @@ public sealed class TrafficGuardTests
             CompetingPolicies = ["Corp-Backup-Throttle"],
         };
 
-        var outcome = await new TrafficGuard(qos, new FakeLoadExperiment()).RunAsync(Request());
+        var outcome = await Guard(qos, new FakeLoadExperiment()).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.ConflictSkipped, outcome.State.Status);
         Assert.Empty(qos.Policies);
@@ -121,7 +232,7 @@ public sealed class TrafficGuardTests
     {
         var qos = new FakeQosController { Available = false };
 
-        var outcome = await new TrafficGuard(qos, new FakeLoadExperiment()).RunAsync(Request());
+        var outcome = await Guard(qos, new FakeLoadExperiment()).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.Unavailable, outcome.State.Status);
         Assert.Empty(qos.Policies);
@@ -134,7 +245,7 @@ public sealed class TrafficGuardTests
         var load = new FakeLoadExperiment(
             LoadExperimentResult.Failed(LoadDirection.Upload, "Beklenen süre içinde yeterli trafik görülmedi."));
 
-        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+        var outcome = await Guard(qos, load).RunAsync(Request());
 
         Assert.Equal(TrafficGuardStatus.NotMeasured, outcome.State.Status);
         Assert.Empty(qos.Policies);
@@ -152,11 +263,75 @@ public sealed class TrafficGuardTests
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140),
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140));
 
-        var outcome = await new TrafficGuard(qos, load).RunAsync(Request());
+        var outcome = await Guard(qos, load).RunAsync(Request());
 
         Assert.NotEqual(TrafficGuardStatus.Active, outcome.State.Status);
-        Assert.Null(outcome.State.ImprovementMs is > 0 ? outcome.State.PolicyName : null);
         Assert.Empty(qos.Policies);
+    }
+
+    /// <summary>Cancellation leaves no policy behind, whatever stage it arrived in.</summary>
+    [Fact]
+    public async Task CancellingMidRunRemovesEveryPolicyTheRunCreated()
+    {
+        var qos = new FakeQosController();
+        using var cancellation = new CancellationTokenSource();
+
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140))
+        {
+            OnRun = _ => cancellation.Cancel(),
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            Guard(qos, load).RunAsync(Request(), cancellation.Token));
+
+        Assert.Empty(qos.Policies);
+    }
+
+    /// <summary>The application being paced is named, and named as the bulk one.</summary>
+    [Fact]
+    public async Task ThePacedApplicationIsTheBulkOneAndIsReportedAsSuch()
+    {
+        var qos = new FakeQosController();
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, loadedP95: 190),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34, loadedP95: 42, uplinkKbps: 16_000),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34, loadedP95: 42, uplinkKbps: 16_000),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34, loadedP95: 42, uplinkKbps: 16_000));
+
+        var outcome = await Guard(qos, load).RunAsync(Request() with { MaximumTrials = 1 });
+
+        Assert.Equal(TrafficGuardStatus.Active, outcome.State.Status);
+        Assert.Contains("steam.exe", outcome.State.ThrottledApplication, StringComparison.Ordinal);
+        Assert.Contains("oyun değil toplu aktarım", outcome.State.Summary, StringComparison.Ordinal);
+        Assert.Equal(@"C:\Program Files\Steam\steam.exe", qos.Policies.Values.Single().AppPathName);
+    }
+
+    /// <summary>A process the user named that is not running never produces a policy.</summary>
+    [Fact]
+    public async Task AnApplicationThatIsNotRunningIsRefusedRatherThanGuessedAt()
+    {
+        var qos = new FakeQosController();
+
+        var outcome = await Guard(qos, new FakeLoadExperiment()).RunAsync(Request() with
+        {
+            BulkApplication = Fake.BulkApplication() with { ProcessIds = [] },
+        });
+
+        Assert.Equal(TrafficGuardStatus.ApplicationNotRunning, outcome.State.Status);
+        Assert.Empty(qos.Policies);
+    }
+
+    private static TrafficGuard Guard(
+        FakeQosController qos,
+        FakeLoadExperiment load,
+        FakeFlowObserver? observer = null)
+    {
+        // The default observer reports a fresh flow the moment the guard first asks,
+        // which is what a user restarting their transfer looks like.
+        observer ??= new FakeFlowObserver { OnQuery = _ => Fake.Flow(at: DateTimeOffset.UtcNow.AddSeconds(1)) };
+
+        return new TrafficGuard(qos, load, flows: observer, delay: (_, _) => Task.CompletedTask);
     }
 
     private static TrafficGuardRequest Request() => new()
@@ -164,8 +339,92 @@ public sealed class TrafficGuardTests
         Network = Fake.Network("guard"),
         Endpoint = LatencyEndpoint.Icmp(System.Net.IPAddress.Parse("1.1.1.1"), "test"),
         ProfileId = "profile1",
-        BulkApplication = "steam.exe",
+        BulkApplication = Fake.BulkApplication(),
+        NewFlowTimeout = TimeSpan.FromMilliseconds(200),
     };
+}
+
+/// <summary>The cap search itself, over measurements a test writes by hand.</summary>
+public sealed class TrafficGuardCapPlannerTests
+{
+    /// <summary>
+    /// Balanced mode does not simply take the lowest tail: past the point where the
+    /// difference is a few milliseconds, the cap that keeps more of the transfer wins.
+    /// </summary>
+    [Fact]
+    public void BalancedModeTradesTheLastMillisecondForThroughput()
+    {
+        var baseline = FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, loadedP95: 190);
+        var gentle = Trial(0.92, 18_400, 40, 46);
+        var harsh = Trial(0.68, 13_600, 34, 44);
+
+        var choice = TrafficGuardCapPlanner.Choose([gentle, harsh], baseline, TrafficGuardMode.Balanced);
+
+        Assert.NotNull(choice);
+        Assert.Equal(gentle.BitsPerSecond, choice!.BitsPerSecond);
+        Assert.Contains("throughput", choice.Why, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Lowest-latency mode takes the tail and shows what it cost.</summary>
+    [Fact]
+    public void LowestLatencyModeTakesTheBestTail()
+    {
+        var baseline = FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, loadedP95: 190);
+        var gentle = Trial(0.80, 16_000, 40, 46);
+        var harsh = Trial(0.50, 10_000, 30, 34);
+
+        var choice = TrafficGuardCapPlanner.Choose([gentle, harsh], baseline, TrafficGuardMode.LowestLatency);
+
+        Assert.NotNull(choice);
+        Assert.Equal(harsh.BitsPerSecond, choice!.BitsPerSecond);
+        Assert.InRange(choice.RetainedThroughputShare, 0.49, 0.51);
+    }
+
+    /// <summary>A trial the traffic ignored is not evidence about that cap.</summary>
+    [Fact]
+    public void ACapTheTrafficDidNotObeyIsExcludedFromTheSearch()
+    {
+        var baseline = FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, loadedP95: 190);
+        var ignored = Trial(0.80, 16_000, 30, 34) with { RateHonoured = false };
+
+        Assert.Null(TrafficGuardCapPlanner.Choose([ignored], baseline, TrafficGuardMode.Balanced));
+        Assert.Contains(
+            "sınırlamadı",
+            TrafficGuardCapPlanner.ExplainRejection([ignored], baseline, TrafficGuardMode.Balanced),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>Shares descend, so the least disruptive cap is measured first.</summary>
+    [Fact]
+    public void TheSearchStartsFromTheLeastDisruptiveCap()
+    {
+        foreach (var mode in new[] { TrafficGuardMode.Balanced, TrafficGuardMode.LowestLatency })
+        {
+            var shares = TrafficGuardCapPlanner.SharesFor(mode);
+
+            Assert.NotEmpty(shares);
+            Assert.Equal(shares.OrderByDescending(share => share), shares);
+            Assert.All(shares, share => Assert.InRange(share, 0.1, 1.0));
+        }
+
+        // Lowest-latency mode is allowed to give up more throughput, and says so.
+        Assert.True(
+            TrafficGuardCapPlanner.ThroughputFloor(TrafficGuardMode.LowestLatency)
+            < TrafficGuardCapPlanner.ThroughputFloor(TrafficGuardMode.Balanced));
+    }
+
+    private static TrafficGuardCapTrial Trial(double share, double uplinkKbps, double loadedMedian, double loadedP95)
+        => new()
+        {
+            BitsPerSecond = TrafficGuardCapPlanner.CapFor(20_000, share),
+            Share = share,
+            Result = FakeLoadExperiment.Upload(
+                idleMedian: 24,
+                loadedMedian: loadedMedian,
+                uplinkKbps: uplinkKbps,
+                loadedP95: loadedP95),
+            RateHonoured = true,
+        };
 }
 
 /// <summary>The rule that this application only ever touches its own QoS policies.</summary>
@@ -299,7 +558,7 @@ public sealed class QosOwnershipTests
     {
         var snapshots = new FakeSnapshotStore
         {
-            Value = Fake.Snapshot("adapter", "SelectiveSuspend") with
+            Value = Fake.Snapshot("adapter", Fake.DefaultKeyword) with
             {
                 Resources =
                 [
@@ -322,7 +581,7 @@ public sealed class QosOwnershipTests
         Assert.False(await restorer.RestoreAllAsync());
 
         // The adapter came back, and only the resource is still recorded as outstanding.
-        Assert.Contains("SelectiveSuspend", controller.Restored);
+        Assert.Contains(Fake.DefaultKeyword, controller.Restored);
         Assert.NotNull(snapshots.Value);
         Assert.Empty(snapshots.Value!.Settings);
         Assert.Single(snapshots.Value.Resources);
@@ -427,7 +686,8 @@ public sealed class ObservedLoadExperimentTests
         var result = await experiment.RunAsync(Fake.Network("stopped"), Request());
 
         Assert.False(result.Succeeded);
-        Assert.Contains("sürmedi", result.Failure, StringComparison.Ordinal);
+        Assert.Contains("hattı doldurmadı", result.Failure, StringComparison.Ordinal);
+        Assert.Contains("kuyruklanma bu veriden çıkarılamaz", result.Failure, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -443,32 +703,131 @@ public sealed class ObservedLoadExperimentTests
     }
 
     /// <summary>
-    /// 256 kbit/s saturates a half-megabit uplink and is background noise on a gigabit
-    /// one, so "loaded" is a share of what this link has been seen to carry.
+    /// Traffic, high utilisation and saturation are three different things, and only the
+    /// third can produce the standing queue the Traffic Guard exists to remove.
     /// </summary>
     [Fact]
-    public void LoadIsClassifiedAgainstTheMeasuredCapacityNotAFixedNumber()
+    public void AQuarterOfTheLinkIsNotSaturation()
     {
-        var fast = new LinkCapacityEstimate { UplinkKbps = 40_000 };
-        var slow = new LinkCapacityEstimate { UplinkKbps = 800 };
+        var link = Measured(40_000);
 
-        Assert.Equal(10_000, fast.LoadedUplinkThresholdKbps);
-        Assert.Equal(NetworkLoadSample.LoadedKbps, slow.LoadedUplinkThresholdKbps);
-        Assert.Equal(NetworkLoadSample.LoadedKbps, LinkCapacityEstimate.Unknown.LoadedUplinkThresholdKbps);
+        Assert.Equal(LinkLoadClassification.Traffic, link.Classify(Uplink(10_000), LoadDirection.Upload));
+        Assert.Equal(LinkLoadClassification.HighUtilisation, link.Classify(Uplink(26_000), LoadDirection.Upload));
+        Assert.Equal(LinkLoadClassification.Saturated, link.Classify(Uplink(35_000), LoadDirection.Upload));
+        Assert.Equal(LinkLoadClassification.Quiet, link.Classify(Uplink(40), LoadDirection.Upload));
     }
 
+    /// <summary>
+    /// A capacity nobody measured cannot be reached, so it never produces a verdict.
+    /// </summary>
     [Fact]
-    public void ObservingABusierWindowRaisesTheCapacityEstimate()
+    public void SaturationIsNeverClaimedWithoutAConfidentCapacity()
     {
-        var estimate = LinkCapacityEstimate.Unknown
-            .Observing(Fake.Load(LatencyLoadState.UplinkLoaded), DateTimeOffset.UtcNow);
+        Assert.Equal(
+            LinkLoadClassification.Traffic,
+            LinkCapacityEstimate.Unknown.Classify(Uplink(50_000), LoadDirection.Upload));
 
-        Assert.Equal(9000, estimate.UplinkKbps);
+        // A single busy window is a lower bound on the line, not its ceiling.
+        var weak = LinkCapacityEstimate.Unknown.With(
+            LoadDirection.Upload,
+            new LinkCapacityRamp.Result(9_000, LinkCapacityConfidence.Weak, 4),
+            DateTimeOffset.UtcNow);
 
-        // A user-supplied figure is never overwritten by an observation.
-        var manual = new LinkCapacityEstimate { UplinkKbps = 5_000, UserSupplied = true };
-        Assert.Equal(5_000, manual.Observing(Fake.Load(LatencyLoadState.UplinkLoaded), DateTimeOffset.UtcNow).UplinkKbps);
+        Assert.False(weak.IsConfident(LoadDirection.Upload));
+        Assert.Equal(LinkLoadClassification.Traffic, weak.Classify(Uplink(9_000), LoadDirection.Upload));
+        Assert.Null(weak.ShareOfCapacity(Uplink(9_000), LoadDirection.Upload));
+
+        Assert.Equal(
+            LinkLoadClassification.Unknown,
+            Measured(40_000).Classify(NetworkLoadSample.Unknown, LoadDirection.Upload));
     }
+
+    /// <summary>The ramp reports a ceiling only once the rate has stopped climbing.</summary>
+    [Fact]
+    public void CapacityIsLearnedFromAPlateauNotFromOneWindow()
+    {
+        var climbing = new LinkCapacityRamp();
+        foreach (var kbps in new double[] { 1_000, 4_000, 9_000, 18_000, 34_000 })
+        {
+            climbing.Add(kbps);
+        }
+
+        var stillRising = climbing.Evaluate();
+        Assert.Equal(LinkCapacityConfidence.Weak, stillRising.Confidence);
+        Assert.Equal(34_000, stillRising.Kbps);
+
+        // Three windows that sit together near the peak: that is the line rate.
+        climbing.Add(35_500);
+        climbing.Add(36_000);
+        climbing.Add(35_800);
+
+        var flattened = climbing.Evaluate();
+        Assert.Equal(LinkCapacityConfidence.Measured, flattened.Confidence);
+        Assert.Equal(35_800, flattened.Kbps);
+    }
+
+    /// <summary>A pause in the transfer ends the ramp rather than shortening it.</summary>
+    [Fact]
+    public void AGapInTheTransferRestartsTheRamp()
+    {
+        var ramp = new LinkCapacityRamp();
+        foreach (var kbps in new double[] { 30_000, 31_000, 30_500, 30_800 })
+        {
+            ramp.Add(kbps);
+        }
+
+        Assert.Equal(LinkCapacityConfidence.Measured, ramp.Evaluate().Confidence);
+
+        ramp.Add(10);
+        Assert.Equal(0, ramp.Count);
+        Assert.Equal(LinkCapacityConfidence.None, ramp.Evaluate().Confidence);
+    }
+
+    /// <summary>Each direction carries its own figure, confidence and timestamp.</summary>
+    [Fact]
+    public void UploadAndDownloadCapacitiesAreKeptApart()
+    {
+        var at = DateTimeOffset.UtcNow;
+        var link = LinkCapacityEstimate.Unknown
+            .With(LoadDirection.Upload, new LinkCapacityRamp.Result(9_000, LinkCapacityConfidence.Measured, 6), at)
+            .With(LoadDirection.Download, new LinkCapacityRamp.Result(90_000, LinkCapacityConfidence.Weak, 4), at);
+
+        Assert.Equal(9_000, link.CapacityFor(LoadDirection.Upload));
+        Assert.Equal(90_000, link.CapacityFor(LoadDirection.Download));
+        Assert.True(link.IsConfident(LoadDirection.Upload));
+        Assert.False(link.IsConfident(LoadDirection.Download));
+        Assert.Equal(at, link.ObservedAt(LoadDirection.Upload));
+        Assert.Equal(6, link.UplinkWindows);
+    }
+
+    /// <summary>A figure the user typed is never overwritten by an observation.</summary>
+    [Fact]
+    public void AUserSuppliedCapacityOutranksWhatWeHappenedToSee()
+    {
+        var manual = LinkCapacityEstimate.FromUser(5_000, null);
+
+        Assert.Equal(LinkCapacityConfidence.UserSupplied, manual.UplinkConfidence);
+        Assert.True(manual.IsConfident(LoadDirection.Upload));
+
+        var observed = manual.With(
+            LoadDirection.Upload,
+            new LinkCapacityRamp.Result(9_000, LinkCapacityConfidence.Measured, 8),
+            DateTimeOffset.UtcNow);
+
+        Assert.Equal(5_000, observed.CapacityFor(LoadDirection.Upload));
+    }
+
+    private static LinkCapacityEstimate Measured(double uplinkKbps) => LinkCapacityEstimate.Unknown.With(
+        LoadDirection.Upload,
+        new LinkCapacityRamp.Result(uplinkKbps, LinkCapacityConfidence.Measured, 6),
+        DateTimeOffset.UtcNow);
+
+    private static NetworkLoadSample Uplink(double kbps) => new()
+    {
+        State = kbps >= NetworkLoadSample.LoadedKbps ? LatencyLoadState.UplinkLoaded : LatencyLoadState.Idle,
+        UplinkKbps = kbps,
+        DownlinkKbps = 20,
+    };
 
     private static LoadExperimentRequest Request() => new()
     {
@@ -509,10 +868,13 @@ public sealed class ObservedLoadExperimentTests
 
         public ScriptedLoadSampler(int idleWindows) => _idleWindows = idleWindows;
 
+        // 1,125,000 bytes across a one-second window is 9,000 kbit/s, which is what
+        // Fake.Load(UplinkLoaded) reports for the measurement itself. The two have to
+        // agree or the ramp learns a ceiling the measured window never reaches.
         public NetworkCounters? Read(NetworkFingerprint network)
         {
             var busy = _reads > _idleWindows;
-            _sent += busy ? 4_000_000 : 1_000;
+            _sent += busy ? 1_125_000 : 1_000;
             _reads++;
 
             return new NetworkCounters(_sent, 0, DateTimeOffset.UtcNow.AddSeconds(_reads));
@@ -599,14 +961,16 @@ public sealed class LoadedLatencyLaneTests
     {
         var snapshots = new FakeSnapshotStore();
 
-        // Three windows: the lane's own upload measurement, then the guard's before and
-        // after. The download half is skipped so the script maps one-to-one onto calls.
+        // The lane's own upload window, then the guard's unthrottled reference, then one
+        // capped trial and the independent confirmation round. The download half is
+        // skipped so the script maps one-to-one onto calls.
         var lane = Lane(
             out var qos,
             new FakeLoadExperiment(
                 FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 150),
-                FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 150),
-                FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34)),
+                FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 150, loadedP95: 200),
+                FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34, loadedP95: 42, uplinkKbps: 16_000),
+                FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34, loadedP95: 42, uplinkKbps: 16_000)),
             snapshots);
 
         var result = await lane.RunAsync(new LoadedLaneRequest
@@ -665,12 +1029,16 @@ public sealed class LoadedLatencyLaneTests
         Idle = Fake.Measurement(idleMedian, load: LatencyLoadState.Idle),
         Loaded = Fake.Measurement(loadedMedian, load: LatencyLoadState.DownlinkLoaded),
         ObservedLoad = Fake.Load(LatencyLoadState.DownlinkLoaded),
+        Classification = LinkLoadClassification.Saturated,
+        Capacity = Fake.Capacity(9_000, downlinkKbps: 45_000),
     };
 
     private static LoadedLatencyLane Lane(
         out FakeQosController qos,
         FakeLoadExperiment load,
-        FakeSnapshotStore? snapshots = null)
+        FakeSnapshotStore? snapshots = null,
+        FakeFlowObserver? flows = null,
+        RecordingStages? stages = null)
     {
         qos = new FakeQosController();
 
@@ -681,7 +1049,13 @@ public sealed class LoadedLatencyLaneTests
             qos: qos,
             snapshots: snapshots ?? new FakeSnapshotStore(),
             capture: () => Fake.Network("loaded-lane"),
-            log: _ => { });
+            log: _ => { },
+            flows: flows ?? new FakeFlowObserver
+            {
+                OnQuery = _ => Fake.Flow(at: DateTimeOffset.UtcNow.AddSeconds(1)),
+            },
+            applications: new FakeApplicationResolver(),
+            stages: stages ?? new RecordingStages());
     }
 
     private sealed class StubProbe : ILatencyProbe

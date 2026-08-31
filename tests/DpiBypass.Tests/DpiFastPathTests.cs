@@ -36,6 +36,20 @@ public sealed class DpiFastPathTests
 
     private static readonly string[] DivertMarkers = ["WinDivert", "BypassEngine", "TcpFilterLadder"];
 
+    /// <summary>
+    /// The one file outside the engine allowed to name WinDivert, and why.
+    /// </summary>
+    /// <remarks>
+    /// Discovering which server a UDP game is talking to has no other answer on Windows:
+    /// the UDP table reports a socket's local address and nothing else. WinDivert's FLOW
+    /// layer reports the five-tuple and the process id for flows as they are created, and
+    /// the documentation requires that layer to be opened <c>SNIFF | RECV_ONLY</c> - a
+    /// handle that cannot block, modify or inject anything, on a layer that carries events
+    /// rather than packets. The packet path is untouched, which
+    /// <see cref="TheFlowObserverOnlyEverListens"/> holds it to line by line.
+    /// </remarks>
+    private const string FlowObserverFile = "ProcessFlowObserver.cs";
+
     [Fact]
     public void TheLatencyAndHotspotSubsystemsCannotDivertAPacket()
     {
@@ -52,6 +66,11 @@ public sealed class DpiFastPathTests
             foreach (var file in Directory.EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories))
             {
                 var text = File.ReadAllText(file);
+                if (Path.GetFileName(file) == FlowObserverFile)
+                {
+                    continue;
+                }
+
                 foreach (var marker in DivertMarkers)
                 {
                     // A comment saying the subsystem does not divert is the point, not a
@@ -68,11 +87,40 @@ public sealed class DpiFastPathTests
     }
 
     /// <summary>
-    /// Three handles, and the reason for each one. A fourth means somebody put another
+    /// The flow observer listens and can do nothing else, enforced line by line.
+    /// </summary>
+    /// <remarks>
+    /// It is the only thing outside the engine holding a WinDivert handle, so the rules
+    /// that keep it off the packet path are checked rather than trusted: the FLOW layer
+    /// and no other, sniffing and receiving and nothing else, and no send path at all.
+    /// A handle opened any other way could drop a game's packets.
+    /// </remarks>
+    [Fact]
+    public void TheFlowObserverOnlyEverListens()
+    {
+        var file = Directory
+            .EnumerateFiles(RepoFiles.CoreProjectDirectory, FlowObserverFile, SearchOption.AllDirectories)
+            .Single();
+
+        var code = CodeLines(File.ReadAllText(file)).ToArray();
+        var opens = code.Where(line => line.Contains("WinDivertHandle.Open", StringComparison.Ordinal)).ToArray();
+
+        var open = Assert.Single(opens);
+        Assert.Contains("WinDivertLayer.Flow", open, StringComparison.Ordinal);
+        Assert.Contains("WinDivertFlags.Sniff | WinDivertFlags.RecvOnly", open, StringComparison.Ordinal);
+
+        Assert.DoesNotContain(code, line => line.Contains("WinDivertLayer.Network", StringComparison.Ordinal));
+        Assert.DoesNotContain(code, line => line.Contains("WinDivertFlags.Drop", StringComparison.Ordinal));
+        Assert.DoesNotContain(code, line => line.Contains(".Send(", StringComparison.Ordinal));
+        Assert.DoesNotContain(code, line => line.Contains("CalculateChecksums", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Four handles, and the reason for each one. A fifth means somebody put another
     /// subsystem on the packet path.
     /// </summary>
     [Fact]
-    public void OnlyTheEngineAndTheSocketWatcherOpenADivertHandle()
+    public void OnlyTheEngineTheSocketWatcherAndTheFlowObserverOpenADivertHandle()
     {
         var callers = new List<string>();
 
@@ -91,7 +139,7 @@ public sealed class DpiFastPathTests
         }
 
         Assert.Equal(
-            ["BypassEngine.cs", "BypassEngine.cs", "ProcessPortMap.cs"],
+            ["BypassEngine.cs", "BypassEngine.cs", "ProcessFlowObserver.cs", "ProcessPortMap.cs"],
             callers.Order(StringComparer.Ordinal));
     }
 

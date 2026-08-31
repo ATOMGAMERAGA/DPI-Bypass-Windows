@@ -19,7 +19,7 @@ public sealed class LatencyProfileStoreTests
         var found = await store.FindAsync("net-a", "adapter-1");
 
         Assert.NotNull(found);
-        Assert.Equal(["SelectiveSuspend"], found!.AcceptedProperties);
+        Assert.Equal([Fake.DefaultKeyword], found!.AcceptedProperties);
         Assert.Equal(LatencyBottleneck.LocalLink, found.Bottleneck);
         Assert.Null(await store.FindAsync("net-c", "adapter-1"));
     }
@@ -31,10 +31,10 @@ public sealed class LatencyProfileStoreTests
         using var directory = new TempDirectory();
         var store = new LatencyProfileStore(directory.File("latency-profiles.json"));
 
-        await store.SaveAsync(Profile("net", "ethernet") with { AcceptedProperties = ["SelectiveSuspend"] });
+        await store.SaveAsync(Profile("net", "ethernet") with { AcceptedProperties = [Fake.DefaultKeyword] });
         await store.SaveAsync(Profile("net", "wifi") with { AcceptedProperties = [] });
 
-        Assert.Equal(["SelectiveSuspend"], (await store.FindAsync("net", "ethernet"))!.AcceptedProperties);
+        Assert.Equal([Fake.DefaultKeyword], (await store.FindAsync("net", "ethernet"))!.AcceptedProperties);
         Assert.Empty((await store.FindAsync("net", "wifi"))!.AcceptedProperties);
     }
 
@@ -44,10 +44,10 @@ public sealed class LatencyProfileStoreTests
         using var directory = new TempDirectory();
         var store = new LatencyProfileStore(directory.File("latency-profiles.json"));
 
-        await store.SaveAsync(Profile("net", "adapter") with { AcceptedProperties = ["SelectiveSuspend"] });
-        await store.SaveAsync(Profile("net", "adapter") with { AcceptedProperties = ["D0PacketCoalescing"] });
+        await store.SaveAsync(Profile("net", "adapter") with { AcceptedProperties = [Fake.DefaultKeyword] });
+        await store.SaveAsync(Profile("net", "adapter") with { AcceptedProperties = [Fake.SecondKeyword] });
 
-        Assert.Equal(["D0PacketCoalescing"], (await store.FindAsync("net", "adapter"))!.AcceptedProperties);
+        Assert.Equal([Fake.SecondKeyword], (await store.FindAsync("net", "adapter"))!.AcceptedProperties);
     }
 
     [Fact]
@@ -132,8 +132,8 @@ public sealed class LatencyProfileStoreTests
         AdapterName = adapterId,
         CapabilityFingerprint = "fingerprint",
         VerifiedAt = DateTimeOffset.UtcNow,
-        AcceptedProperties = ["SelectiveSuspend"],
-        RejectedProperties = ["D0PacketCoalescing"],
+        AcceptedProperties = [Fake.DefaultKeyword],
+        RejectedProperties = [Fake.SecondKeyword],
         Baseline = new LatencySummary { MedianRttMs = 32, P95RttMs = 44, P99RttMs = 51, JitterMs = 4, PacketLossPercent = 0 },
         Optimized = new LatencySummary { MedianRttMs = 29, P95RttMs = 36, P99RttMs = 40, JitterMs = 2, PacketLossPercent = 0 },
         Bottleneck = LatencyBottleneck.LocalLink,
@@ -155,7 +155,7 @@ public sealed class LatencyProfileReplayTests
         var result = await second.Optimizer.OptimizeAsync(network);
 
         Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
-        Assert.Contains("SelectiveSuspend", controller.Live);
+        Assert.Contains(Fake.DefaultKeyword, controller.Live);
 
         // Applied once, not applied-and-restored through several paired cycles.
         Assert.Single(controller.Applied);
@@ -177,7 +177,7 @@ public sealed class LatencyProfileReplayTests
 
         // The same setting now makes things clearly worse than the fresh baseline.
         var controller = new FakeController();
-        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+        var probe = new FakeProbe(controller, (live, _) => live.Contains(Fake.DefaultKeyword)
             ? Fake.Measurement(48)
             : Fake.Measurement(30));
         var second = new LatencyScenario(controller, probe, profiles: first.Profiles);
@@ -200,7 +200,7 @@ public sealed class LatencyProfileReplayTests
         // Same fingerprint inputs, but the property is simply not there any more.
         var controller = new FakeController
         {
-            Detect = fingerprint => Fake.Capability(fingerprint) with { PowerManagement = [] },
+            Detect = fingerprint => Fake.Capability(fingerprint) with { AdvancedProperties = [] },
         };
         var second = new LatencyScenario(controller, FakeProbe.Flat(controller), profiles: first.Profiles);
 

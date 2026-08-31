@@ -18,6 +18,9 @@ public sealed record LoadedLaneRequest
     /// </remarks>
     public string? BulkApplication { get; init; }
 
+    /// <summary>Which trade-off the cap search should optimise for.</summary>
+    public TrafficGuardMode GuardMode { get; init; } = TrafficGuardMode.Balanced;
+
     public LinkCapacityEstimate Capacity { get; init; } = LinkCapacityEstimate.Unknown;
 
     public LatencyProbeRequest Probe { get; init; } = LatencyProbeRequest.Benchmark;
@@ -39,8 +42,11 @@ public sealed record LoadedLaneRequest
 /// milliseconds actually are.
 /// </para>
 /// <para>
-/// It runs only when the user asks for it, and only measures while traffic the user
-/// started is running. Nothing here generates load.
+/// It runs as an explicit sequence of named stages, every one of which is published to
+/// the card as it starts. That is not cosmetic: the run needs the user to start a
+/// transfer, stop it, and start a fresh one after the policy exists, and a build that
+/// asked for the first and then silently waited for the others could not be completed by
+/// anybody who was not reading the source. Nothing here generates load.
 /// </para>
 /// </remarks>
 public sealed class LoadedLatencyLane
@@ -50,6 +56,9 @@ public sealed class LoadedLatencyLane
     private readonly ILoadExperiment _load;
     private readonly IQosController _qos;
     private readonly ILatencySnapshotStore _snapshots;
+    private readonly IProcessFlowObserver? _flows;
+    private readonly IBulkApplicationResolver _applications;
+    private readonly ILatencyStageReporter _stages;
     private readonly Func<NetworkFingerprint> _capture;
     private readonly Func<DateTimeOffset> _now;
     private readonly Action<string>? _log;
@@ -62,14 +71,20 @@ public sealed class LoadedLatencyLane
         ILatencySnapshotStore? snapshots = null,
         Func<NetworkFingerprint>? capture = null,
         Func<DateTimeOffset>? now = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        IProcessFlowObserver? flows = null,
+        IBulkApplicationResolver? applications = null,
+        ILatencyStageReporter? stages = null)
     {
         _log = log ?? AppLog.InfoSink;
+        _stages = stages ?? NullStageReporter.Instance;
         _probe = probe ?? new LatencyProbe();
-        _targets = targets ?? new LatencyTargetResolver(log: _log);
-        _load = load ?? new ObservedLoadExperiment(_probe, log: _log);
+        _flows = flows;
+        _targets = targets ?? new LatencyTargetResolver(log: _log, flows: _flows);
+        _load = load ?? new ObservedLoadExperiment(_probe, log: _log, stages: _stages);
         _qos = qos ?? new WindowsQosController(_log);
         _snapshots = snapshots ?? new LatencySnapshotStore();
+        _applications = applications ?? new WindowsBulkApplicationResolver(_log);
         _capture = capture ?? NetworkFingerprint.Capture;
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
@@ -77,102 +92,159 @@ public sealed class LoadedLatencyLane
     /// <summary>What the user must do for the experiment to have anything to measure.</summary>
     public string Instruction(LoadDirection direction) => _load.Instruction(direction);
 
+    /// <summary>What the user must do to end a stage that needs a quiet link next.</summary>
+    public string StopInstruction(LoadDirection direction) => _load.StopInstruction(direction);
+
     public async Task<LatencyOptimizationResult> RunAsync(
         LoadedLaneRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        try
+        {
+            return await RunStagesAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is a state the user chose, not a failure, and it still has to
+            // leave the machine as it was found: every policy this run created is ours,
+            // and the sweep removes ours and only ours.
+            var removed = await ClearOwnedPoliciesAsync(CancellationToken.None).ConfigureAwait(false);
+            Report(LoadedLaneStage.Cancelled, string.Empty, removed > 0
+                ? $"İptal edildi; oluşturulan {removed} QoS ilkesi kaldırıldı."
+                : "İptal edildi; kaldırılacak bir ilke yoktu.");
+
+            return new LatencyOptimizationResult
+            {
+                Status = LatencyOptimizationStatus.Cancelled,
+                StatusLine = removed > 0
+                    ? $"Derin test iptal edildi; bu çalışmanın oluşturduğu {removed} QoS ilkesi kaldırıldı."
+                    : "Derin test iptal edildi; hiçbir ayar değiştirilmemişti.",
+                TargetLabel = request.Target.Describe(),
+            };
+        }
+    }
+
+    private async Task<LatencyOptimizationResult> RunStagesAsync(
+        LoadedLaneRequest request,
+        CancellationToken cancellationToken)
+    {
+        // --- 1. target ---------------------------------------------------------------
+        Report(LoadedLaneStage.VerifyingTarget, "Ölçüm hedefi belirleniyor.");
+
         var network = _capture();
         if (!network.IsOnline)
         {
-            return new LatencyOptimizationResult
-            {
-                Status = LatencyOptimizationStatus.Offline,
-                StatusLine = "Aktif internet bağlantısı bulunamadı.",
-                NetworkKey = network.Key,
-            };
+            return Failed(request, "Aktif internet bağlantısı bulunamadı.", network.Key);
         }
 
         var resolution = await _targets.ResolveAsync(request.Target, cancellationToken).ConfigureAwait(false);
         if (!resolution.Succeeded)
         {
-            return new LatencyOptimizationResult
-            {
-                Status = LatencyOptimizationStatus.Offline,
-                StatusLine = resolution.Failure ?? "Ölçüm hedefi çözümlenemedi.",
-                NetworkKey = network.Key,
-                TargetLabel = request.Target.Describe(),
-            };
+            return Failed(request, resolution.Failure ?? "Ölçüm hedefi çözümlenemedi.", network.Key);
         }
 
         var endpoint = resolution.Endpoints[0];
         var probe = request.Probe.For(endpoint);
+
+        // --- 2. a quiet link, then the idle baseline ---------------------------------
+        Report(LoadedLaneStage.WaitingForQuietLink, StopInstruction(LoadDirection.Upload));
+        await _load.WaitForQuietLinkAsync(network, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
+
+        Report(LoadedLaneStage.IdleBaseline, string.Empty);
         var idle = await _probe.MeasureAsync(network, probe, cancellationToken).ConfigureAwait(false);
 
         if (!idle.HasRemoteConnectivity)
         {
-            return new LatencyOptimizationResult
-            {
-                Status = LatencyOptimizationStatus.Offline,
-                StatusLine = "Hedef yanıt vermedi; yük altındaki gecikme ölçülemedi.",
-                NetworkKey = network.Key,
-                TargetLabel = endpoint.Label,
-                TargetProtocol = endpoint.ProtocolLabel,
-            };
+            return Failed(request, "Hedef yanıt vermedi; yük altındaki gecikme ölçülemedi.", network.Key, endpoint);
         }
 
         _log?.Invoke($"latency.loaded.started: {endpoint.Label} · {endpoint.ProtocolLabel}");
 
-        var upload = await _load
-            .RunAsync(network, LoadRequest(request, endpoint, LoadDirection.Upload), cancellationToken)
-            .ConfigureAwait(false);
+        // --- 3. the upload half ------------------------------------------------------
+        var upload = await _load.RunAsync(
+            network,
+            new LoadExperimentRequest
+            {
+                Endpoint = endpoint,
+                Direction = LoadDirection.Upload,
+                Capacity = request.Capacity,
+                Probe = request.Probe,
+                Baseline = idle,
+                WaitingStage = LoadedLaneStage.AwaitingUploadStart,
+                MeasuringStage = LoadedLaneStage.MeasuringUploadBaseline,
+                Instruction = Instruction(LoadDirection.Upload),
+            },
+            cancellationToken).ConfigureAwait(false);
 
-        var download = request.MeasureDownload
-            ? await _load
-                .RunAsync(network, LoadRequest(request, endpoint, LoadDirection.Download), cancellationToken)
-                .ConfigureAwait(false)
-            : null;
+        var capacity = upload.Capacity;
+        var dataUsed = upload.DataUsedBytes;
 
-        var capacity = download?.Capacity ?? upload.Capacity;
+        // --- 4. the download half, which is a separate stage and says so -------------
+        LoadExperimentResult? download = null;
+        if (request.MeasureDownload)
+        {
+            Report(LoadedLaneStage.AwaitingUploadStop, StopInstruction(LoadDirection.Upload));
+            await _load.WaitForQuietLinkAsync(network, TimeSpan.FromSeconds(30), cancellationToken)
+                .ConfigureAwait(false);
+
+            download = await _load.RunAsync(
+                network,
+                new LoadExperimentRequest
+                {
+                    Endpoint = endpoint,
+                    Direction = LoadDirection.Download,
+                    Capacity = capacity,
+                    Probe = request.Probe,
+                    Baseline = idle,
+                    WaitingStage = LoadedLaneStage.AwaitingDownloadStart,
+                    MeasuringStage = LoadedLaneStage.MeasuringDownload,
+                    Instruction = Instruction(LoadDirection.Download),
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            capacity = download.Capacity;
+            dataUsed += download.DataUsedBytes;
+        }
+
         var path = LatencyPathAnalysis.Describe(
             upload.Idle ?? idle,
-            upload.Succeeded ? upload.Loaded : null,
-            download is { Succeeded: true } ? download.Loaded : null);
+            upload.ProvesQueueing ? upload.Loaded : null,
+            download is { ProvesQueueing: true } ? download.Loaded : null);
 
+        // --- 5. the Traffic Guard, which owns its own stages -------------------------
         var guard = TrafficGuardState.Off;
         if (request.RunTrafficGuard)
         {
-            guard = await RunGuardAsync(request, network, endpoint, capacity, cancellationToken).ConfigureAwait(false);
+            guard = await RunGuardAsync(request, network, endpoint, capacity, cancellationToken)
+                .ConfigureAwait(false);
+
+            dataUsed += guard.DataUsedBytes;
         }
 
         _log?.Invoke(
             $"latency.loaded.completed: gönderim kuyruğu {Describe(upload.QueueingMs)} · "
             + $"indirme kuyruğu {Describe(download?.QueueingMs)}");
 
-        var notices = new List<string>();
-        if (resolution.Notice is not null)
-        {
-            notices.Add(resolution.Notice);
-        }
+        var notices = BuildNotices(resolution, upload, download, capacity);
+        var status = guard.IsActive
+            ? LatencyOptimizationStatus.TrafficGuardActive
+            : upload.Succeeded || download is { Succeeded: true }
+                ? LatencyOptimizationStatus.MonitoringOnly
+                : LatencyOptimizationStatus.NeedsDeepTest;
 
-        if (upload.Failure is not null)
-        {
-            notices.Add($"Gönderim ölçümü: {upload.Failure}");
-        }
-
-        if (download?.Failure is not null)
-        {
-            notices.Add($"İndirme ölçümü: {download.Failure}");
-        }
+        Report(
+            guard.IsActive ? LoadedLaneStage.Committed
+                : guard.Status == TrafficGuardStatus.RolledBack ? LoadedLaneStage.RolledBack
+                : LoadedLaneStage.NoGain,
+            string.Empty,
+            guard.Summary,
+            dataUsed);
 
         return new LatencyOptimizationResult
         {
-            Status = guard.IsActive
-                ? LatencyOptimizationStatus.TrafficGuardActive
-                : upload.Succeeded || download is { Succeeded: true }
-                    ? LatencyOptimizationStatus.MonitoringOnly
-                    : LatencyOptimizationStatus.NeedsDeepTest,
+            Status = status,
             StatusLine = LatencyReport.Loaded(network, upload.Idle ?? idle, upload, download, path, endpoint, guard),
             AdapterName = network.AdapterName ?? network.DisplayName,
             NetworkKey = network.Key,
@@ -185,6 +257,9 @@ public sealed class LoadedLatencyLane
             TargetLabel = endpoint.Label,
             TargetProtocol = endpoint.ProtocolLabel,
             RouteReferenceOnly = endpoint.RouteReferenceOnly,
+            Capacity = capacity,
+            DataUsedBytes = dataUsed,
+            Candidates = resolution.Candidates,
             Notices = notices,
         };
     }
@@ -223,15 +298,30 @@ public sealed class LoadedLatencyLane
             };
         }
 
-        var guard = new TrafficGuard(_qos, _load, _log);
+        // Free text becomes a running process here or the guard does not run. A match
+        // condition nobody checked is a policy that silently governs nothing.
+        var application = _applications.Resolve(request.BulkApplication);
+        if (application is not { IsRunning: true })
+        {
+            return new TrafficGuardState
+            {
+                Status = TrafficGuardStatus.ApplicationNotRunning,
+                Summary = $"'{request.BulkApplication}' çalışan süreçler arasında bulunamadı; "
+                    + "sınırlanacak bir gönderim yok.",
+                Mode = request.GuardMode,
+            };
+        }
+
+        var guard = new TrafficGuard(_qos, _load, _log, _flows, _stages, now: _now);
         var outcome = await guard.RunAsync(
             new TrafficGuardRequest
             {
                 Network = network,
                 Endpoint = endpoint,
                 ProfileId = network.Key,
-                BulkApplication = request.BulkApplication,
+                BulkApplication = application,
                 Capacity = capacity,
+                Mode = request.GuardMode,
                 Probe = request.Probe,
             },
             cancellationToken).ConfigureAwait(false);
@@ -277,16 +367,88 @@ public sealed class LoadedLatencyLane
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static LoadExperimentRequest LoadRequest(
-        LoadedLaneRequest request,
-        LatencyEndpoint endpoint,
-        LoadDirection direction) => new()
+    /// <summary>
+    /// Everything the user should know that is not a number, including the honest limits.
+    /// </summary>
+    /// <remarks>
+    /// The download notice matters most. A rate limit applied on this machine paces what
+    /// this machine sends; the queue that fills during a download is in the operator's
+    /// equipment, upstream of anything a Windows QoS policy can reach. Where that is what
+    /// the measurements show, it is reported as a diagnosis with the fix that would
+    /// actually work, rather than as something this application is about to do.
+    /// </remarks>
+    private static IReadOnlyList<string> BuildNotices(
+        LatencyTargetResolution resolution,
+        LoadExperimentResult upload,
+        LoadExperimentResult? download,
+        LinkCapacityEstimate capacity)
+    {
+        var notices = new List<string>();
+
+        if (resolution.Notice is not null)
         {
-            Endpoint = endpoint,
-            Direction = direction,
-            Capacity = request.Capacity,
-            Probe = request.Probe,
+            notices.Add(resolution.Notice);
+        }
+
+        if (upload.Failure is not null)
+        {
+            notices.Add($"Gönderim ölçümü: {upload.Failure}");
+        }
+
+        if (download?.Failure is not null)
+        {
+            notices.Add($"İndirme ölçümü: {download.Failure}");
+        }
+
+        if (!capacity.IsConfident(LoadDirection.Upload))
+        {
+            notices.Add("Gönderim kapasitesi plato yapacak kadar uzun ölçülemedi; hattın dolup dolmadığı "
+                + "belirlenemedi. Bu, kuyruklanma yok anlamına gelmez.");
+        }
+
+        if (download is { ProvesQueueing: true, QueueingMs: > LatencyPathAnalysis.QueueingThresholdMs } measured)
+        {
+            notices.Add($"İndirme sırasında gecikme {measured.QueueingMs:F0} ms artıyor. Bu kuyruk operatörün "
+                + "ekipmanında oluşur; bu bilgisayarda uygulanan bir gönderim sınırı ona ulaşamaz. "
+                + "Kalıcı çözüm yönlendiricide SQM/CAKE veya fq_codel gibi bir kuyruk yönetimidir.");
+        }
+
+        return notices;
+    }
+
+    private void Report(
+        LoadedLaneStage stage,
+        string instruction,
+        string? outcome = null,
+        long dataUsed = 0)
+        => _stages.Report(new LoadedLaneProgress
+        {
+            Stage = stage,
+            Title = LoadedLaneProgress.TitleFor(stage),
+            Instruction = instruction,
+            Outcome = outcome,
+            DataUsedBytes = dataUsed,
+            CanCancel = stage is not (LoadedLaneStage.Committed or LoadedLaneStage.NoGain
+                or LoadedLaneStage.RolledBack or LoadedLaneStage.Cancelled or LoadedLaneStage.Failed),
+        });
+
+    private LatencyOptimizationResult Failed(
+        LoadedLaneRequest request,
+        string reason,
+        string networkKey,
+        LatencyEndpoint? endpoint = null)
+    {
+        Report(LoadedLaneStage.Failed, string.Empty, reason);
+
+        return new LatencyOptimizationResult
+        {
+            Status = LatencyOptimizationStatus.Offline,
+            StatusLine = reason,
+            NetworkKey = networkKey,
+            TargetLabel = endpoint?.Label ?? request.Target.Describe(),
+            TargetProtocol = endpoint?.ProtocolLabel ?? string.Empty,
         };
+    }
 
     private static string Describe(double? queueing) => queueing is { } value ? $"{value:F0} ms" : "ölçülmedi";
 }

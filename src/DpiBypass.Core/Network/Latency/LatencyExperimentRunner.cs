@@ -2,6 +2,21 @@ using System.Diagnostics;
 
 namespace DpiBypass.Core.Network;
 
+/// <summary>
+/// Whether an arm is now genuinely in place, and why not when it is not.
+/// </summary>
+/// <remarks>
+/// The reason travels with the answer because "the driver declined it" and "the value is
+/// written but only takes effect after a restart nobody consented to" are different
+/// facts, and a user reading a rejection deserves the one that actually happened.
+/// </remarks>
+public readonly record struct LatencyArmOutcome(bool Applied, string? Reason = null)
+{
+    public static readonly LatencyArmOutcome Success = new(true);
+
+    public static LatencyArmOutcome Failed(string reason) => new(false, reason);
+}
+
 /// <summary>The two things an experiment needs to be able to do to a machine.</summary>
 /// <remarks>
 /// Kept behind an interface so the runner never learns what it is switching. Snapshot
@@ -10,8 +25,15 @@ namespace DpiBypass.Core.Network;
 /// </remarks>
 public interface ILatencyExperimentArm
 {
-    /// <summary>Writes the change and reads it back. False when the driver declined it.</summary>
-    Task<bool> ApplyAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Puts the change in place and establishes that the machine is running with it.
+    /// </summary>
+    /// <remarks>
+    /// "In place" means operationally in effect, never merely stored. An arm that reports
+    /// success on a registry write the driver has not picked up would have the runner
+    /// measure the original behaviour twice and call the difference a result.
+    /// </remarks>
+    Task<LatencyArmOutcome> ApplyAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Puts the original back. Throws when it cannot, which ends the run.</summary>
     Task RestoreAsync(CancellationToken cancellationToken = default);
@@ -163,9 +185,10 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
             {
                 (baseline, baselineEnvironment) = await MeasureAsync(plan, probe, cancellationToken).ConfigureAwait(false);
 
-                if (!await arm.ApplyAsync(cancellationToken).ConfigureAwait(false))
+                var applied = await arm.ApplyAsync(cancellationToken).ConfigureAwait(false);
+                if (!applied.Applied)
                 {
-                    return Refused(verdict, pairs, lastOptimised);
+                    return Refused(verdict, pairs, lastOptimised, applied.Reason);
                 }
 
                 await SettleAsync(plan, cancellationToken).ConfigureAwait(false);
@@ -181,9 +204,10 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
             }
             else
             {
-                if (!await arm.ApplyAsync(cancellationToken).ConfigureAwait(false))
+                var applied = await arm.ApplyAsync(cancellationToken).ConfigureAwait(false);
+                if (!applied.Applied)
                 {
-                    return Refused(verdict, pairs, lastOptimised);
+                    return Refused(verdict, pairs, lastOptimised, applied.Reason);
                 }
 
                 await SettleAsync(plan, cancellationToken).ConfigureAwait(false);
@@ -329,12 +353,13 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
     private static LatencyExperimentOutcome Refused(
         LatencyVerdict verdict,
         IReadOnlyList<LatencyPair> pairs,
-        LatencyMeasurement? last) => new()
+        LatencyMeasurement? last,
+        string? reason = null) => new()
         {
             Verdict = verdict with
             {
                 Outcome = LatencyVerdictOutcome.Rejected,
-                Reason = "sürücü değeri canlı olarak uygulamadı",
+                Reason = reason ?? "sürücü değeri canlı olarak uygulamadı",
                 Cycles = pairs.Count,
             },
             Pairs = pairs,

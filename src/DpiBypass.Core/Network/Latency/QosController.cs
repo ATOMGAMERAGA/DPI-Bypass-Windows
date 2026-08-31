@@ -110,7 +110,17 @@ public static class QosPolicyStores
     public const string Active = "ActiveStore";
 }
 
-public sealed record QosApplyResult(bool Created, string? Reason = null);
+/// <summary>
+/// What Windows was asked for, and what it actually stored.
+/// </summary>
+/// <remarks>
+/// <see cref="Verified"/> is the point. An earlier build accepted a policy as created
+/// because a policy of that name existed afterwards, which proves the name and nothing
+/// else - not the throttle rate, not the application it matches, not the store it landed
+/// in. Every condition and every action is now read back and compared, and a mismatch is
+/// a failure rather than a policy quietly doing something else.
+/// </remarks>
+public sealed record QosApplyResult(bool Created, string? Reason = null, QosPolicyInfo? Verified = null);
 
 /// <summary>A policy Windows reports, whoever created it.</summary>
 public sealed record QosPolicyInfo
@@ -119,11 +129,44 @@ public sealed record QosPolicyInfo
 
     public string Owner { get; init; } = string.Empty;
 
+    public string PolicyStore { get; init; } = string.Empty;
+
     public ulong? ThrottleRateBitsPerSecond { get; init; }
 
     public int? Dscp { get; init; }
 
     public string? AppPathName { get; init; }
+
+    public string? Protocol { get; init; }
+
+    public string? DestinationPrefix { get; init; }
+
+    public int? DestinationPort { get; init; }
+
+    public int? Precedence { get; init; }
+
+    /// <summary>Everything about the stored policy, for the report and the log.</summary>
+    public string Describe()
+    {
+        var parts = new List<string> { $"ad={Name}", $"depo={PolicyStore}" };
+
+        if (!string.IsNullOrWhiteSpace(AppPathName))
+        {
+            parts.Add($"uygulama={AppPathName}");
+        }
+
+        if (ThrottleRateBitsPerSecond is { } throttle)
+        {
+            parts.Add($"sınır={throttle / 1_000_000d:F2} Mbit/s");
+        }
+
+        if (Precedence is { } precedence)
+        {
+            parts.Add($"öncelik={precedence}");
+        }
+
+        return string.Join(" · ", parts);
+    }
 }
 
 public interface IQosController
@@ -273,10 +316,121 @@ public sealed class WindowsQosController : IQosController
         }
 
         var dto = Deserialize<CreateDto>(result.StandardOutput);
-        return dto is null
-            ? new QosApplyResult(false, "Windows geçerli bir ilke sonucu döndürmedi.")
-            : new QosApplyResult(dto.Created, dto.Reason);
+        if (dto is null)
+        {
+            return new QosApplyResult(false, "Windows geçerli bir ilke sonucu döndürmedi.");
+        }
+
+        var verified = dto.Policy is null ? null : ToInfo(dto.Policy);
+        if (!dto.Created)
+        {
+            return new QosApplyResult(false, dto.Reason, verified);
+        }
+
+        // The script compares field by field, but the answer is checked again here so the
+        // rule lives in C# too: a policy that does not match what was asked for is not a
+        // policy that was created, whatever the store says is in it.
+        var mismatch = DescribeMismatch(request, verified);
+        if (mismatch is not null)
+        {
+            _log?.Invoke($"latency.qos: '{request.Name}' beklenenden farklı yazıldı ({mismatch}).");
+            return new QosApplyResult(false, mismatch, verified);
+        }
+
+        return new QosApplyResult(true, null, verified);
     }
+
+    /// <summary>
+    /// Every condition and action compared against what was asked for.
+    /// </summary>
+    /// <returns>Null when the stored policy is exactly the requested one.</returns>
+    internal static string? DescribeMismatch(QosPolicyRequest request, QosPolicyInfo? stored)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (stored is null)
+        {
+            return "ilke oluşturuldu ancak depoda görünmüyor";
+        }
+
+        if (!string.Equals(stored.Name, request.Name, StringComparison.Ordinal))
+        {
+            return $"ilke adı '{stored.Name}', beklenen '{request.Name}'";
+        }
+
+        if (!string.Equals(stored.PolicyStore, request.PolicyStore, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"ilke '{stored.PolicyStore}' deposunda, beklenen '{request.PolicyStore}'";
+        }
+
+        if (!Matches(request.AppPathName, stored.AppPathName))
+        {
+            return $"uygulama eşleşmesi '{stored.AppPathName ?? "(yok)"}', beklenen '{request.AppPathName ?? "(yok)"}'";
+        }
+
+        if (!Matches(request.Protocol?.ToLabel(), stored.Protocol))
+        {
+            return $"protokol koşulu '{stored.Protocol ?? "(yok)"}', beklenen '{request.Protocol?.ToLabel() ?? "(yok)"}'";
+        }
+
+        if (!Matches(request.DestinationPrefix, stored.DestinationPrefix))
+        {
+            return $"hedef öneki '{stored.DestinationPrefix ?? "(yok)"}', beklenen '{request.DestinationPrefix ?? "(yok)"}'";
+        }
+
+        if (request.DestinationPort != stored.DestinationPort)
+        {
+            return $"hedef portu {stored.DestinationPort?.ToString(CultureInfo.InvariantCulture) ?? "(yok)"}, "
+                + $"beklenen {request.DestinationPort?.ToString(CultureInfo.InvariantCulture) ?? "(yok)"}";
+        }
+
+        if (request.ThrottleBitsPerSecond != stored.ThrottleRateBitsPerSecond)
+        {
+            return $"hız sınırı {stored.ThrottleRateBitsPerSecond?.ToString(CultureInfo.InvariantCulture) ?? "(yok)"} bit/s, "
+                + $"beklenen {request.ThrottleBitsPerSecond?.ToString(CultureInfo.InvariantCulture) ?? "(yok)"} bit/s";
+        }
+
+        if (request.Dscp != stored.Dscp)
+        {
+            return $"DSCP {stored.Dscp?.ToString(CultureInfo.InvariantCulture) ?? "(yok)"}, "
+                + $"beklenen {request.Dscp?.ToString(CultureInfo.InvariantCulture) ?? "(yok)"}";
+        }
+
+        if (stored.Precedence is { } precedence && precedence != request.Precedence)
+        {
+            return $"öncelik {precedence}, beklenen {request.Precedence}";
+        }
+
+        // Ownership last, because a policy carrying somebody else's owner with our name is
+        // the one case where the right answer is to touch nothing at all.
+        if (!IsOwnedName(stored.Name))
+        {
+            return "ilke bu uygulamanın ad alanında değil";
+        }
+
+        return null;
+
+        static bool Matches(string? wanted, string? stored)
+        {
+            var left = string.IsNullOrWhiteSpace(wanted) ? null : wanted.Trim();
+            var right = string.IsNullOrWhiteSpace(stored) ? null : stored.Trim();
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static QosPolicyInfo ToInfo(PolicyDto dto) => new()
+    {
+        Name = dto.Name ?? string.Empty,
+        Owner = dto.Owner ?? string.Empty,
+        PolicyStore = dto.PolicyStore ?? string.Empty,
+        AppPathName = dto.AppPathName,
+        Protocol = dto.IPProtocol,
+        DestinationPrefix = dto.IPDstPrefix,
+        DestinationPort = dto.IPDstPort == 0 ? null : dto.IPDstPort,
+        ThrottleRateBitsPerSecond = dto.ThrottleRateBitsPerSecond == 0 ? null : dto.ThrottleRateBitsPerSecond,
+        Dscp = dto.DscpValue,
+        Precedence = dto.Precedence,
+    };
 
     public async Task<LatencyRestoreOutcome> RemoveAsync(
         string name,
@@ -381,8 +535,14 @@ public sealed class WindowsQosController : IQosController
     {
         public string? Name { get; init; }
         public string? Owner { get; init; }
+        public string? PolicyStore { get; init; }
         public string? AppPathName { get; init; }
+        public string? IPProtocol { get; init; }
+        public string? IPDstPrefix { get; init; }
+        public int IPDstPort { get; init; }
         public ulong ThrottleRateBitsPerSecond { get; init; }
+        public int? DscpValue { get; init; }
+        public int? Precedence { get; init; }
         public bool IsDefault { get; init; }
     }
 
@@ -390,6 +550,7 @@ public sealed class WindowsQosController : IQosController
     {
         public bool Created { get; init; }
         public string? Reason { get; init; }
+        public PolicyDto? Policy { get; init; }
     }
 
     private sealed record RemoveDto
@@ -398,7 +559,60 @@ public sealed class WindowsQosController : IQosController
         public string? Reason { get; init; }
     }
 
-    private const string ListScript = """
+    /// <summary>
+    /// Flattens one policy into the shape both the list and the read-back compare.
+    /// </summary>
+    /// <remarks>
+    /// Shared so a policy is described identically wherever it is read: a read-back that
+    /// projected fields differently from the listing would compare two shapes and call the
+    /// difference a mismatch.
+    /// </remarks>
+    private const string PolicyProjection = """
+        function ConvertTo-DpiPolicy($policy, [string]$store) {
+            $throttle = 0
+            if ($null -ne $policy.ThrottleRateAction) {
+                try { $throttle = [uint64]$policy.ThrottleRateAction } catch { $throttle = 0 }
+            }
+
+            $port = 0
+            if ($null -ne $policy.IPDstPortStart -and $null -ne $policy.IPDstPortEnd `
+                    -and [int]$policy.IPDstPortStart -eq [int]$policy.IPDstPortEnd) {
+                $port = [int]$policy.IPDstPortStart
+            }
+
+            $dscp = $null
+            if ($null -ne $policy.DSCPValue) {
+                try { $dscp = [int]$policy.DSCPValue } catch { $dscp = $null }
+            }
+
+            $precedence = $null
+            if ($null -ne $policy.Precedence) {
+                try { $precedence = [int]$policy.Precedence } catch { $precedence = $null }
+            }
+
+            $protocol = [string]$policy.IPProtocol
+            # Windows stores "no protocol condition" as Both or None depending on version;
+            # neither is a condition, and both must compare equal to "not specified".
+            if ($protocol -eq 'Both' -or $protocol -eq 'None') { $protocol = '' }
+
+            [pscustomobject]@{
+                Name = [string]$policy.Name
+                Owner = [string]$policy.Owner
+                PolicyStore = $store
+                AppPathName = [string]$policy.AppPathName
+                IPProtocol = $protocol
+                IPDstPrefix = [string]$policy.IPDstPrefix
+                IPDstPort = $port
+                ThrottleRateBitsPerSecond = $throttle
+                DscpValue = $dscp
+                Precedence = $precedence
+                IsDefault = ([string]$policy.Template -eq 'Default')
+            }
+        }
+        """;
+
+    private const string ListScript = PolicyProjection + """
+
         $ErrorActionPreference = 'Stop'
 
         try {
@@ -413,27 +627,18 @@ public sealed class WindowsQosController : IQosController
             $all = @()
             foreach ($store in @('ActiveStore', 'localhost')) {
                 try {
-                    $all += @(Get-NetQosPolicy -PolicyStore $store -ErrorAction Stop)
+                    foreach ($policy in @(Get-NetQosPolicy -PolicyStore $store -ErrorAction Stop)) {
+                        $all += [pscustomobject]@{ Store = $store; Policy = $policy }
+                    }
                 } catch { }
             }
 
             $policies = @($all |
-                Where-Object { $_ -ne $null -and $_.Name } |
-                Group-Object -Property Name |
+                Where-Object { $null -ne $_.Policy -and $_.Policy.Name } |
+                Group-Object -Property { [string]$_.Policy.Name } |
                 ForEach-Object {
-                    $first = $_.Group | Select-Object -First 1
-                    $throttle = 0
-                    if ($null -ne $first.ThrottleRateAction) {
-                        try { $throttle = [uint64]$first.ThrottleRateAction } catch { $throttle = 0 }
-                    }
-
-                    [pscustomobject]@{
-                        Name = [string]$first.Name
-                        Owner = [string]$first.Owner
-                        AppPathName = [string]$first.AppPathName
-                        ThrottleRateBitsPerSecond = $throttle
-                        IsDefault = ([string]$first.Template -eq 'Default')
-                    }
+                    $entry = $_.Group | Select-Object -First 1
+                    ConvertTo-DpiPolicy $entry.Policy $entry.Store
                 })
 
             [pscustomobject]@{ Available = $true; Reason = $null; Policies = $policies } |
@@ -444,11 +649,13 @@ public sealed class WindowsQosController : IQosController
         }
         """;
 
-    private const string CreateScript = """
+    private const string CreateScript = PolicyProjection + """
+
         $ErrorActionPreference = 'Stop'
 
-        function Result([bool]$created, [string]$reason) {
-            [pscustomobject]@{ Created = $created; Reason = $reason } | ConvertTo-Json -Compress
+        function Result([bool]$created, [string]$reason, $policy) {
+            [pscustomobject]@{ Created = $created; Reason = $reason; Policy = $policy } |
+                ConvertTo-Json -Depth 4 -Compress
         }
 
         try {
@@ -458,12 +665,12 @@ public sealed class WindowsQosController : IQosController
             # The guard exists on both sides of the boundary on purpose: the caller
             # refuses foreign names, and so does the script that would create them.
             if (-not $name.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
-                Result $false 'İlke adı bu uygulamanın ad alanında değil.'
+                Result $false 'İlke adı bu uygulamanın ad alanında değil.' $null
                 return
             }
 
             if (-not (Get-Command -Name 'New-NetQosPolicy' -ErrorAction SilentlyContinue)) {
-                Result $false 'NetQos modülü bulunamadı.'
+                Result $false 'NetQos modülü bulunamadı.' $null
                 return
             }
 
@@ -506,23 +713,27 @@ public sealed class WindowsQosController : IQosController
             }
 
             if ($arguments.Count -le 4) {
-                Result $false 'Eşleşme koşulu olmayan bir ilke oluşturulmaz.'
+                Result $false 'Eşleşme koşulu olmayan bir ilke oluşturulmaz.' $null
                 return
             }
 
             New-NetQosPolicy @arguments | Out-Null
 
-            # Read back rather than trusting the create: a policy that is not in the
-            # store did not happen, whatever the cmdlet returned.
+            # Read back rather than trusting the create, and read back everything: a policy
+            # of the right name carrying the wrong throttle rate or matching the wrong
+            # application is worse than no policy, because it looks like one that works.
             $written = Get-NetQosPolicy -PolicyStore $store -ErrorAction Stop |
-                Where-Object { $_.Name -eq $name }
-            if ($written) {
-                Result $true $null
-            } else {
-                Result $false 'İlke oluşturuldu ancak depoda görünmüyor.'
+                Where-Object { $_.Name -eq $name } |
+                Select-Object -First 1
+
+            if (-not $written) {
+                Result $false 'İlke oluşturuldu ancak depoda görünmüyor.' $null
+                return
             }
+
+            Result $true $null (ConvertTo-DpiPolicy $written $store)
         } catch {
-            Result $false $_.Exception.Message
+            Result $false $_.Exception.Message $null
         }
         """;
 

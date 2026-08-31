@@ -67,9 +67,9 @@ public sealed class LatencyModelTests
         {
             PowerManagement = new Dictionary<string, int>
             {
-                ["SelectiveSuspend"] = 0,
+                [Fake.DefaultKeyword] = 0,
                 ["DeviceSleepOnDisconnect"] = 1,
-                ["D0PacketCoalescing"] = 0,
+                [Fake.SecondKeyword] = 0,
             },
             AdvancedProperties = [],
         };
@@ -101,12 +101,18 @@ public sealed class LatencyModelTests
                 [
                     new AdapterAdvancedPropertyCapability
                     {
-                        RegistryKeyword = "*InterruptModeration",
+                        RegistryKeyword = AdapterInterventionCatalog.RscIPv4Keyword,
                         RegistryValues = ["1"],
                         ValidRegistryValues = ["0", "1"],
                     },
                 ],
             }).CapabilityFingerprint);
+
+        // A driver update can change what a keyword does without changing which values
+        // it accepts, so the version is part of the key a saved result is filed under.
+        Assert.NotEqual(
+            capability.CapabilityFingerprint,
+            (capability with { DriverVersion = "2.1.4.2" }).CapabilityFingerprint);
     }
 
     [Fact]
@@ -163,7 +169,7 @@ public sealed class LatencyModelTests
     [InlineData(LatencyTransactionState.Verifying, true)]
     [InlineData(LatencyTransactionState.Committed, false)]
     public void OnlyACommittedSnapshotDescribesSettingsSomebodyChose(LatencyTransactionState state, bool incomplete)
-        => Assert.Equal(incomplete, Fake.Snapshot("adapter", "SelectiveSuspend", state: state).IsIncomplete);
+        => Assert.Equal(incomplete, Fake.Snapshot("adapter", Fake.DefaultKeyword, state: state).IsIncomplete);
 }
 
 /// <summary>
@@ -199,7 +205,7 @@ public sealed class LatencyOptimizerTests
 
         Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
         Assert.True(result.HasVerifiedGain);
-        Assert.Equal(["Seçmeli askıya alma kapalı"], result.AppliedChanges);
+        Assert.Equal(["Interrupt Moderation kapalı"], result.AppliedChanges);
 
         // The number the user is shown is the observed original-to-final difference.
         Assert.NotNull(result.VerifiedImprovement);
@@ -208,7 +214,7 @@ public sealed class LatencyOptimizerTests
         Assert.Contains("-5.0 ms", result.StatusLine, StringComparison.Ordinal);
 
         // The setting is left on the adapter, and the snapshot says so.
-        Assert.Contains("SelectiveSuspend", scenario.Controller.Live);
+        Assert.Contains(Fake.DefaultKeyword, scenario.Controller.Live);
         Assert.NotNull(scenario.Snapshots.Value);
         Assert.Equal(LatencyTransactionState.Committed, scenario.Snapshots.Value!.State);
     }
@@ -221,18 +227,18 @@ public sealed class LatencyOptimizerTests
         // media is disconnected, which is not a state a running game is ever in.
         var controller = new FakeController
         {
-            PowerProperties = ["SelectiveSuspend", "D0PacketCoalescing"],
+            Properties = [Fake.DefaultKeyword, Fake.SecondKeyword],
         };
         var probe = new FakeProbe(controller, (live, call) =>
         {
-            if (live.Contains("SelectiveSuspend") && live.Contains("D0PacketCoalescing"))
+            if (live.Contains(Fake.DefaultKeyword) && live.Contains(Fake.SecondKeyword))
             {
                 // Paired B cycles see 32 ms (a 3 ms incremental gain), while the
                 // independent final state measures 34 ms.
                 return Fake.Measurement(call >= 10 ? 34 : 32);
             }
 
-            return live.Contains("SelectiveSuspend") ? Fake.Measurement(35) : Fake.Measurement(40);
+            return live.Contains(Fake.DefaultKeyword) ? Fake.Measurement(35) : Fake.Measurement(40);
         });
         var scenario = new LatencyScenario(controller, probe);
 
@@ -301,7 +307,7 @@ public sealed class LatencyOptimizerTests
 
         // The first cycle looks like a large win and every later one like a small loss:
         // the mean stays above the gain threshold while the cycles never agree.
-        var probe = new FakeProbe(controller, (live, call) => live.Contains("SelectiveSuspend")
+        var probe = new FakeProbe(controller, (live, call) => live.Contains(Fake.DefaultKeyword)
             ? Fake.Measurement(call == 3 ? 18 : 32)
             : Fake.Measurement(30));
         var scenario = new LatencyScenario(controller, probe, new LatencyOptimizerOptions
@@ -330,7 +336,7 @@ public sealed class LatencyOptimizerTests
 
         // Every "with the setting" window happens to be busy, and looks enormously
         // better for it. None of those pairs may count.
-        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+        var probe = new FakeProbe(controller, (live, _) => live.Contains(Fake.DefaultKeyword)
             ? Fake.Measurement(12, load: LatencyLoadState.DownlinkLoaded)
             : Fake.Measurement(40, load: LatencyLoadState.Idle));
         var scenario = new LatencyScenario(controller, probe, new LatencyOptimizerOptions
@@ -378,7 +384,7 @@ public sealed class LatencyOptimizerTests
         var controller = new FakeController();
         var probe = new FakeProbe(controller, (_, _) => Fake.Measurement(30))
         {
-            BreaksConnectivity = "SelectiveSuspend",
+            BreaksConnectivity = Fake.DefaultKeyword,
         };
         var scenario = new LatencyScenario(controller, probe);
 
@@ -391,7 +397,7 @@ public sealed class LatencyOptimizerTests
     public async Task ACandidateThatAddsPacketLossIsRolledBack()
     {
         var controller = new FakeController();
-        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+        var probe = new FakeProbe(controller, (live, _) => live.Contains(Fake.DefaultKeyword)
             ? Fake.Measurement(20, loss: 12)
             : Fake.Measurement(30));
         var scenario = new LatencyScenario(controller, probe);
@@ -409,7 +415,7 @@ public sealed class LatencyOptimizerTests
         var controller = new FakeController();
         var probe = new FakeProbe(controller, (_, _) => Fake.Measurement(30))
         {
-            BreaksConnectivity = "SelectiveSuspend",
+            BreaksConnectivity = Fake.DefaultKeyword,
         };
         var scenario = new LatencyScenario(controller, probe);
 
@@ -417,7 +423,7 @@ public sealed class LatencyOptimizerTests
 
         Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
         Assert.Contains("Bağlantı denetimi", result.StatusLine, StringComparison.Ordinal);
-        Assert.Equal(["SelectiveSuspend"], controller.Restored);
+        Assert.Equal([Fake.DefaultKeyword], controller.Restored);
         Assert.Empty(controller.Live);
         Assert.Null(scenario.Snapshots.Value);
     }
@@ -428,7 +434,7 @@ public sealed class LatencyOptimizerTests
         var controller = new FakeController { RestoreOutcome = LatencyRestoreOutcome.Failed };
         var probe = new FakeProbe(controller, (_, _) => Fake.Measurement(30))
         {
-            BreaksConnectivity = "SelectiveSuspend",
+            BreaksConnectivity = Fake.DefaultKeyword,
         };
         var scenario = new LatencyScenario(controller, probe);
 
@@ -436,14 +442,14 @@ public sealed class LatencyOptimizerTests
 
         Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
         Assert.Contains("snapshot", result.StatusLine, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("SelectiveSuspend", controller.Live);
+        Assert.Contains(Fake.DefaultKeyword, controller.Live);
         Assert.NotNull(scenario.Snapshots.Value);
     }
 
     [Fact]
     public async Task ADriverThatDeclinesTheWriteEndsThatCandidateWithoutAVerdict()
     {
-        var controller = new FakeController { RefuseApply = "SelectiveSuspend" };
+        var controller = new FakeController { RefuseApply = Fake.DefaultKeyword };
         var scenario = new LatencyScenario(controller, FakeProbe.Flat(controller));
 
         var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("refused"));
@@ -460,8 +466,8 @@ public sealed class LatencyOptimizerTests
     {
         var controller = new FakeController
         {
-            PowerProperties = ["SelectiveSuspend", "D0PacketCoalescing"],
-            ThrowOnApply = "D0PacketCoalescing",
+            Properties = [Fake.DefaultKeyword, Fake.SecondKeyword],
+            ThrowOnApply = Fake.SecondKeyword,
         };
         var probe = FakeProbe.Improves(controller, gain: 6);
         var scenario = new LatencyScenario(controller, probe);
@@ -469,8 +475,8 @@ public sealed class LatencyOptimizerTests
         var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("throw"));
 
         Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
-        Assert.Contains("D0PacketCoalescing", controller.Restored);
-        Assert.Contains("SelectiveSuspend", controller.Restored);
+        Assert.Contains(Fake.SecondKeyword, controller.Restored);
+        Assert.Contains(Fake.DefaultKeyword, controller.Restored);
         Assert.Empty(controller.Live);
         Assert.Null(scenario.Snapshots.Value);
     }
@@ -480,7 +486,7 @@ public sealed class LatencyOptimizerTests
     {
         var scenario = new LatencyScenario(new FakeController { RestoreOutcome = LatencyRestoreOutcome.MissingAdapter })
         {
-            Snapshots = { Value = Fake.Snapshot("missing", "SelectiveSuspend") },
+            Snapshots = { Value = Fake.Snapshot("missing", Fake.DefaultKeyword) },
         };
 
         var result = await scenario.Optimizer.RestoreAsync();
@@ -494,7 +500,7 @@ public sealed class LatencyOptimizerTests
     {
         var scenario = new LatencyScenario(new FakeController { RestoreOutcome = LatencyRestoreOutcome.MissingProperty })
         {
-            Snapshots = { Value = Fake.Snapshot("updated-driver", "SelectiveSuspend") },
+            Snapshots = { Value = Fake.Snapshot("updated-driver", Fake.DefaultKeyword) },
         };
 
         var result = await scenario.Optimizer.RestoreAsync();
@@ -537,13 +543,13 @@ public sealed class LatencyOptimizerTests
         {
             Snapshots =
             {
-                Value = Fake.Snapshot("adapter-crash", "SelectiveSuspend", state: LatencyTransactionState.CandidateApplied),
+                Value = Fake.Snapshot("adapter-crash", Fake.DefaultKeyword, state: LatencyTransactionState.CandidateApplied),
             },
         };
 
         Assert.True(await scenario.Optimizer.RecoverAsync());
 
-        Assert.Equal(["SelectiveSuspend"], scenario.Controller.Restored);
+        Assert.Equal([Fake.DefaultKeyword], scenario.Controller.Restored);
         Assert.Null(scenario.Snapshots.Value);
     }
 
@@ -556,7 +562,7 @@ public sealed class LatencyOptimizerTests
     {
         var scenario = new LatencyScenario
         {
-            Snapshots = { Value = Fake.Snapshot("adapter-live", "SelectiveSuspend") },
+            Snapshots = { Value = Fake.Snapshot("adapter-live", Fake.DefaultKeyword) },
         };
 
         Assert.True(await scenario.Optimizer.RecoverAsync());
@@ -581,7 +587,7 @@ public sealed class LatencyOptimizerTests
         {
             Snapshots =
             {
-                Value = Fake.Snapshot("adapter-stuck", "SelectiveSuspend", state: LatencyTransactionState.Verifying),
+                Value = Fake.Snapshot("adapter-stuck", Fake.DefaultKeyword, state: LatencyTransactionState.Verifying),
             },
         };
 
@@ -596,7 +602,7 @@ public sealed class LatencyOptimizerTests
     {
         var scenario = new LatencyScenario(new FakeController { RestoreOutcome = LatencyRestoreOutcome.Failed })
         {
-            Snapshots = { Value = Fake.Snapshot("stuck", "SelectiveSuspend") },
+            Snapshots = { Value = Fake.Snapshot("stuck", Fake.DefaultKeyword) },
         };
 
         var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("blocked"));
@@ -619,7 +625,7 @@ public sealed class LatencyOptimizerTests
 
         await scenario.Optimizer.OptimizeAsync(Fake.Network("ordering"));
 
-        Assert.Contains("SelectiveSuspend", snapshotWrites);
+        Assert.Contains(Fake.DefaultKeyword, snapshotWrites);
         Assert.NotEmpty(applies);
         Assert.Equal(LatencyTransactionState.Committed, scenario.Snapshots.Value!.State);
     }
@@ -635,9 +641,9 @@ public sealed class LatencyOptimizerTests
         await scenario.Optimizer.OptimizeAsync(Fake.Network("old"));
         await scenario.Optimizer.OptimizeNetworkChangeAsync(Fake.Network("new"));
 
-        Assert.Equal("adapter-old:SelectiveSuspend", controller.Events[0]);
-        Assert.Contains("restore:adapter-old:SelectiveSuspend", controller.Events);
-        Assert.Equal("adapter-new:SelectiveSuspend", controller.Events[^1]);
+        Assert.Equal($"adapter-old:{Fake.DefaultKeyword}", controller.Events[0]);
+        Assert.Contains($"restore:adapter-old:{Fake.DefaultKeyword}", controller.Events);
+        Assert.Equal($"adapter-new:{Fake.DefaultKeyword}", controller.Events[^1]);
     }
 
     [Fact]
@@ -678,7 +684,7 @@ public sealed class LatencyOptimizerTests
         var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("cancel"), cancellation.Token);
 
         Assert.Equal(LatencyOptimizationStatus.Cancelled, result.Status);
-        Assert.Equal(["SelectiveSuspend"], controller.Restored);
+        Assert.Equal([Fake.DefaultKeyword], controller.Restored);
         Assert.Empty(controller.Live);
         Assert.Null(scenario.Snapshots.Value);
     }
@@ -696,7 +702,7 @@ public sealed class LatencyOptimizerTests
 
         Assert.Equal(network.Key, profile.NetworkKey);
         Assert.Equal(network.AdapterId, profile.AdapterId);
-        Assert.Equal(["SelectiveSuspend"], profile.AcceptedProperties);
+        Assert.Equal([Fake.DefaultKeyword], profile.AcceptedProperties);
         Assert.NotNull(profile.Baseline);
         Assert.NotNull(profile.Optimized);
     }
@@ -714,7 +720,7 @@ public sealed class LatencyOptimizerTests
 
         Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
         Assert.Equal(6, result.VerifiedImprovement!.MedianMs);
-        Assert.Contains("SelectiveSuspend", controller.Live);
+        Assert.Contains(Fake.DefaultKeyword, controller.Live);
         Assert.Single(controller.Applied);
     }
 
@@ -731,10 +737,10 @@ public sealed class LatencyOptimizerTests
 
         Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
         Assert.Empty(controller.Live);
-        Assert.Contains("SelectiveSuspend", controller.Restored);
+        Assert.Contains(Fake.DefaultKeyword, controller.Restored);
         var refreshed = Assert.Single(first.Profiles.Profiles);
         Assert.Empty(refreshed.AcceptedProperties);
-        Assert.Equal(["SelectiveSuspend"], refreshed.RejectedProperties);
+        Assert.Equal([Fake.DefaultKeyword], refreshed.RejectedProperties);
     }
 
     [Fact]
@@ -746,14 +752,14 @@ public sealed class LatencyOptimizerTests
 
         var controller = new FakeController();
         var probe = new FakeProbe(controller, (live, _) =>
-            live.Contains("SelectiveSuspend") ? Fake.Measurement(35) : Fake.Measurement(25));
+            live.Contains(Fake.DefaultKeyword) ? Fake.Measurement(35) : Fake.Measurement(25));
         var replay = new LatencyScenario(controller, probe, profiles: first.Profiles);
 
         var result = await replay.Optimizer.OptimizeAsync(network);
 
         Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
         Assert.Empty(controller.Live);
-        Assert.Contains("SelectiveSuspend", controller.Restored);
+        Assert.Contains(Fake.DefaultKeyword, controller.Restored);
     }
 
     [Fact]
@@ -764,11 +770,11 @@ public sealed class LatencyOptimizerTests
         await first.Optimizer.OptimizeAsync(network);
 
         var controller = new FakeController();
-        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+        var probe = new FakeProbe(controller, (live, _) => live.Contains(Fake.DefaultKeyword)
             ? Fake.Measurement(20)
             : Fake.Measurement(26))
         {
-            BreaksConnectivity = "SelectiveSuspend",
+            BreaksConnectivity = Fake.DefaultKeyword,
         };
         var replay = new LatencyScenario(controller, probe, profiles: first.Profiles);
 
@@ -858,7 +864,7 @@ public sealed class LatencyOptimizerTests
         Assert.Equal(LatencyOptimizationStatus.Failed, result.Status);
         Assert.Contains("snapshot", result.StatusLine, StringComparison.OrdinalIgnoreCase);
         Assert.NotNull(replay.Snapshots.Value);
-        Assert.Contains("SelectiveSuspend", controller.Live);
+        Assert.Contains(Fake.DefaultKeyword, controller.Live);
         Assert.Empty(first.Profiles.Profiles);
     }
 
@@ -926,7 +932,7 @@ public sealed class LatencyOptimizerTests
     {
         var controller = new FakeController
         {
-            PowerProperties = ["SelectiveSuspend", "D0PacketCoalescing"],
+            Properties = [Fake.DefaultKeyword, Fake.SecondKeyword],
         };
         var scenario = new LatencyScenario(
             controller,

@@ -210,7 +210,7 @@ public sealed class LatencyExperimentOrderTests
         // A link that helps in one cycle and hurts in the next never settles, which is
         // exactly the state the extra samples exist for.
         var candidateCall = 0;
-        var probe = new FakeProbe(controller, (live, _) => live.Contains("SelectiveSuspend")
+        var probe = new FakeProbe(controller, (live, _) => live.Contains(Fake.DefaultKeyword)
             ? Fake.Measurement(candidateCall++ % 2 == 0 ? 24 : 36)
             : Fake.Measurement(30));
 
