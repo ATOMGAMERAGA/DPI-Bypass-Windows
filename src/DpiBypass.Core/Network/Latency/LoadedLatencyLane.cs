@@ -27,6 +27,15 @@ public sealed record LoadedLaneRequest
 
     /// <summary>Skip the download half when the user only cares about their uplink.</summary>
     public bool MeasureDownload { get; init; } = true;
+
+    /// <summary>
+    /// How many caps the guard's search may apply, when a caller needs to bound it.
+    /// </summary>
+    /// <remarks>
+    /// Production leaves this at the guard's own default. A test scripts a fixed number of
+    /// measurement results and needs the search to ask for exactly that many.
+    /// </remarks>
+    internal int? MaximumTrialsForTest { get; init; }
 }
 
 /// <summary>
@@ -323,6 +332,13 @@ public sealed class LoadedLatencyLane
                 Capacity = capacity,
                 Mode = request.GuardMode,
                 Probe = request.Probe,
+                MaximumTrials = request.MaximumTrialsForTest ?? new TrafficGuardRequest
+                {
+                    Network = network,
+                    Endpoint = endpoint,
+                    ProfileId = network.Key,
+                    BulkApplication = application,
+                }.MaximumTrials,
             },
             cancellationToken).ConfigureAwait(false);
 
@@ -410,7 +426,7 @@ public sealed class LoadedLatencyLane
         {
             notices.Add($"İndirme sırasında gecikme {measured.QueueingMs:F0} ms artıyor. Bu kuyruk operatörün "
                 + "ekipmanında oluşur; bu bilgisayarda uygulanan bir gönderim sınırı ona ulaşamaz. "
-                + "Kalıcı çözüm yönlendiricide SQM/CAKE veya fq_codel gibi bir kuyruk yönetimidir.");
+                + "Kalıcı çözüm yönlendiricide SQM/CAKE veya FQ-CoDel gibi bir kuyruk yönetimidir.");
         }
 
         return notices;

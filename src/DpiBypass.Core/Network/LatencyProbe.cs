@@ -658,6 +658,14 @@ public sealed class LatencyProbe : ILatencyProbe
     /// take, and RFC 2681 requires the threshold that separates a large finite delay from
     /// a loss to be part of the metric - which it cannot be if it is never applied.
     /// </remarks>
+    /// <summary>The connect path, exposed so its deadline can be held to in a test.</summary>
+    internal static Task<double?> TryTcpConnectForTestAsync(
+        IPAddress address,
+        int port,
+        int timeoutMilliseconds,
+        CancellationToken cancellationToken)
+        => TryTcpConnectAsync(address, port, timeoutMilliseconds, cancellationToken);
+
     private static async Task<double?> TryTcpConnectAsync(
         IPAddress address,
         int port,

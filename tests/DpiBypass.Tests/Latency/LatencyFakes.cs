@@ -210,6 +210,9 @@ internal sealed class FakeController : ILatencyAdapterController
     /// <summary>Property the driver only honours after a miniport restart.</summary>
     public string? NeedsRestart { get; init; }
 
+    /// <summary>Property whose restart leaves the adapter without a usable link.</summary>
+    public string? LinkNotRestored { get; init; }
+
     /// <summary>Restart policies the applies were made under, for consent assertions.</summary>
     public List<AdapterRestartPolicy> RestartPolicies { get; } = [];
 
@@ -274,6 +277,16 @@ internal sealed class FakeController : ILatencyAdapterController
             if (candidate.PropertyName == RefuseApply)
             {
                 return LatencyApplyResult.Refused("sürücü değeri canlı uygulamadı");
+            }
+
+            if (candidate.PropertyName == LinkNotRestored)
+            {
+                return new LatencyApplyResult
+                {
+                    State = LatencyApplyState.LinkNotRestored,
+                    Reason = "Yeniden başlatmadan sonra bağlantı geri gelmedi.",
+                    RestartPerformed = true,
+                };
             }
 
             // The registry write happens either way; what a restart decides is whether
@@ -637,6 +650,15 @@ internal sealed class FakeLoadExperiment : ILoadExperiment
     /// <summary>Called as each run starts, so a test can cancel mid-experiment.</summary>
     public Action<LoadExperimentRequest>? OnRun { get; set; }
 
+    /// <summary>
+    /// Where the fake publishes its stages, as the real experiment publishes its waits.
+    /// </summary>
+    /// <remarks>
+    /// Set by a test that needs one ordered sequence covering both the lane's own stages
+    /// and the experiment's, which is what the card actually shows.
+    /// </remarks>
+    public ILatencyStageReporter? Stager { get; set; }
+
     public string Instruction(LoadDirection direction) => "start a transfer";
 
     public string StopInstruction(LoadDirection direction) => "stop the transfer";
@@ -660,6 +682,20 @@ internal sealed class FakeLoadExperiment : ILoadExperiment
         WaitingStages.Add(request.WaitingStage);
         OnRun?.Invoke(request);
         cancellationToken.ThrowIfCancellationRequested();
+
+        Stager?.Report(new LoadedLaneProgress
+        {
+            Stage = request.WaitingStage,
+            Title = LoadedLaneProgress.TitleFor(request.WaitingStage),
+            Instruction = request.Instruction ?? string.Empty,
+        });
+
+        Stager?.Report(new LoadedLaneProgress
+        {
+            Stage = request.MeasuringStage,
+            Title = LoadedLaneProgress.TitleFor(request.MeasuringStage),
+            Instruction = string.Empty,
+        });
 
         return Task.FromResult(_results.Count switch
         {

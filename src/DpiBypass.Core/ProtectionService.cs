@@ -56,6 +56,20 @@ public sealed class ProtectionService : IAsyncDisposable
     /// </remarks>
     private readonly SemaphoreSlim _latencyGate = new(1, 1);
 
+    /// <summary>
+    /// The passive flow observer the deep test needs, started only while it is running.
+    /// </summary>
+    /// <remarks>
+    /// Two things need it and neither can work without it: finding a UDP game's server,
+    /// and proving a QoS policy attached to a genuinely new connection. It observes and
+    /// nothing else - a SNIFF|RECV_ONLY handle on WinDivert's FLOW layer, which carries
+    /// connection events rather than packets - and it is closed the moment the run ends
+    /// so nothing is listening while the user is not asking for anything.
+    /// </remarks>
+    private readonly IProcessFlowObserver _flowObserver;
+
+    private readonly Lock _latencyStageGate = new();
+
     private DohResolver? _resolver;
     private DnsProxyServer? _dnsProxy;
     private DnsConfigurator? _dnsConfigurator;
@@ -69,19 +83,25 @@ public sealed class ProtectionService : IAsyncDisposable
     private Task? _networkWork;
     private Task? _recheckWork;
     private CancellationTokenSource? _hotspotDiagnosticsCancellation;
+    private CancellationTokenSource? _loadedLatencyCancellation;
 
     public ProtectionService(
         ConfigStore? store = null,
         LearnedDomainStore? learnedDomains = null,
         LatencyOptimizer? latencyOptimizer = null,
         IMobileHotspotDiagnostics? hotspotDiagnostics = null,
-        LoadedLatencyLane? loadedLatency = null)
+        LoadedLatencyLane? loadedLatency = null,
+        IProcessFlowObserver? flowObserver = null)
     {
         _store = store ?? new ConfigStore();
         _learned = learnedDomains ?? new LearnedDomainStore();
+        _flowObserver = flowObserver ?? new WinDivertFlowObserver(AppLog.InfoSink);
         _latencyOptimizer = latencyOptimizer ?? new LatencyOptimizer(log: AppLog.InfoSink);
         _latencyOptimizer.Changed += OnLatencyChanged;
-        _loadedLatency = loadedLatency ?? new LoadedLatencyLane(log: AppLog.InfoSink);
+        _loadedLatency = loadedLatency ?? new LoadedLatencyLane(
+            log: AppLog.InfoSink,
+            flows: _flowObserver,
+            stages: new DelegateStageReporter(PublishLatencyStage));
         _hotspot = hotspotDiagnostics ?? new MobileHotspotDiagnostics(log: AppLog.InfoSink);
 
         // Load already disabled the obsolete TTL sub-feature and preserved any reusable
@@ -138,6 +158,33 @@ public sealed class ProtectionService : IAsyncDisposable
     public bool IsLatencyBusy => _latencyOptimizer.IsBusy || _loadedLatencyBusy;
 
     private volatile bool _loadedLatencyBusy;
+
+    private LoadedLaneProgress _latencyStage = LoadedLaneProgress.Off;
+
+    /// <summary>
+    /// Which stage of the deep test is running, and what it is waiting for.
+    /// </summary>
+    /// <remarks>
+    /// The card binds to this rather than to a fixed instruction string. The run asks the
+    /// user to start a transfer, stop it, and start a fresh one after the policy exists,
+    /// and each of those is a state with its own name, live rate and remaining time.
+    /// </remarks>
+    public LoadedLaneProgress LatencyStage
+    {
+        get
+        {
+            lock (_latencyStageGate)
+            {
+                return _latencyStage;
+            }
+        }
+    }
+
+    /// <summary>Raised as the deep test moves between stages, off the UI thread.</summary>
+    public event Action<LoadedLaneProgress>? LatencyStageChanged;
+
+    /// <summary>Whether a deep test is running and can still be stopped.</summary>
+    public bool CanCancelLatencyRun => _loadedLatencyCancellation is { IsCancellationRequested: false };
 
     /// <summary>Last verification result against discord.com.</summary>
     public ProbeResult? LastProbe { get; private set; }
@@ -283,11 +330,26 @@ public sealed class ProtectionService : IAsyncDisposable
         await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         _loadedLatencyBusy = true;
 
+        // The user's own cancel button and the caller's token are both honoured, and the
+        // source is disposed in the finally so a cancelled run cannot leave the card
+        // showing a stop button that does nothing.
+        var run = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _loadedLatencyCancellation = run;
+
         try
         {
-            PublishLatency(Working(
-                LatencyOptimizationStatus.LoadTesting,
-                _loadedLatency.Instruction(LoadDirection.Upload)));
+            PublishLatencyStage(new LoadedLaneProgress
+            {
+                Stage = LoadedLaneStage.VerifyingTarget,
+                Title = LoadedLaneProgress.TitleFor(LoadedLaneStage.VerifyingTarget),
+                Instruction = string.Empty,
+            });
+
+            PublishLatency(Working(LatencyOptimizationStatus.LoadTesting, "Derin test başlatılıyor…"));
+
+            // Started here rather than at launch: the observer exists for this run and is
+            // closed with it, so nothing is watching connections while nobody asked.
+            await StartFlowObserverAsync(run.Token).ConfigureAwait(false);
 
             var result = await _loadedLatency.RunAsync(
                 new LoadedLaneRequest
@@ -295,18 +357,74 @@ public sealed class ProtectionService : IAsyncDisposable
                     Target = Settings.Latency.ToSpec(),
                     RunTrafficGuard = Settings.Latency.TrafficGuardEnabled,
                     BulkApplication = Settings.Latency.TrafficGuardApplication,
+                    GuardMode = Settings.Latency.GuardMode,
                     Capacity = Settings.Latency.ToCapacity(),
                 },
-                cancellationToken).ConfigureAwait(false);
+                run.Token).ConfigureAwait(false);
 
             return PublishLatency(result);
         }
         finally
         {
+            await StopFlowObserverAsync().ConfigureAwait(false);
+
             _loadedLatencyBusy = false;
+            _loadedLatencyCancellation = null;
+            run.Dispose();
             _latencyGate.Release();
             Changed?.Invoke();
         }
+    }
+
+    /// <summary>Stops a running deep test. The run itself puts everything back.</summary>
+    public void CancelLoadedLatencyTest()
+    {
+        var run = _loadedLatencyCancellation;
+        if (run is { IsCancellationRequested: false })
+        {
+            AppLog.Info("latency.loaded.cancelled: kullanıcı derin testi durdurdu.");
+            run.Cancel();
+        }
+    }
+
+    private async Task StartFlowObserverAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _flowObserver.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Not fatal: the run reports what it therefore cannot establish rather than
+            // producing a result it has no evidence for.
+            AppLog.Info($"latency.flow: gözlem başlatılamadı ({ex.Message}).");
+        }
+    }
+
+    private async Task StopFlowObserverAsync()
+    {
+        try
+        {
+            await _flowObserver.StopAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Info($"latency.flow: gözlem durdurulamadı ({ex.Message}).");
+        }
+    }
+
+    private void PublishLatencyStage(LoadedLaneProgress progress)
+    {
+        lock (_latencyStageGate)
+        {
+            _latencyStage = progress;
+        }
+
+        LatencyStageChanged?.Invoke(progress);
     }
 
     /// <summary>Programs holding a live remote connection, for the target picker.</summary>
@@ -330,6 +448,15 @@ public sealed class ProtectionService : IAsyncDisposable
 
     /// <summary>What the user has to do for the deep test to have anything to measure.</summary>
     public string LatencyLoadInstruction(LoadDirection direction) => _loadedLatency.Instruction(direction);
+
+    /// <summary>Applications currently running that the Traffic Guard could pace.</summary>
+    /// <remarks>
+    /// The same list the target picker uses. A QoS match condition is only as good as the
+    /// name in it, so the guard's application is chosen from processes that exist rather
+    /// than typed.
+    /// </remarks>
+    public Task<IReadOnlyList<string>> ListBulkApplicationsAsync(CancellationToken cancellationToken = default)
+        => ListConnectedProcessesAsync(cancellationToken);
 
     /// <summary>Measures again from scratch, ignoring any saved answer for this network.</summary>
     public async Task<LatencyOptimizationResult> RetestLatencyAsync(CancellationToken cancellationToken = default)

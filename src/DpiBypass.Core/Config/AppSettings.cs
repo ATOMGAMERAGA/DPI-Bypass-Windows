@@ -78,6 +78,18 @@ public sealed record LatencyPreferences
     /// </remarks>
     public bool AllowAdapterRestart { get; set; }
 
+    /// <summary>
+    /// Which trade-off the send-rate cap search optimises for.
+    /// </summary>
+    /// <remarks>
+    /// Balanced keeps as much of the transfer as it can while emptying the queue; lowest
+    /// latency accepts a slower transfer, and shows the user what that cost.
+    /// </remarks>
+    public TrafficGuardMode GuardMode { get; set; } = TrafficGuardMode.Balanced;
+
+    /// <summary>The discovered endpoint the user pinned, as "address:port".</summary>
+    public string? PinnedEndpoint { get; set; }
+
     public LatencyTargetSpec ToSpec() => TargetKind switch
     {
         LatencyTargetKind.Custom when !string.IsNullOrWhiteSpace(TargetHost) => new LatencyTargetSpec
@@ -89,6 +101,7 @@ public sealed record LatencyPreferences
         },
         LatencyTargetKind.Application when !string.IsNullOrWhiteSpace(TargetProcess) => new LatencyTargetSpec
         {
+            PreferredEndpoint = PinnedEndpoint,
             Kind = LatencyTargetKind.Application,
             ProcessName = TargetProcess,
         },
@@ -386,6 +399,12 @@ public sealed class ConfigStore
         settings.Latency.TargetHost = Trim(settings.Latency.TargetHost);
         settings.Latency.TargetProcess = Trim(settings.Latency.TargetProcess);
         settings.Latency.TrafficGuardApplication = Trim(settings.Latency.TrafficGuardApplication);
+        settings.Latency.PinnedEndpoint = Trim(settings.Latency.PinnedEndpoint);
+
+        if (!Enum.IsDefined(settings.Latency.GuardMode))
+        {
+            settings.Latency.GuardMode = TrafficGuardMode.Balanced;
+        }
 
         if (settings.Latency.TargetPort is < 1 or > 65535)
         {
