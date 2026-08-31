@@ -373,7 +373,10 @@ keyword'üyle eşleşir, yerelleştirilmiş görünen ad **hiç okunmaz**):
   çalışıyorsa)
 - `*RSS` → 1 (yalnız kablolu, ≥4 mantıksal işlemci, şu anda kapalıysa)
 - `*EEE` → 0
-- `*LsoV2IPv4` / `*LsoV2IPv6` → 0 (yalnız toplu gönderim ölçülen lane'de)
+- `*LsoV2IPv4` / `*LsoV2IPv6` → 0 — **şu anda hiçbir tur tarafından denenmiyor.** LSO
+  yalnız toplu gönderimi etkiler ve boştaki gecikme turunda parçalanacak büyük bir
+  blok yoktur; yük altındaki lane ise NIC ayarı değil hat ve QoS ölçer. Katalogda
+  kalma nedeni, eski bir kayıttan geri yükleyebilmektir.
 
 **Bir ayar "uygulandı" sayılmaz, kanıtlanır.** Microsoft'un kendi belgesi
 `-NoRestart` için *"Many advanced properties require restarting the network

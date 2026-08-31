@@ -143,6 +143,7 @@ public sealed class MainViewModel : ObservableObject
     private string _latencyStageRemaining = string.Empty;
     private string _latencyStageData = string.Empty;
     private bool _isDeepTestRunning;
+    private bool _latencyStageCanCancel = true;
     private LatencyEndpointEntry? _selectedLatencyEndpoint;
     private TrafficGuardModeOption _selectedGuardMode;
     private string _latencyResultSummary = string.Empty;
@@ -288,7 +289,9 @@ public sealed class MainViewModel : ObservableObject
         LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
         LatencyClearProfilesCommand = new RelayCommand(ClearLatencyProfiles);
         RefreshLatencyProcessesCommand = new AsyncRelayCommand(RefreshLatencyProcessesAsync);
-        LatencyCancelCommand = new RelayCommand(CancelLatencyDeepTest, () => _isDeepTestRunning);
+        LatencyCancelCommand = new RelayCommand(
+            CancelLatencyDeepTest,
+            () => _isDeepTestRunning && _latencyStageCanCancel && _service.CanCancelLatencyRun);
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
         AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
@@ -1248,6 +1251,10 @@ public sealed class MainViewModel : ObservableObject
         LatencyStageData = progress.DataUsedBytes > 0
             ? $"Bu testte izlenen veri: {progress.DescribeData()}"
             : string.Empty;
+
+        // A stage that has already committed or rolled back has nothing left to stop.
+        _latencyStageCanCancel = progress.CanCancel;
+        LatencyCancelCommand.RaiseCanExecuteChanged();
 
         if (progress.Outcome is { Length: > 0 } outcome)
         {

@@ -149,7 +149,14 @@ R4: `*EEE` — *"A value that describes whether the device should enable IEEE
   "Enerji Verimli Ethernet" gibi yerelleştirilmiş görünen adlara göre rastgele
   property değiştirilmez.
 
-### 3.5 `*LsoV2IPv4` / `*LsoV2IPv6` → 0 — **yalnız yük altındaki lane'de**
+### 3.5 `*LsoV2IPv4` / `*LsoV2IPv6` → 0 — **tanımlı, ama hiçbir tur denemiyor**
+
+> **V2 düzeltmesi.** Bu başlık önce "yalnız yük altındaki lane'de" diyordu; bu
+> doğru değildi. `IncludeThroughputSensitive` yalnız boştaki turda ve `false`
+> olarak veriliyor, yük altındaki lane ise NIC anahtarı değil hat ve QoS ölçüyor.
+> Yani bu iki anahtar **hiçbir zaman aday olmuyor.** Katalogdan çıkarılmadılar
+> çünkü çıkarmak, eski bir snapshot'taki LSO değerinin geri yüklenmesini de
+> engellerdi.
 
 R6: LSO *"allows an application to pass a large block of data to the NIC, and
 the NIC breaks the data into packets"*. Ayrıca R6: LSO kapatmadan tüm checksum

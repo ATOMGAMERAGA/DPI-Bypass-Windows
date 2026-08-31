@@ -281,8 +281,13 @@ public static class AdapterInterventionCatalog
             AddKeyword(candidates, adapter, context, RssKeyword, "1");
         }
 
-        // LSO only ever touches bulk sending. It is never offered for an idle-latency
-        // run, where by construction there is no large block to segment.
+        // LSO only ever touches bulk sending, so it is never offered for an idle-latency
+        // run where by construction there is no large block to segment - and today that is
+        // every run: the loaded lane measures a link and a QoS policy, not adapter
+        // keywords, so nothing currently sets IncludeThroughputSensitive. The entries stay
+        // because the restore path needs the keyword in the writable list to be able to
+        // put an LSO value back, and because a loaded-lane NIC pass would use them
+        // unchanged. Neither is a claim that this build measures them.
         if (context.IncludeThroughputSensitive)
         {
             if (adapter.LsoV2IPv4Enabled != false)

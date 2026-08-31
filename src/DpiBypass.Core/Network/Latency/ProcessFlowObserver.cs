@@ -265,15 +265,24 @@ public sealed class WinDivertFlowObserver : IProcessFlowObserver
         }
 
         var now = DateTimeOffset.UtcNow;
-        var key = $"{address.ProcessId}|{transport}|{local}|{remote}";
+        var flow = new ObservedFlow
+        {
+            ProcessId = address.ProcessId,
+            Local = local,
+            Remote = remote,
+            Protocol = transport,
+            EstablishedAt = now,
+        };
 
         lock (_gate)
         {
             if (address.Event == WinDivertEvent.FlowDeleted)
             {
-                if (_flows.TryGetValue(key, out var existing))
+                // A close for a flow we never saw open is not evidence of anything: the
+                // handle was opened after it started, which is the layer's own limitation.
+                if (_flows.TryGetValue(flow.Key, out var existing))
                 {
-                    _flows[key] = existing with { DeletedAt = now };
+                    _flows[flow.Key] = existing with { DeletedAt = now };
                 }
 
                 return;
@@ -284,14 +293,7 @@ public sealed class WinDivertFlowObserver : IProcessFlowObserver
                 return;
             }
 
-            _flows[key] = new ObservedFlow
-            {
-                ProcessId = address.ProcessId,
-                Local = local,
-                Remote = remote,
-                Protocol = transport,
-                EstablishedAt = now,
-            };
+            _flows[flow.Key] = flow;
         }
     }
 

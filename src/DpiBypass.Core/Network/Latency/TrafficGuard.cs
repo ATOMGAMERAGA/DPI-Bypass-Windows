@@ -428,9 +428,9 @@ public sealed class TrafficGuard
                 {
                     Status = TrafficGuardStatus.Active,
                     Summary = $"Gönderim kuyruklanması {queueingBefore:F0} ms → {kept.QueueingMs ?? 0:F0} ms düştü; "
-                        + $"{request.BulkApplication.ExecutableName} gönderimi "
-                        + $"{choice.BitsPerSecond / 1_000_000d:F1} Mbit/s ile sınırlandı ({choice.Why}). "
-                        + $"Sınırlanan, oyun değil toplu aktarım yapan uygulamadır.",
+                        + $"{request.BulkApplication.ExecutableName} gönderimi {choice.Describe()} "
+                        + $"olacak şekilde sınırlandı ({choice.Why}). "
+                        + "Sınırlanan, oyun değil toplu aktarım yapan uygulamadır.",
                     PolicyName = policyName,
                     ThrottleBitsPerSecond = choice.BitsPerSecond,
                     ThrottledApplication = request.BulkApplication.Describe(),

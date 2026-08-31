@@ -429,6 +429,22 @@ Kötü yazılmış bir user-space paket yolu gecikmeyi artırır. Eklenmemiştir
 
 V1'de olduğu gibi yalnız tanılama; hiçbir metrik değiştirilmez.
 
+### 3.5 `*LsoV2IPv4` / `*LsoV2IPv6` — **ulaşılmayan kod yolu, bilerek bırakıldı**
+
+İkinci denetim turunda bulundu ve burada dürüstçe yazılıyor: bu iki anahtar
+katalogda tanımlıdır ama **hiçbir tur tarafından aday olarak üretilmez.**
+`LatencyCandidateContext.IncludeThroughputSensitive` yalnız
+`LatencyOptimizer.SelectCandidates` tarafından ve **`false`** olarak verilir;
+yük altındaki lane NIC anahtarı değil hat kapasitesi ve QoS ilkesi ölçer.
+
+Kaldırılmadılar çünkü `WritableKeywords` listesinden çıkarmak geri yükleme
+yolunu da kapatır: restore script'i listede olmayan bir anahtar için
+`MissingProperty` döner ve bu terminal sayıldığı için eski bir snapshot'taki LSO
+değeri **geri yüklenmeden** silinirdi.
+
+V1'in belgeleri bunları "yük altındaki lane'de denenir" diye anlatıyordu; bu
+doğru değildi. README ve `LATENCY-RESEARCH` düzeltildi.
+
 ---
 
 ## 4. İndirme yönünde dürüstlük

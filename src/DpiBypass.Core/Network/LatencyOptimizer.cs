@@ -1211,8 +1211,17 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
             if (moved is null)
             {
+                // The operational answer for this keyword is logged next to the state, so
+                // a support log shows what the stack said rather than only what we did.
+                var reported = applied.Operational.ForKeyword(candidate.PropertyName) switch
+                {
+                    true => " · işletim sistemi: etkin",
+                    false => " · işletim sistemi: etkin değil",
+                    null => string.Empty,
+                };
+
                 _log?.Invoke(
-                    $"latency.candidate.applied: {candidate.PropertyName} · {applied.Describe()}"
+                    $"latency.candidate.applied: {candidate.PropertyName} · {applied.Describe()}{reported}"
                     + (applied.RestartPerformed ? " (bağdaştırıcı yeniden başlatıldı)" : string.Empty));
                 return LatencyArmOutcome.Success;
             }
