@@ -464,12 +464,19 @@ public static class LatencyComparison
         var repliesPerArm = usable.Min(pair => Math.Min(pair.Baseline.RemoteReplies, pair.Candidate.RemoteReplies));
         var tailIsDecisive = repliesPerArm >= options.MinimumRepliesForP99;
 
+        // Nothing smaller than the instrument can resolve is a result. ICMP replies are
+        // whole milliseconds, so on an ICMP experiment a "0.8 ms" gain is a rounding
+        // artefact however consistently it appears; on a stopwatch-timed transport the
+        // floor is far below any threshold here and this changes nothing.
+        var resolution = usable.Max(pair =>
+            Math.Max(pair.Baseline.ClockResolutionMs, pair.Candidate.ClockResolutionMs));
+
         var gains = new (string Name, double Value, double Threshold, Func<LatencyDelta, double> Select)[]
         {
-            ("median", mean.MedianMs, Limit(baselineMean.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale, delta => delta.MedianMs),
-            ("p95", mean.P95Ms, Limit(baselineMean.P95RttMs, P95GainFloorMs, P95GainShare) * scale, delta => delta.P95Ms),
-            ("p99", mean.P99Ms, Limit(baselineMean.P99RttMs, P99GainFloorMs, P99GainShare) * scale, delta => delta.P99Ms),
-            ("jitter", mean.JitterMs, Limit(baselineMean.JitterMs, JitterGainFloorMs, JitterGainShare) * scale, delta => delta.JitterMs),
+            ("median", mean.MedianMs, Floor(Limit(baselineMean.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale, resolution), delta => delta.MedianMs),
+            ("p95", mean.P95Ms, Floor(Limit(baselineMean.P95RttMs, P95GainFloorMs, P95GainShare) * scale, resolution), delta => delta.P95Ms),
+            ("p99", mean.P99Ms, Floor(Limit(baselineMean.P99RttMs, P99GainFloorMs, P99GainShare) * scale, resolution), delta => delta.P99Ms),
+            ("jitter", mean.JitterMs, Floor(Limit(baselineMean.JitterMs, JitterGainFloorMs, JitterGainShare) * scale, resolution), delta => delta.JitterMs),
         };
 
         var winner = gains
@@ -482,7 +489,10 @@ public static class LatencyComparison
         if (winner.Name is null)
         {
             return usable.Length >= minimumCycles
-                ? Verdict(LatencyVerdictOutcome.Rejected, "ölçülebilir bir kazanç yok", mean)
+                ? Verdict(
+                    LatencyVerdictOutcome.Rejected,
+                    $"ölçülebilir bir kazanç yok (saat çözünürlüğü {resolution:F1} ms)",
+                    mean)
                 : Verdict(LatencyVerdictOutcome.Inconclusive, "kazanç eşiğin altında", mean);
         }
 
@@ -671,6 +681,10 @@ public static class LatencyComparison
             || (replies >= 12
                 && delta.JitterMs >= Limit(before.JitterMs, JitterGainFloorMs, JitterGainShare) * scale);
     }
+
+    /// <summary>Raises a threshold to whatever the instrument can actually resolve.</summary>
+    private static double Floor(double threshold, double resolutionMs)
+        => Math.Max(threshold, double.IsFinite(resolutionMs) ? Math.Max(0, resolutionMs) : 0);
 
     private static double Limit(double baseline, double floor, double share) => Math.Max(floor, baseline * share);
 

@@ -61,6 +61,18 @@ public sealed record LatencyTargetOption(LatencyTargetKind Kind, string Display,
 /// <summary>A change that was measured and put back, with the reason it was.</summary>
 public sealed record LatencyRejectionEntry(string Change, string Reason);
 
+/// <summary>One endpoint discovery found for the chosen application.</summary>
+public sealed record LatencyEndpointEntry(string Key, string Display, string Why)
+{
+    public override string ToString() => Display;
+}
+
+/// <summary>Which trade-off the send-rate cap search should optimise for.</summary>
+public sealed record TrafficGuardModeOption(TrafficGuardMode Mode, string Display, string Description)
+{
+    public override string ToString() => Display;
+}
+
 public sealed record RecheckOption(int Seconds, string Display)
 {
     public override string ToString() => Display;
@@ -125,6 +137,17 @@ public sealed class MainViewModel : ObservableObject
     private string _latencyCustomTarget = string.Empty;
     private string? _selectedLatencyProcess;
     private string _latencyTargetError = string.Empty;
+    private string _latencyStageTitle = "Kapalı";
+    private string _latencyStageInstruction = string.Empty;
+    private string _latencyStageRate = string.Empty;
+    private string _latencyStageRemaining = string.Empty;
+    private string _latencyStageData = string.Empty;
+    private bool _isDeepTestRunning;
+    private bool _latencyStageCanCancel = true;
+    private LatencyEndpointEntry? _selectedLatencyEndpoint;
+    private TrafficGuardModeOption _selectedGuardMode;
+    private string _latencyResultSummary = string.Empty;
+    private string _latencyDataUsedSummary = string.Empty;
     private string _domainStatus = string.Empty;
     private string _domainStatusSeverity = string.Empty;
     private string _domainFilter = string.Empty;
@@ -214,6 +237,18 @@ public sealed class MainViewModel : ObservableObject
         _selectedScope = ScopeOptions.FirstOrDefault(o => o.Scope == _service.Settings.Scope) ?? ScopeOptions[1];
         _selectedRecheck = RecheckOptions.FirstOrDefault(o => o.Seconds == _service.Settings.RecheckIntervalSeconds)
             ?? RecheckOptions[2];
+        GuardModeOptions =
+        [
+            new TrafficGuardModeOption(
+                TrafficGuardMode.Balanced,
+                "Dengeli",
+                "Kuyruklanmayı kaldırırken aktarım hızının olabildiğince çoğunu korur."),
+            new TrafficGuardModeOption(
+                TrafficGuardMode.LowestLatency,
+                "En düşük gecikme",
+                "Daha yavaş aktarımı kabul eder; ölçülen hız kaybı sonuç ekranında gösterilir."),
+        ];
+
         LatencyTargetOptions =
         [
             new LatencyTargetOption(
@@ -241,6 +276,8 @@ public sealed class MainViewModel : ObservableObject
             ? $"{latency.TargetHost}:{port}"
             : latency.TargetHost ?? string.Empty;
         _selectedLatencyProcess = latency.TargetProcess;
+        _selectedGuardMode = GuardModeOptions.FirstOrDefault(option => option.Mode == latency.GuardMode)
+            ?? GuardModeOptions[0];
 
         ToggleCommand = new AsyncRelayCommand(ToggleAsync);
         TestCommand = new AsyncRelayCommand(TestAsync);
@@ -252,6 +289,9 @@ public sealed class MainViewModel : ObservableObject
         LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
         LatencyClearProfilesCommand = new RelayCommand(ClearLatencyProfiles);
         RefreshLatencyProcessesCommand = new AsyncRelayCommand(RefreshLatencyProcessesAsync);
+        LatencyCancelCommand = new RelayCommand(
+            CancelLatencyDeepTest,
+            () => _isDeepTestRunning && _latencyStageCanCancel && _service.CanCancelLatencyRun);
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
         AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
@@ -265,6 +305,7 @@ public sealed class MainViewModel : ObservableObject
         ClearLogCommand = new RelayCommand(ClearLogView);
 
         _service.Changed += OnServiceChanged;
+        _service.LatencyStageChanged += OnLatencyStageChanged;
         _service.HostRewritten += OnHostRewritten;
         _service.TuningProgress += OnTuningProgress;
         _service.DomainLearned += OnDomainLearned;
@@ -328,9 +369,17 @@ public sealed class MainViewModel : ObservableObject
 
     public RelayCommand LatencyClearProfilesCommand { get; }
 
+    /// <summary>Stops a running deep test. The run puts everything back on its way out.</summary>
+    public RelayCommand LatencyCancelCommand { get; }
+
     public AsyncRelayCommand RefreshLatencyProcessesCommand { get; }
 
     public ObservableCollection<LatencyTargetOption> LatencyTargetOptions { get; }
+
+    public ObservableCollection<TrafficGuardModeOption> GuardModeOptions { get; }
+
+    /// <summary>Endpoints discovery found for the chosen application, best first.</summary>
+    public ObservableCollection<LatencyEndpointEntry> LatencyEndpoints { get; } = [];
 
     /// <summary>Programs with a live remote connection, refreshed on demand.</summary>
     public ObservableCollection<string> LatencyProcesses { get; } = [];
@@ -685,8 +734,144 @@ public sealed class MainViewModel : ObservableObject
         private set => Set(ref _latencyTargetError, value);
     }
 
-    /// <summary>What the user has to do before the deep test has anything to measure.</summary>
-    public string LatencyLoadInstruction => _service.LatencyLoadInstruction(LoadDirection.Upload);
+    /// <summary>
+    /// The stage the deep test is in right now, by name.
+    /// </summary>
+    /// <remarks>
+    /// The card used to show one fixed sentence about starting an upload, while the run
+    /// went on to need the upload stopped, a policy applied and a fresh upload started.
+    /// Nobody could complete it without reading the source. These five properties are the
+    /// run telling the user what it is actually waiting for.
+    /// </remarks>
+    public string LatencyStageTitle
+    {
+        get => _latencyStageTitle;
+        private set => Set(ref _latencyStageTitle, value);
+    }
+
+    public string LatencyStageInstruction
+    {
+        get => _latencyStageInstruction;
+        private set => Set(ref _latencyStageInstruction, value);
+    }
+
+    /// <summary>The rate the adapter counters show, and how close it is to capacity.</summary>
+    public string LatencyStageRate
+    {
+        get => _latencyStageRate;
+        private set => Set(ref _latencyStageRate, value);
+    }
+
+    public string LatencyStageRemaining
+    {
+        get => _latencyStageRemaining;
+        private set => Set(ref _latencyStageRemaining, value);
+    }
+
+    public string LatencyStageData
+    {
+        get => _latencyStageData;
+        private set => Set(ref _latencyStageData, value);
+    }
+
+    public bool IsDeepTestRunning
+    {
+        get => _isDeepTestRunning;
+        private set
+        {
+            if (Set(ref _isDeepTestRunning, value))
+            {
+                LatencyCancelCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>Everything the finished run measured, as the result panel prints it.</summary>
+    public string LatencyResultSummary
+    {
+        get => _latencyResultSummary;
+        private set => Set(ref _latencyResultSummary, value);
+    }
+
+    /// <summary>How much of the user's own data the run watched go past.</summary>
+    public string LatencyDataUsedSummary
+    {
+        get => _latencyDataUsedSummary;
+        private set => Set(ref _latencyDataUsedSummary, value);
+    }
+
+    /// <summary>The endpoint to measure, when discovery found more than one.</summary>
+    public LatencyEndpointEntry? SelectedLatencyEndpoint
+    {
+        get => _selectedLatencyEndpoint;
+        set
+        {
+            if (!Set(ref _selectedLatencyEndpoint, value))
+            {
+                return;
+            }
+
+            _service.SetLatencyPreferences(_service.Settings.Latency with { PinnedEndpoint = value?.Key });
+        }
+    }
+
+    public TrafficGuardModeOption SelectedGuardMode
+    {
+        get => _selectedGuardMode;
+        set
+        {
+            if (value is null || !Set(ref _selectedGuardMode, value))
+            {
+                return;
+            }
+
+            _service.SetLatencyPreferences(_service.Settings.Latency with { GuardMode = value.Mode });
+        }
+    }
+
+    /// <summary>
+    /// Whether a measurement may restart the adapter to make a setting take effect.
+    /// </summary>
+    /// <remarks>
+    /// Off by default and worth the explanation next to it: most NDIS advanced keywords
+    /// only take effect once the miniport restarts, and that drops every connection on it
+    /// for a few seconds. Without this the run reports such candidates as needing a
+    /// restart rather than measuring a value the driver is not using.
+    /// </remarks>
+    public bool AllowAdapterRestart
+    {
+        get => _service.Settings.Latency.AllowAdapterRestart;
+        set
+        {
+            if (_service.Settings.Latency.AllowAdapterRestart == value)
+            {
+                return;
+            }
+
+            _service.SetLatencyPreferences(_service.Settings.Latency with { AllowAdapterRestart = value });
+            Raise();
+        }
+    }
+
+    /// <summary>Downlink capacity in Mbit/s, when the user knows it.</summary>
+    public string ManualDownlinkMbps
+    {
+        get => _service.Settings.Latency.ManualDownlinkMbps?.ToString("0.##", System.Globalization.CultureInfo.CurrentCulture)
+            ?? string.Empty;
+        set
+        {
+            double? parsed = double.TryParse(
+                value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.CurrentCulture,
+                out var number) && number > 0
+                ? number
+                : null;
+
+            _service.SetLatencyPreferences(_service.Settings.Latency with { ManualDownlinkMbps = parsed });
+            Raise();
+        }
+    }
 
     public LatencyTargetOption SelectedLatencyTarget
     {
@@ -709,6 +894,9 @@ public sealed class MainViewModel : ObservableObject
             PersistLatencyPreferences();
         }
     }
+
+    /// <summary>Whether discovery offered more than one endpoint to choose between.</summary>
+    public bool HasLatencyEndpointChoice => LatencyEndpoints.Count > 1;
 
     /// <summary>Whether the host/port box applies to the current choice.</summary>
     public bool IsCustomLatencyTarget => _selectedLatencyTarget.Kind == LatencyTargetKind.Custom;
@@ -880,6 +1068,128 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Renders everything a finished run measured, in one block the user can read or copy.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately exhaustive and deliberately explicit about what each number is. The
+    /// distinction that matters most is whether the figure is the application's own round
+    /// trip or a route reference to the same address, because those are different claims
+    /// and only one of them is a game's ping.
+    /// </remarks>
+    private void ApplyLatencyResultSummary(LatencyStatusView status)
+    {
+        var result = _service.LatencyResult;
+        var lines = new List<string>
+        {
+            $"Hedef: {(string.IsNullOrWhiteSpace(status.Target) ? "—" : status.Target)} · {status.Protocol}",
+            status.RouteReferenceOnly
+                ? "Bu değer aynı adrese rota referansıdır; uygulamanın kendi gidiş-dönüş süresi değildir."
+                : "Bu değer ölçülen protokolün gerçek gidiş-dönüş süresidir.",
+        };
+
+        if (status.Idle is { } idle)
+        {
+            lines.Add($"Boşta: {Numbers(idle)}");
+            lines.Add($"Ölçüm çözünürlüğü: {idle.ClockResolutionMs:F2} ms · "
+                + $"kayıp eşiği {idle.RemoteAttempts} denemede bir probe = %{idle.LossQuantumPercent:F1}");
+        }
+
+        lines.Add(status.UploadLoaded is { } upload
+            ? $"Gönderim altında: {Numbers(upload)}"
+            : "Gönderim altında: ölçülmedi.");
+
+        lines.Add(status.DownloadLoaded is { } download
+            ? $"İndirme altında: {Numbers(download)}"
+            : "İndirme altında: ölçülmedi.");
+
+        if (status.Path is { } path)
+        {
+            lines.Add($"Kuyruklanma — gönderim: {Milliseconds(path.UploadQueueingMs)} · "
+                + $"indirme: {Milliseconds(path.DownloadQueueingMs)}");
+        }
+
+        if (result.Capacity.HasUplink || result.Capacity.HasDownlink)
+        {
+            lines.Add($"Ölçülen hat kapasitesi: {result.Capacity.Describe()}");
+        }
+
+        if (status.TrafficGuard is { } guard && guard.Status != TrafficGuardStatus.Off)
+        {
+            lines.Add($"Traffic Guard: {guard.Summary}");
+
+            if (guard.ThrottleBitsPerSecond is { } cap)
+            {
+                lines.Add($"Kullanılan sınır: {cap / 1_000_000d:F1} Mbit/s"
+                    + (guard.RetainedThroughputShare is { } retained
+                        ? $" · korunan throughput %{retained * 100:F0}"
+                        : string.Empty));
+            }
+
+            if (guard.UplinkBeforeKbps is { } before)
+            {
+                lines.Add($"Gönderim hızı: {before / 1000:F1} Mbit/s → "
+                    + $"{(guard.UplinkAfterKbps is { } after ? $"{after / 1000:F1}" : "—")} Mbit/s");
+            }
+
+            foreach (var trial in guard.Trials)
+            {
+                lines.Add($"  denenen sınır · {trial}");
+            }
+        }
+
+        if (status.Improvement is { } improvement)
+        {
+            lines.Add($"Doğrulanmış kazanç: median {improvement.MedianMs:F1} ms · p95 {improvement.P95Ms:F1} ms");
+        }
+
+        foreach (var verdict in result.Verdicts.Where(entry => entry.ConfidenceLowerMs is not null))
+        {
+            lines.Add($"  {verdict.Description}: güven aralığı "
+                + $"[{verdict.ConfidenceLowerMs:F1}, {verdict.ConfidenceUpperMs:F1}] ms");
+        }
+
+        lines.Add(status.Applied.Count > 0
+            ? $"Uygulanan: {string.Join(" · ", status.Applied)}"
+            : "Uygulanan değişiklik yok.");
+
+        if (status.Rejected.Count > 0)
+        {
+            lines.Add($"Geri alınan: {string.Join(" · ", status.Rejected.Select(entry => $"{entry.Change} ({entry.Reason})"))}");
+        }
+
+        if (status.Applied.Count == 0 && status.State is LatencyModeState.NoLocalGain or LatencyModeState.MonitoringOnly)
+        {
+            lines.Add("Kazanç bulunamadı: bu bir hata değildir. Ölçülen koşullarda yerel olarak "
+                + "uygulanabilir, tekrarlanan bir iyileşme yoktu ve hiçbir ayar tutulmadı.");
+        }
+
+        foreach (var notice in status.Notices)
+        {
+            lines.Add($"Not: {notice}");
+        }
+
+        LatencyResultSummary = string.Join(Environment.NewLine, lines);
+        LatencyDataUsedSummary = result.DataUsedBytes > 0
+            ? $"Bu testte izlenen veri: {Bytes(result.DataUsedBytes)}"
+            : "Bu testte veri sayacı okunmadı.";
+
+        static string Numbers(LatencyMeasurement measurement) =>
+            $"median {measurement.MedianRttMs:F1} ms · p95 {measurement.P95RttMs:F1} ms · "
+            + (measurement.RemoteReplies >= 100 ? $"p99 {measurement.P99RttMs:F1} ms · " : "p99 için örnek yetersiz · ")
+            + $"jitter {measurement.JitterMs:F1} ms · kayıp %{measurement.PacketLossPercent:F1} "
+            + $"({measurement.RemoteReplies}/{measurement.RemoteAttempts})";
+
+        static string Milliseconds(double? value) => value is { } number ? $"{number:F0} ms" : "ölçülmedi";
+
+        static string Bytes(long value) => value switch
+        {
+            < 1024 * 1024 => $"{value / 1024d:F0} KB",
+            < 1024L * 1024 * 1024 => $"{value / (1024d * 1024):F1} MB",
+            _ => $"{value / (1024d * 1024 * 1024):F2} GB",
+        };
+    }
+
     private void ClearLatencyProfiles()
     {
         LatencyStatusLine = _service.ClearLatencyProfiles()
@@ -890,14 +1200,18 @@ public sealed class MainViewModel : ObservableObject
     private async Task RunLatencyDeepTestAsync()
     {
         IsLatencyBusy = true;
+        IsDeepTestRunning = true;
         LatencyHeadline = "Açık · yük altında derin test yapılıyor";
-        LatencyStatusLine = LatencyLoadInstruction;
 
         try
         {
             var result = await _service.RunLoadedLatencyTestAsync().ConfigureAwait(true);
             ApplyLatencyStatus(_service.LatencyStatus);
             LatencyStatusLine = result.StatusLine;
+        }
+        catch (OperationCanceledException)
+        {
+            LatencyStatusLine = "Derin test durduruldu; bu çalışmanın yaptığı değişiklikler geri alındı.";
         }
         catch (Exception ex)
         {
@@ -906,7 +1220,45 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            IsDeepTestRunning = false;
             IsLatencyBusy = false;
+            ApplyLatencyStage(_service.LatencyStage);
+        }
+    }
+
+    private void CancelLatencyDeepTest() => _service.CancelLoadedLatencyTest();
+
+    /// <summary>The service publishes stages off the UI thread; marshal before binding.</summary>
+    private void OnLatencyStageChanged(LoadedLaneProgress progress)
+    {
+        if (_dispatcher.CheckAccess())
+        {
+            ApplyLatencyStage(progress);
+            return;
+        }
+
+        _dispatcher.BeginInvoke(() => ApplyLatencyStage(progress));
+    }
+
+    private void ApplyLatencyStage(LoadedLaneProgress progress)
+    {
+        LatencyStageTitle = progress.Title;
+        LatencyStageInstruction = progress.Instruction;
+        LatencyStageRate = progress.DescribeRate();
+        LatencyStageRemaining = progress.Remaining is { TotalSeconds: > 0 } remaining
+            ? $"Kalan süre: {remaining.TotalSeconds:F0} sn"
+            : string.Empty;
+        LatencyStageData = progress.DataUsedBytes > 0
+            ? $"Bu testte izlenen veri: {progress.DescribeData()}"
+            : string.Empty;
+
+        // A stage that has already committed or rolled back has nothing left to stop.
+        _latencyStageCanCancel = progress.CanCancel;
+        LatencyCancelCommand.RaiseCanExecuteChanged();
+
+        if (progress.Outcome is { Length: > 0 } outcome)
+        {
+            LatencyStatusLine = outcome;
         }
     }
 
@@ -964,6 +1316,24 @@ public sealed class MainViewModel : ObservableObject
             LatencyRejectedChanges.Add(new LatencyRejectionEntry(rejection.Change, rejection.Reason));
         }
 
+        // Discovery can find several endpoints for one application, and which of them is
+        // the session is not something this can decide for the user.
+        var pinned = _service.Settings.Latency.PinnedEndpoint;
+        LatencyEndpoints.Clear();
+        foreach (var candidate in _service.LatencyResult.Candidates)
+        {
+            LatencyEndpoints.Add(new LatencyEndpointEntry(
+                LatencyTargetResolver.EndpointKey(candidate.Endpoint),
+                candidate.Display,
+                candidate.Why));
+        }
+
+        _selectedLatencyEndpoint = LatencyEndpoints.FirstOrDefault(entry => entry.Key == pinned);
+        Raise(nameof(SelectedLatencyEndpoint));
+        Raise(nameof(HasLatencyEndpointChoice));
+
+        ApplyLatencyResultSummary(status);
+
         static string Describe(LatencyMeasurement? measurement, string title) => measurement is null
             ? $"{title}: ölçülmedi."
             : $"{title}: median {measurement.MedianRttMs:F1} ms · p95 {measurement.P95RttMs:F1} ms · "
@@ -1017,11 +1387,44 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Puts everything back: adapter properties from the snapshot, and every QoS policy
+    /// this application owns.
+    /// </summary>
+    /// <remarks>
+    /// The dedicated restore path is called explicitly rather than reached sideways by
+    /// switching the mode off, because it is the one entry point that sweeps policies a
+    /// crashed run may have left behind as well as the snapshot's adapter settings. The
+    /// mode is then turned off so the card does not claim to be optimising a machine it
+    /// has just put back.
+    /// </remarks>
     private async Task RestoreLatencyAsync()
     {
-        _lowLatencyMode = false;
-        Raise(nameof(LowLatencyMode));
-        await ApplyLowLatencyModeAsync(false).ConfigureAwait(true);
+        IsLatencyBusy = true;
+        LatencyStatusLine = "Özgün NIC ayarları ve bu uygulamanın QoS ilkeleri geri yükleniyor…";
+
+        try
+        {
+            await _service.RestoreLatencyAsync().ConfigureAwait(true);
+
+            if (_service.Settings.LowLatencyMode)
+            {
+                await _service.SetLowLatencyModeAsync(false).ConfigureAwait(true);
+            }
+
+            ApplyLatencyStatus(_service.LatencyStatus);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Gecikme ayarları geri yüklenemedi", ex);
+            LatencyStatusLine = $"Geri yükleme başarısız: {ex.Message}";
+        }
+        finally
+        {
+            _lowLatencyMode = _service.Settings.LowLatencyMode;
+            Raise(nameof(LowLatencyMode));
+            IsLatencyBusy = false;
+        }
     }
 
     // --- Siteler -------------------------------------------------------------

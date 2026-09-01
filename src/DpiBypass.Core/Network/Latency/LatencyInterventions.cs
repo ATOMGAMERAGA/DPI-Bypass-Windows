@@ -100,6 +100,20 @@ public sealed record InterventionDescriptor
     /// </remarks>
     public bool MayNeedRestart { get; init; }
 
+    /// <summary>
+    /// Whether a steady-state round-trip experiment could possibly see this change.
+    /// </summary>
+    /// <remarks>
+    /// Two of the power keywords fail this and are therefore not offered at all. NDIS
+    /// selective suspend only affects the first packet after a long idle period, which a
+    /// continuously probing experiment never produces; and D0 packet coalescing batches
+    /// broadcast and multicast receives, which is not the path a unicast game packet
+    /// takes. Measuring either against a steady stream of probes would reliably produce
+    /// "no change" after minutes of work, and keeping one on the strength of a noisy
+    /// result would be worse.
+    /// </remarks>
+    public bool AffectsSteadyStateRtt { get; init; } = true;
+
     /// <summary>How long the driver and link need after a write before measuring again.</summary>
     public TimeSpan SettlingTime { get; init; } = TimeSpan.FromMilliseconds(750);
 

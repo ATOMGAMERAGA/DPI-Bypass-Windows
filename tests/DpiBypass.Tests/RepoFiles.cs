@@ -7,6 +7,8 @@ internal static class RepoFiles
 
     public static string SharedThemeXaml => Find("src", "DpiBypass.App", "Theme", "Shared.xaml");
 
+    public static string MainViewModel => Find("src", "DpiBypass.App", "ViewModels", "MainViewModel.cs");
+
     public static string CoreProjectDirectory => Find("src", "DpiBypass.Core", "DpiBypass.Core.csproj") is { } project
         ? Path.GetDirectoryName(project)!
         : throw new Xunit.Sdk.XunitException("Could not locate the core project.");

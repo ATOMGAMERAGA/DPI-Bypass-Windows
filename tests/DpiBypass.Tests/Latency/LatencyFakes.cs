@@ -20,9 +20,17 @@ internal static class Fake
         GatewayAddress = online ? $"192.0.2.{(suffix.Sum(character => character) % 200) + 1}" : null,
     };
 
-    public static AdapterLatencyCapability Capability(NetworkFingerprint network, params string[] powerProperties)
+    /// <summary>
+    /// An adapter offering the given advanced keywords, each currently set to "1".
+    /// </summary>
+    /// <remarks>
+    /// Advanced keywords rather than power-management properties because those are what
+    /// the shipped catalogue offers: the two power keywords it used to write are not
+    /// visible to a steady-state round-trip experiment and are no longer candidates.
+    /// </remarks>
+    public static AdapterLatencyCapability Capability(NetworkFingerprint network, params string[] keywords)
     {
-        powerProperties = powerProperties.Length == 0 ? ["SelectiveSuspend"] : powerProperties;
+        keywords = keywords.Length == 0 ? [DefaultKeyword] : keywords;
 
         return new AdapterLatencyCapability
         {
@@ -32,9 +40,20 @@ internal static class Fake
             IsPhysical = true,
             IsVirtual = false,
             IsUp = true,
-            PowerManagement = powerProperties.ToDictionary(property => property, _ => 2, StringComparer.OrdinalIgnoreCase),
+            AdvancedProperties = [.. keywords.Select(keyword => new AdapterAdvancedPropertyCapability
+            {
+                RegistryKeyword = keyword,
+                RegistryValues = ["1"],
+                ValidRegistryValues = ["0", "1"],
+            })],
         };
     }
+
+    /// <summary>The keyword the fixtures use when a test does not care which one it is.</summary>
+    public const string DefaultKeyword = AdapterInterventionCatalog.InterruptModerationKeyword;
+
+    /// <summary>A second keyword, for the tests that need two candidates.</summary>
+    public const string SecondKeyword = AdapterInterventionCatalog.EeeKeyword;
 
     /// <summary>A measurement with a plausible shape; only what a test names is varied.</summary>
     public static LatencyMeasurement Measurement(
@@ -76,20 +95,20 @@ internal static class Fake
         _ => new NetworkLoadSample { State = state, UplinkKbps = 9000, DownlinkKbps = 45000 },
     };
 
-    public static LatencyOptimizationCandidate Candidate(string property = "SelectiveSuspend", bool cpuSensitive = false) => new()
+    public static LatencyOptimizationCandidate Candidate(string? property = null, bool cpuSensitive = false) => new()
     {
-        Kind = LatencySettingKind.PowerManagement,
-        PropertyName = property,
-        OriginalPowerValue = 2,
-        DesiredPowerValue = 1,
+        Kind = LatencySettingKind.AdvancedProperty,
+        PropertyName = property ?? DefaultKeyword,
+        OriginalValues = ["1"],
+        DesiredValues = ["0"],
         CpuSensitive = cpuSensitive,
-        Description = property,
+        Description = property ?? DefaultKeyword,
     };
 
     public static LatencyOptimizationSnapshot Snapshot(
         string adapterId,
         string property,
-        LatencySettingKind kind = LatencySettingKind.PowerManagement,
+        LatencySettingKind kind = LatencySettingKind.AdvancedProperty,
         LatencyTransactionState state = LatencyTransactionState.Committed) => new()
         {
             AdapterId = adapterId,
@@ -111,6 +130,50 @@ internal static class Fake
                     CapturedAt = DateTimeOffset.UtcNow,
                 },
             ],
+        };
+
+    /// <summary>A capacity a test can treat as measured, so classification works.</summary>
+    public static LinkCapacityEstimate Capacity(double uplinkKbps, double? downlinkKbps = null)
+    {
+        var estimate = LinkCapacityEstimate.Unknown.With(
+            LoadDirection.Upload,
+            new LinkCapacityRamp.Result(uplinkKbps, LinkCapacityConfidence.Measured, 6),
+            DateTimeOffset.UtcNow);
+
+        return downlinkKbps is { } downlink
+            ? estimate.With(
+                LoadDirection.Download,
+                new LinkCapacityRamp.Result(downlink, LinkCapacityConfidence.Measured, 6),
+                DateTimeOffset.UtcNow)
+            : estimate;
+    }
+
+    /// <summary>A resolved bulk application, as the picker would produce one.</summary>
+    public static BulkApplicationSelection BulkApplication(
+        string name = "steam.exe",
+        string? path = @"C:\Program Files\Steam\steam.exe",
+        params uint[] pids) => new()
+        {
+            ExecutableName = name,
+            VerifiedPath = path,
+            ProcessIds = pids.Length == 0 ? [4242u] : pids,
+        };
+
+    /// <summary>A flow the observer would have reported for one process.</summary>
+    public static ObservedFlow Flow(
+        uint pid = 4242,
+        string remote = "203.0.113.9",
+        int remotePort = 25565,
+        LatencyProtocol protocol = LatencyProtocol.Udp,
+        DateTimeOffset? at = null,
+        bool open = true) => new()
+        {
+            ProcessId = pid,
+            Local = new System.Net.IPEndPoint(System.Net.IPAddress.Parse("192.168.1.20"), 50000),
+            Remote = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(remote), remotePort),
+            Protocol = protocol,
+            EstablishedAt = at ?? DateTimeOffset.UtcNow,
+            DeletedAt = open ? null : (at ?? DateTimeOffset.UtcNow).AddSeconds(1),
         };
 
     public static IReadOnlyList<LatencyPair> Pairs(params (double Baseline, double Candidate)[] medians) =>
@@ -135,13 +198,23 @@ internal sealed class FakeController : ILatencyAdapterController
 {
     private int _concurrentApplies;
 
-    public string[] PowerProperties { get; init; } = ["SelectiveSuspend"];
+    /// <summary>The advanced keywords this fake adapter offers.</summary>
+    public string[] Properties { get; init; } = [Fake.DefaultKeyword];
 
     /// <summary>Property whose apply throws, simulating a driver error mid-run.</summary>
     public string? ThrowOnApply { get; init; }
 
     /// <summary>Property the driver silently declines to write.</summary>
     public string? RefuseApply { get; init; }
+
+    /// <summary>Property the driver only honours after a miniport restart.</summary>
+    public string? NeedsRestart { get; init; }
+
+    /// <summary>Property whose restart leaves the adapter without a usable link.</summary>
+    public string? LinkNotRestored { get; init; }
+
+    /// <summary>Restart policies the applies were made under, for consent assertions.</summary>
+    public List<AdapterRestartPolicy> RestartPolicies { get; } = [];
 
     public TimeSpan ApplyDelay { get; init; }
 
@@ -168,14 +241,21 @@ internal sealed class FakeController : ILatencyAdapterController
         NetworkFingerprint network,
         CancellationToken cancellationToken = default)
         => Task.FromResult(Detect is null
-            ? Fake.Capability(network, PowerProperties)
+            ? Fake.Capability(network, Properties)
             : Detect(network));
+
+    public Task<AdapterOperationalState> ReadOperationalStateAsync(
+        string adapterId,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(AdapterOperationalState.Empty);
 
     public async Task<LatencyApplyResult> ApplyAsync(
         AdapterLatencyCapability adapter,
         LatencyOptimizationCandidate candidate,
+        AdapterRestartPolicy restart,
         CancellationToken cancellationToken = default)
     {
+        RestartPolicies.Add(restart);
         var concurrent = Interlocked.Increment(ref _concurrentApplies);
         MaxConcurrentApplies = Math.Max(MaxConcurrentApplies, concurrent);
         Applied.Add(candidate.PropertyName);
@@ -196,11 +276,34 @@ internal sealed class FakeController : ILatencyAdapterController
 
             if (candidate.PropertyName == RefuseApply)
             {
-                return new LatencyApplyResult(false, "sürücü değeri canlı uygulamadı");
+                return LatencyApplyResult.Refused("sürücü değeri canlı uygulamadı");
+            }
+
+            if (candidate.PropertyName == LinkNotRestored)
+            {
+                return new LatencyApplyResult
+                {
+                    State = LatencyApplyState.LinkNotRestored,
+                    Reason = "Yeniden başlatmadan sonra bağlantı geri gelmedi.",
+                    RestartPerformed = true,
+                };
+            }
+
+            // The registry write happens either way; what a restart decides is whether
+            // the driver is running with it, which is what the live set stands for here.
+            if (candidate.PropertyName == NeedsRestart && !restart.Allowed)
+            {
+                return new LatencyApplyResult
+                {
+                    State = LatencyApplyState.RestartRequired,
+                    Reason = restart.RefusalReason,
+                };
             }
 
             Live.Add(candidate.PropertyName);
-            return new LatencyApplyResult(true);
+            return LatencyApplyResult.Verified(
+                AdapterOperationalState.Empty with { LinkUsable = true },
+                restarted: candidate.PropertyName == NeedsRestart);
         }
         finally
         {
@@ -243,10 +346,10 @@ internal sealed class FakeProbe : ILatencyProbe
     /// <summary>A link where one property really does help, by a repeatable amount.</summary>
     public static FakeProbe Improves(
         FakeController controller,
-        string property = "SelectiveSuspend",
+        string? property = null,
         double median = 26,
         double gain = 5)
-        => new(controller, (live, _) => live.Contains(property)
+        => new(controller, (live, _) => live.Contains(property ?? Fake.DefaultKeyword)
             ? Fake.Measurement(median - gain, jitter: 2.2, p95: median - gain + 6)
             : Fake.Measurement(median, jitter: 3.4, p95: median + 9));
 
@@ -536,7 +639,38 @@ internal sealed class FakeLoadExperiment : ILoadExperiment
 
     public int Calls { get; private set; }
 
+    /// <summary>Stages the fake reports, so the wizard's ordering can be asserted.</summary>
+    public List<LoadedLaneStage> Stages { get; } = [];
+
+    /// <summary>Whether the link is treated as having gone quiet when asked.</summary>
+    public bool QuietLink { get; init; } = true;
+
+    public int QuietWaits { get; private set; }
+
+    /// <summary>Called as each run starts, so a test can cancel mid-experiment.</summary>
+    public Action<LoadExperimentRequest>? OnRun { get; set; }
+
+    /// <summary>
+    /// Where the fake publishes its stages, as the real experiment publishes its waits.
+    /// </summary>
+    /// <remarks>
+    /// Set by a test that needs one ordered sequence covering both the lane's own stages
+    /// and the experiment's, which is what the card actually shows.
+    /// </remarks>
+    public ILatencyStageReporter? Stager { get; set; }
+
     public string Instruction(LoadDirection direction) => "start a transfer";
+
+    public string StopInstruction(LoadDirection direction) => "stop the transfer";
+
+    public Task<bool> WaitForQuietLinkAsync(
+        NetworkFingerprint network,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        QuietWaits++;
+        return Task.FromResult(QuietLink);
+    }
 
     public Task<LoadExperimentResult> RunAsync(
         NetworkFingerprint network,
@@ -544,6 +678,24 @@ internal sealed class FakeLoadExperiment : ILoadExperiment
         CancellationToken cancellationToken = default)
     {
         Calls++;
+        Stages.Add(request.MeasuringStage);
+        WaitingStages.Add(request.WaitingStage);
+        OnRun?.Invoke(request);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        Stager?.Report(new LoadedLaneProgress
+        {
+            Stage = request.WaitingStage,
+            Title = LoadedLaneProgress.TitleFor(request.WaitingStage),
+            Instruction = request.Instruction ?? string.Empty,
+        });
+
+        Stager?.Report(new LoadedLaneProgress
+        {
+            Stage = request.MeasuringStage,
+            Title = LoadedLaneProgress.TitleFor(request.MeasuringStage),
+            Instruction = string.Empty,
+        });
 
         return Task.FromResult(_results.Count switch
         {
@@ -553,24 +705,116 @@ internal sealed class FakeLoadExperiment : ILoadExperiment
         });
     }
 
+    /// <summary>The waiting stages the fake was asked to show, in order.</summary>
+    public List<LoadedLaneStage> WaitingStages { get; } = [];
+
     /// <summary>A successful upload experiment with the given idle and loaded medians.</summary>
+    /// <remarks>
+    /// Saturated by construction: the capacity is set from the observed rate and marked
+    /// measured, because these fixtures exist to exercise the decision logic rather than
+    /// the ramp, and an unsaturated window would be refused before reaching it.
+    /// </remarks>
     public static LoadExperimentResult Upload(
         double idleMedian,
         double loadedMedian,
         double uplinkKbps = 20_000,
-        double loadedLoss = 0) => new()
+        double loadedLoss = 0,
+        double? capacityKbps = null,
+        double? loadedP95 = null) => new()
         {
             Direction = LoadDirection.Upload,
             Idle = Fake.Measurement(idleMedian, load: LatencyLoadState.Idle),
-            Loaded = Fake.Measurement(loadedMedian, load: LatencyLoadState.UplinkLoaded, loss: loadedLoss),
+            Loaded = Fake.Measurement(
+                loadedMedian,
+                p95: loadedP95 ?? loadedMedian + 9,
+                load: LatencyLoadState.UplinkLoaded,
+                loss: loadedLoss),
             ObservedLoad = new NetworkLoadSample
             {
                 State = LatencyLoadState.UplinkLoaded,
                 UplinkKbps = uplinkKbps,
                 DownlinkKbps = 40,
             },
-            Capacity = new LinkCapacityEstimate { UplinkKbps = uplinkKbps },
+            Classification = LinkLoadClassification.Saturated,
+            Capacity = Fake.Capacity(capacityKbps ?? uplinkKbps),
         };
+}
+
+/// <summary>A flow observer whose contents a test writes directly.</summary>
+internal sealed class FakeFlowObserver : IProcessFlowObserver
+{
+    public bool IsRunning { get; set; } = true;
+
+    public string? Unavailable { get; set; }
+
+    public DateTimeOffset? StartedAt { get; set; } = DateTimeOffset.UtcNow.AddMinutes(-1);
+
+    public List<ObservedFlow> Observed { get; } = [];
+
+    /// <summary>Adds a flow the moment the guard first asks, simulating a fresh transfer.</summary>
+    public Func<int, ObservedFlow?>? OnQuery { get; set; }
+
+    public int Queries { get; private set; }
+
+    public Task<bool> StartAsync(CancellationToken cancellationToken = default)
+    {
+        IsRunning = true;
+        return Task.FromResult(true);
+    }
+
+    public IReadOnlyList<ObservedFlow> Flows()
+    {
+        if (OnQuery?.Invoke(Queries++) is { } added)
+        {
+            Observed.Add(added);
+        }
+
+        return [.. Observed];
+    }
+
+    public Task StopAsync()
+    {
+        IsRunning = false;
+        return Task.CompletedTask;
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+/// <summary>Records every stage the run published, so the wizard's order can be asserted.</summary>
+internal sealed class RecordingStages : ILatencyStageReporter
+{
+    public List<LoadedLaneProgress> Reports { get; } = [];
+
+    public IReadOnlyList<LoadedLaneStage> Stages => [.. Reports.Select(report => report.Stage)];
+
+    /// <summary>The stages in order, with consecutive repeats collapsed.</summary>
+    public IReadOnlyList<LoadedLaneStage> Sequence
+    {
+        get
+        {
+            var sequence = new List<LoadedLaneStage>();
+            foreach (var stage in Stages)
+            {
+                if (sequence.Count == 0 || sequence[^1] != stage)
+                {
+                    sequence.Add(stage);
+                }
+            }
+
+            return sequence;
+        }
+    }
+
+    public void Report(LoadedLaneProgress progress) => Reports.Add(progress);
+}
+
+/// <summary>Resolves any name to a running process, so the guard fixtures can proceed.</summary>
+internal sealed class FakeApplicationResolver : IBulkApplicationResolver
+{
+    public BulkApplicationSelection? Selection { get; init; } = Fake.BulkApplication();
+
+    public BulkApplicationSelection? Resolve(string executableName) => Selection;
 }
 
 /// <summary>Counts the settling pauses an experiment asked for.</summary>
@@ -598,8 +842,9 @@ internal sealed class RecordingArm : ILatencyExperimentArm
     private readonly FakeController? _controller;
     private readonly string _property;
 
-    public RecordingArm(FakeController? controller = null, string property = "SelectiveSuspend")
+    public RecordingArm(FakeController? controller = null, string? property = null)
     {
+        property ??= Fake.DefaultKeyword;
         _controller = controller;
         _property = property;
     }
@@ -612,18 +857,18 @@ internal sealed class RecordingArm : ILatencyExperimentArm
 
     public bool BreakLink { get; init; }
 
-    public Task<bool> ApplyAsync(CancellationToken cancellationToken = default)
+    public Task<LatencyArmOutcome> ApplyAsync(CancellationToken cancellationToken = default)
     {
         Events.Add("apply");
 
         if (RefuseApply)
         {
-            return Task.FromResult(false);
+            return Task.FromResult(LatencyArmOutcome.Failed("sürücü değeri canlı olarak uygulamadı"));
         }
 
         Applied = true;
         _controller?.Live.Add(_property);
-        return Task.FromResult(true);
+        return Task.FromResult(LatencyArmOutcome.Success);
     }
 
     public Task RestoreAsync(CancellationToken cancellationToken = default)

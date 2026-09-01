@@ -155,6 +155,18 @@ public sealed record LatencyMeasurement
     /// <summary>What the link was carrying while this was measured.</summary>
     public NetworkLoadSample Load { get; init; } = NetworkLoadSample.Unknown;
 
+    /// <summary>
+    /// The smallest difference this measurement could possibly have resolved, in ms.
+    /// </summary>
+    /// <remarks>
+    /// ICMP replies come back from <c>Ping</c> as whole milliseconds, so a "0.4 ms
+    /// improvement" measured over ICMP is an artefact of rounding, not a result. Carrying
+    /// the resolution with the numbers is what lets the evaluator refuse to accept a gain
+    /// smaller than the instrument can see - and lets the report say what the instrument
+    /// was.
+    /// </remarks>
+    public double ClockResolutionMs { get; init; } = 1.0;
+
     public bool HasRemoteConnectivity => RemoteReplies > 0;
 
     public bool HasAnyConnectivity => HasRemoteConnectivity || GatewayReplies > 0;
@@ -170,7 +182,8 @@ public sealed record LatencyMeasurement
         IReadOnlyList<double> gatewaySamples,
         int gatewayAttempts,
         NetworkLoadSample? load = null,
-        DateTimeOffset? measuredAt = null)
+        DateTimeOffset? measuredAt = null,
+        double clockResolutionMs = 1.0)
     {
         // Sorted for the order statistics; the delay variation needs the samples in the
         // order they arrived, so it is computed from the original list.
@@ -199,6 +212,7 @@ public sealed record LatencyMeasurement
                 ? null
                 : LatencyStatistics.PercentileOfSorted(orderedGateway, 0.95),
             Load = load ?? NetworkLoadSample.Unknown,
+            ClockResolutionMs = clockResolutionMs,
         };
     }
 }
@@ -435,6 +449,16 @@ public sealed record AdapterLatencyCapability
 
     public string InterfaceDescription { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The miniport driver version, as Windows reports it.
+    /// </summary>
+    /// <remarks>
+    /// Part of <see cref="CapabilityFingerprint"/>: a driver update can change what a
+    /// keyword does as well as which values it accepts, so a result verified against the
+    /// old driver is not a result about the new one.
+    /// </remarks>
+    public string DriverVersion { get; init; } = string.Empty;
+
     public NetworkInterfaceType AdapterType { get; init; }
 
     public bool IsPhysical { get; init; }
@@ -465,6 +489,11 @@ public sealed record AdapterLatencyCapability
 
     public int? RssMaxProcessors { get; init; }
 
+    /// <summary>Whether large send offload v2 is actually running, per address family.</summary>
+    public bool? LsoV2IPv4Enabled { get; init; }
+
+    public bool? LsoV2IPv6Enabled { get; init; }
+
     public bool IsEligible => IsPhysical && !IsVirtual && IsUp
         && AdapterType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211;
 
@@ -487,6 +516,7 @@ public sealed record AdapterLatencyCapability
             {
                 AdapterId,
                 InterfaceDescription,
+                DriverVersion,
                 AdapterType.ToString(),
             };
 
@@ -688,6 +718,15 @@ public sealed record LatencyOptimizationResult
 
     /// <summary>What the paired benchmark concluded about each candidate that was tried.</summary>
     public IReadOnlyList<LatencyVerdict> Verdicts { get; init; } = [];
+
+    /// <summary>What the run established about the link's own ceiling, per direction.</summary>
+    public LinkCapacityEstimate Capacity { get; init; } = LinkCapacityEstimate.Unknown;
+
+    /// <summary>Bytes the user's own transfers moved while the run was measuring them.</summary>
+    public long DataUsedBytes { get; init; }
+
+    /// <summary>Other endpoints discovery found, so the user can measure a different one.</summary>
+    public IReadOnlyList<GameEndpointCandidate> Candidates { get; init; } = [];
 
     /// <summary>The observed original-to-final improvement, present only when verified.</summary>
     public LatencyDelta? VerifiedImprovement { get; init; }

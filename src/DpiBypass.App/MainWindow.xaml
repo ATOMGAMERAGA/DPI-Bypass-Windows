@@ -673,6 +673,19 @@
                                           Style="{StaticResource SwitchStyle}"
                                           IsChecked="{Binding LowLatencyMode, Mode=TwoWay}" />
 
+                                <!-- Most NDIS advanced keywords only take effect once the miniport
+                                     restarts, and that drops every connection on it for a few
+                                     seconds. Without this the run reports them as needing a restart
+                                     rather than measuring a value the driver is not using. -->
+                                <CheckBox Content="Ölçüm sırasında bağdaştırıcının yeniden başlatılmasına izin ver"
+                                          Margin="0,12,0,0"
+                                          Style="{StaticResource SwitchStyle}"
+                                          IsChecked="{Binding AllowAdapterRestart, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource HintStyle}"
+                                           Margin="26,4,0,0"
+                                           TextWrapping="Wrap"
+                                           Text="Çoğu NIC ayarı yalnız bağdaştırıcı yeniden başlatıldığında etkinleşir. İzin verilmezse bu ayarlar ölçülmez ve 'yeniden başlatma gerekiyor' olarak raporlanır. Bağlantı birkaç saniye kesilir; uzak masaüstü oturumlarında hiçbir koşulda yapılmaz." />
+
                                 <!-- Hedef seçimi: ne ölçüldüğü, hangi sayının ne anlama geldiğini belirler. -->
                                 <TextBlock Text="Ölçüm hedefi" Style="{StaticResource FieldLabelStyle}" Margin="0,16,0,4" />
                                 <ComboBox ItemsSource="{Binding LatencyTargetOptions}"
@@ -721,6 +734,28 @@
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             Command="{Binding RefreshLatencyProcessesCommand}" />
                                 </Grid>
+
+                                <!-- Discovery can find several endpoints for one application; which of
+                                     them is the session is the user's call, not ours. -->
+                                <StackPanel Margin="0,10,0,0"
+                                            Visibility="{Binding HasLatencyEndpointChoice, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <TextBlock Text="Bulunan uç noktalar (ölçülecek olanı seçin)"
+                                               Style="{StaticResource FieldLabelStyle}"
+                                               Margin="0,0,0,4" />
+                                    <ComboBox MinHeight="34"
+                                              VerticalContentAlignment="Center"
+                                              ItemsSource="{Binding LatencyEndpoints}"
+                                              SelectedItem="{Binding SelectedLatencyEndpoint, Mode=TwoWay}">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Display}" />
+                                                    <TextBlock Text="{Binding Why}" Style="{StaticResource HintStyle}" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                </StackPanel>
 
                                 <TextBlock Text="{Binding LatencyTargetError}"
                                            Style="{StaticResource CaptionStyle}"
@@ -824,10 +859,59 @@
                                             Command="{Binding LatencyRestoreCommand}" />
                                 </WrapPanel>
 
-                                <TextBlock Text="{Binding LatencyLoadInstruction}"
-                                           Style="{StaticResource HintStyle}"
-                                           Margin="0,2,0,0"
-                                           TextWrapping="Wrap" />
+                                <!-- The deep test is a sequence of stages, several of which need the
+                                     user to start or stop a transfer. Each one says so as it runs. -->
+                                <Border Style="{StaticResource StatusPanelStyle}"
+                                        Margin="0,6,0,0"
+                                        Visibility="{Binding IsDeepTestRunning, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0"
+                                                       Text="{Binding LatencyStageTitle}"
+                                                       Style="{StaticResource LatencyHeadlineStyle}"
+                                                       VerticalAlignment="Center" />
+                                            <Button Grid.Column="1"
+                                                    Content="Testi durdur"
+                                                    MinWidth="130"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                                    Command="{Binding LatencyCancelCommand}" />
+                                        </Grid>
+
+                                        <TextBlock Text="{Binding LatencyStageInstruction}"
+                                                   Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,6,0,0"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding LatencyStageRate}"
+                                                   Style="{StaticResource MonospaceStyle}"
+                                                   Margin="0,6,0,0" />
+                                        <TextBlock Text="{Binding LatencyStageRemaining}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,2,0,0" />
+                                        <TextBlock Text="{Binding LatencyStageData}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,2,0,0" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Everything the finished run measured, in one readable block. -->
+                                <TextBlock Text="Ölçüm sonucu"
+                                           Style="{StaticResource FieldLabelStyle}"
+                                           Margin="0,14,0,4" />
+                                <Border Style="{StaticResource StatusPanelStyle}">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding LatencyResultSummary}"
+                                                   Style="{StaticResource MonospaceStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding LatencyDataUsedSummary}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,8,0,0"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
 
                                 <Expander Style="{StaticResource AdvancedExpanderStyle}" Margin="0,14,0,0">
                                     <Expander.Header>
@@ -838,19 +922,39 @@
                                     <StackPanel>
                                         <TextBlock Style="{StaticResource CaptionStyle}"
                                                    TextWrapping="Wrap"
-                                                   Text="Ev bağlantılarında en büyük gecikme artışı genelde boştaki ping değil, siz bir şey gönderirken oluşan kuyruklanmadır. Bu seçenek, adını yazdığınız uygulamanın giden trafiğini ölçülen kapasitenin güvenli bir yüzdesinde sınırlamak için Windows QoS ilkesi oluşturur. İlke yalnız 'DPIBypass.Latency.' ön ekiyle oluşturulur; sizin veya yöneticinizin mevcut QoS ilkelerine dokunulmaz. Kuyruklanma ölçülerek azalmazsa ilke silinir." />
+                                                   Text="Ev bağlantılarında en büyük gecikme artışı genelde boştaki ping değil, siz bir şey gönderirken oluşan kuyruklanmadır. Bu seçenek, seçtiğiniz uygulamanın giden trafiğini sınırlamak için Windows QoS ilkesi oluşturur. Sınır varsayılan bir yüzde değildir: birkaç aday sınır uygulanıp ölçülür, en iyi sonucu veren ayrı bir doğrulama turunda tekrar sınanır. Windows QoS ilkesi yalnız ilke oluşturulduktan sonra açılan bağlantılara uygulandığı için test sırasında aktarımı durdurup yeniden başlatmanız istenir. İlke yalnız 'DPIBypass.Latency.' ön ekiyle oluşturulur; sizin veya yöneticinizin mevcut QoS ilkelerine dokunulmaz. Kuyruklanma ölçülerek azalmazsa ilke silinir. İndirme yönündeki kuyruk operatörün ekipmanında oluşur; buradan uygulanan bir sınır ona ulaşamaz ve bu durumda çözüm yönlendiricide SQM/CAKE/FQ-CoDel olduğu bildirilir." />
 
                                         <CheckBox Content="Yük altında derin testte gönderim sınırını dene"
                                                   Margin="0,14,0,0"
                                                   Style="{StaticResource SwitchStyle}"
                                                   IsChecked="{Binding TrafficGuardEnabled, Mode=TwoWay}" />
 
-                                        <TextBlock Text="Sınırlanacak uygulama (örnek: steam.exe)"
+                                        <TextBlock Text="Hedef"
                                                    Style="{StaticResource FieldLabelStyle}"
                                                    Margin="0,14,0,4" />
-                                        <TextBox MinHeight="34"
-                                                 VerticalContentAlignment="Center"
-                                                 Text="{Binding TrafficGuardApplication, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                        <ComboBox MinHeight="34"
+                                                  MinWidth="300"
+                                                  HorizontalAlignment="Left"
+                                                  VerticalContentAlignment="Center"
+                                                  ItemsSource="{Binding GuardModeOptions}"
+                                                  SelectedItem="{Binding SelectedGuardMode, Mode=TwoWay}" />
+                                        <TextBlock Text="{Binding SelectedGuardMode.Description}"
+                                                   Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,6,0,0"
+                                                   TextWrapping="Wrap" />
+
+                                        <TextBlock Text="Sınırlanacak uygulama — oyun değil, toplu aktarım yapan program (örnek: steam.exe)"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,14,0,4" />
+                                        <ComboBox MinHeight="34"
+                                                  IsEditable="True"
+                                                  VerticalContentAlignment="Center"
+                                                  ItemsSource="{Binding LatencyProcesses}"
+                                                  Text="{Binding TrafficGuardApplication, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                        <TextBlock Style="{StaticResource HintStyle}"
+                                                   Margin="0,4,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Text="Seçilen program çalışıyor olmalıdır: ilke, çalışan sürecin görüntü adı ya da doğrulanmış tam yolu ile eşleştirilir. Oyununuz asla sınırlanmaz." />
 
                                         <TextBlock Text="Gönderim hızınız (Mbit/s, biliyorsanız)"
                                                    Style="{StaticResource FieldLabelStyle}"
@@ -860,6 +964,15 @@
                                                  HorizontalAlignment="Left"
                                                  VerticalContentAlignment="Center"
                                                  Text="{Binding ManualUplinkMbps, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+
+                                        <TextBlock Text="İndirme hızınız (Mbit/s, biliyorsanız)"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,14,0,4" />
+                                        <TextBox MinHeight="34"
+                                                 MaxWidth="160"
+                                                 HorizontalAlignment="Left"
+                                                 VerticalContentAlignment="Center"
+                                                 Text="{Binding ManualDownlinkMbps, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
 
                                         <TextBlock Text="{Binding LatencyGuardSummary}"
                                                    Style="{StaticResource MonospaceStyle}"

@@ -5,8 +5,11 @@ denetlenebilir kaydıdır. Her satır resmî bir kaynağa dayanır. Blog yazıla
 forum "gaming tweak" listeleri ve kaynağı belirsiz registry paketleri kaynak
 olarak kullanılmamıştır.
 
-Erişim tarihi: **30 Ağustos 2026**. Sürümler değiştiğinde bu belge de
-güncellenmelidir; kod, burada yazılmayan hiçbir ayarı değiştirmez.
+Erişim tarihi: **30 Ağustos 2026**; V2 kaynakları **31 Ağustos 2026** tarihinde
+yeniden açılıp doğrulandı. Sürümler değiştiğinde bu belge de güncellenmelidir;
+kod, burada yazılmayan hiçbir ayarı değiştirmez.
+
+V2'de değişen kararlar `LATENCY-AUDIT-V2.md` içinde bulgu bazında işaretlidir.
 
 ---
 
@@ -28,6 +31,15 @@ güncellenmelidir; kod, burada yazılmayan hiçbir ayarı değiştirmez.
 | R12 | <https://learn.microsoft.com/windows-server/networking/technologies/qos/qos-policy-works> | QoS Inspection Module + Pacer.sys akış mekanizması |
 | R13 | <https://www.rfc-editor.org/rfc/rfc2681> | IPPM Round-trip Delay, Type-P, kayıp/gecikme eşiği |
 | R14 | <https://www.rfc-editor.org/rfc/rfc7679> | IPPM One-way Delay, kalibrasyon ve raporlama gereksinimleri |
+| R15 | <https://learn.microsoft.com/powershell/module/netadapter/set-netadapteradvancedproperty> | `-NoRestart` ve gelişmiş ayarların ne zaman etkinleştiği |
+| R16 | <https://learn.microsoft.com/powershell/module/netadapter/restart-netadapter> | Kontrollü bağdaştırıcı yeniden başlatma |
+| R17 | <https://learn.microsoft.com/powershell/module/netadapter/get-netadapterrsc> | RSC'nin *operational* durumu (keyword değil) |
+| R18 | <https://learn.microsoft.com/powershell/module/netadapter/get-netadapterlso> | LSO v2'nin operational durumu |
+| R19 | <https://learn.microsoft.com/windows/win32/api/iphlpapi/nf-iphlpapi-getpertcpconnectionestats> | Var olan TCP bağlantısının RTT'si (`TcpConnectionEstatsPath`) |
+| R20 | <https://learn.microsoft.com/windows/win32/api/iphlpapi/nf-iphlpapi-setpertcpconnectionestats> | EStats toplamayı açma; yönetici gereksinimi |
+| R21 | <https://learn.microsoft.com/windows-server/networking/technologies/qos/qos-policy-architecture> | QoS Inspection Module ↔ Pacer.sys mimarisi |
+| R22 | <https://reqrypt.org/windivert-doc.html> | WinDivert 2.2 `WINDIVERT_LAYER_FLOW`, `SNIFF｜RECV_ONLY`, kısıtlar |
+| R23 | <https://learn.microsoft.com/windows/win32/winmsg/getsystemmetrics> | `SM_REMOTESESSION` — uzak oturum tespiti |
 
 ---
 
@@ -137,7 +149,14 @@ R4: `*EEE` — *"A value that describes whether the device should enable IEEE
   "Enerji Verimli Ethernet" gibi yerelleştirilmiş görünen adlara göre rastgele
   property değiştirilmez.
 
-### 3.5 `*LsoV2IPv4` / `*LsoV2IPv6` → 0 — **yalnız yük altındaki lane'de**
+### 3.5 `*LsoV2IPv4` / `*LsoV2IPv6` → 0 — **tanımlı, ama hiçbir tur denemiyor**
+
+> **V2 düzeltmesi.** Bu başlık önce "yalnız yük altındaki lane'de" diyordu; bu
+> doğru değildi. `IncludeThroughputSensitive` yalnız boştaki turda ve `false`
+> olarak veriliyor, yük altındaki lane ise NIC anahtarı değil hat ve QoS ölçüyor.
+> Yani bu iki anahtar **hiçbir zaman aday olmuyor.** Katalogdan çıkarılmadılar
+> çünkü çıkarmak, eski bir snapshot'taki LSO değerinin geri yüklenmesini de
+> engellerdi.
 
 R6: LSO *"allows an application to pass a large block of data to the NIC, and
 the NIC breaks the data into packets"*. Ayrıca R6: LSO kapatmadan tüm checksum
@@ -149,25 +168,64 @@ hesabı kapatılamaz — yani LSO kapatmanın CPU maliyeti gerçektir.
 - Yalnız toplu gönderim ölçülen lane'de, TCP kapsamıyla ve CPU koruması ile
   aday olur.
 
-### 3.6 `SelectiveSuspend` → Disabled — **uygulandı, mekanizması dürüst yazıldı**
+### 3.6 `SelectiveSuspend` — **V2'de aday olmaktan çıkarıldı**
 
 R5: NDIS boşta kalan bağdaştırıcıyı askıya alır; `*SSIdleTimeout` varsayılanı
 **5 saniyedir** ve NDIS bu süreyi %30 toleransla ölçer.
 
-- Yani etkisi **sürekli trafikte değil**, uzun boşluktan sonraki ilk paketdedir.
-  Bu, açıklama metnine aynen yazıldı; ölçüm sistemi de bunu göremeyeceği için
-  aday çoğu makinede reddedilir — bu doğru sonuçtur.
-- **Maliyet:** güç. `Set-NetAdapterPowerManagement -SelectiveSuspend` (R8)
-  kullanılır; bu yol miniport'u yeniden başlatmaz.
+Etkisi **sürekli trafikte değil**, uzun boşluktan sonraki ilk pakettedir. V1 bunu
+açıklama metnine yazıyor ama yine de sürekli probe gönderen bir steady-state
+deneyiyle ölçüyordu — yani deneyin göremeyeceği bir şeyi ölçmek için dakikalarca
+çalışıyor, sonra "kazanç yok" diyordu. Bu doğru sonucun pahalı yoluydu.
 
-### 3.7 `D0PacketCoalescing` → Disabled — **uygulandı, sınırı yazıldı**
+**V2:** aday listesinden çıkarıldı (`AdapterInterventionCatalog.WritablePowerProperties`
+artık boş). Ayrı bir *first-packet* deneyi yazılmadı; görev tanımı bu iki
+seçenekten birini istiyordu ve çıkarmak, ölçülmemiş bir ayarı "optimize edildi"
+diye raporlamama kuralıyla daha uyumludur. Eski snapshot'lar için
+`RestorablePowerProperties` içinde kalır.
+
+### 3.7 `D0PacketCoalescing` — **V2'de aday olmaktan çıkarıldı**
 
 R8: *"This reduces the number of receive interrupts by coalescing random
 broadcast or multi-cast packets."*
 
-- Yani **yayın/çoklu yayın** paketlerini birleştirir; tekil (unicast) oyun
-  trafiğini doğrudan etkilemesi beklenmez. Açıklama metni bunu söyler.
-- **Maliyet:** güç. Aday olarak kalır ama beklentisi düşüktür; ölçüm karar verir.
+**Yayın/çoklu yayın** paketlerini birleştirir; tekil (unicast) oyun trafiğine
+doğrudan bir mekanizması yoktur. V1 bunu açıklama metninde söylüyor ama yine de
+genel bir oyun RTT müdahalesi olarak sunuyordu.
+
+**V2:** aday listesinden çıkarıldı, `RestorablePowerProperties` içinde kaldı.
+
+### 3.7.1 Bir ayarın gerçekten etkinleşmesi (R15, R16, R17, R18)
+
+R15, `-NoRestart` için açık: *"Indicates that the cmdlet does not restart the
+network adapter after completing the operation. **Many advanced properties
+require restarting the network adapter before the new settings take effect.**"*
+
+V1, değeri `-NoRestart` ile yazıp aynı registry değerini geri okuyor ve bunu
+"canlı uygulandı" sayıyordu. Bu, sürücünün yeni değerle çalıştığını **kanıtlamaz**;
+sonraki A/B ölçümü eski davranışı iki kez ölçüp farkı yeni değere yazar.
+
+**V2 zinciri** (`WindowsLatencyAdapterController`):
+
+1. `-NoRestart` ile yaz, registry'den geri oku. Eşleşmiyorsa → `Refused`.
+2. Mümkünse **operational** durumu sor: `Get-NetAdapterRsc` (R17),
+   `Get-NetAdapterRss` (R7), `Get-NetAdapterLso` (R18). İstenen durumu
+   bildiriyorsa → `OperationallyVerified`, yeniden başlatma **gerekmez**.
+3. Operational sorgusu olmayan anahtarlar (`*InterruptModeration`, `*EEE`) için
+   tek dürüst yol miniport'u yeniden başlatmaktır. Kullanıcı onayı yoksa →
+   `RestartRequired` ve **ölçüm yapılmaz.**
+4. Onay varsa `Restart-NetAdapter` (R16); sonra aynı GUID, link up, IPv4 adresi
+   ve varsayılan rota beklenir. Gelmezse → `LinkNotRestored` ve geri alma.
+5. Yeniden başlatmadan sonra arabirim indeksi, ilk atlama ve erişim noktası
+   karşılaştırılır, hedefe erişim doğrulanır. Değişmişse tur iptal edilir.
+
+Yalnız `OperationallyVerified` ve `AdapterRestarted` ölçüme izin verir
+(`LatencyApplyResult.IsEffective`). **Uzak oturumda** (R23, `SM_REMOTESESSION`)
+yeniden başlatma hiçbir koşulda yapılmaz: oturumu taşıyan bağdaştırıcıyı yeniden
+başlatmak oturumu bitirir.
+
+**Risk:** birkaç saniyelik bağlantı kesintisi. **Geri alma:** snapshot yazmadan
+önce diske atomik olarak kaydedilir; başarısız her yolda özgün değer geri yazılır.
 
 ### 3.8 `DeviceSleepOnDisconnect` — **aday olmaktan çıkarıldı**
 
@@ -251,18 +309,56 @@ policy does not persist after restart."*).
   sınıflandırmadığı bu uçtan görülemez; yalnız yük altındaki RTT'nin gerçekten
   düşmesi kazançtır.
 
-### 4.3 Windows üzerinde doğrulanması gerekenler
+### 4.3 Windows üzerinde doğrulanması gerekenler — **NOT RUN**
 
 Bu depoda Windows çalıştıran bir test ortamı yoktur; QoS davranışı **kod
 tarafından varsayılmaz, ölçülür.** Bu mimari sayesinde platform beklendiği gibi
 davranmazsa ilke kendiliğinden silinir ve hiçbir yanlış iddia üretilmez. Yine de
-gerçek Windows 10/11 üzerinde şunlar doğrulanmalıdır:
+gerçek Windows 10/11 üzerinde şunlar doğrulanmalıdır ve **bu sürümde hiçbiri
+çalıştırılmamıştır**:
 
 1. `New-NetQosPolicy -AppPathNameMatchCondition <exe> -ThrottleRateActionBitsPerSecond N -PolicyStore ActiveStore`
    ilkesinin gerçekten gönderim hızını sınırlaması.
-2. `Get-NetQosPolicy -PolicyStore ActiveStore` ile geri okunabilmesi.
+2. `Get-NetQosPolicy -PolicyStore ActiveStore` ile her koşul ve eylemin geri
+   okunabilmesi (V2 read-back tam alan karşılaştırması yapar).
 3. `Remove-NetQosPolicy` sonrası sınırın kalkması.
-4. Domain'e katılmış bir makinede GPO ilkesiyle birlikte davranış.
+4. **Tek ve çoklu TCP akışında** throttle'ın uygulama toplamına mı, akış başına
+   mı davrandığı. R10 ve R21 bunu söylemiyor; cevap ölçümle bulunmalıdır.
+5. İlke oluşturulmadan **önce** açılmış bir bağlantının ilkeye tabi olup
+   olmadığı. R21'e göre eşleşme transport uç noktası oluşurken yapılır, yani
+   olmaması beklenir; V2 kodu bunu zaten varsaymayıp yeni akış bekler.
+6. Domain'e katılmış bir makinede GPO ilkesiyle birlikte davranış.
+
+`scripts/integration/latency-windows.ps1` bu soruların ilk üçünü ve NIC
+tarafını kaydeder; 4 ve 5 gerçek bir aktarım gerektirdiği için harness'in
+kendi raporunda `notRun` olarak yazılır. **Bu sürümde harness çalıştırılmamıştır.**
+
+### 4.3.1 V2'de kapatılan üç QoS boşluğu
+
+- **İsimle doğrulama.** V1, `Get-NetQosPolicy | Where Name -eq $name` sonucunu
+  "oluşturuldu" sayıyordu. Bu yalnız adı kanıtlar. V2, `AppPathName`,
+  `IPProtocol`, `IPDstPrefix`, `IPDstPort`, `ThrottleRateAction`, `DSCPValue`,
+  `Precedence`, `PolicyStore` ve ad alanı sahipliğini **tek tek** karşılaştırır
+  (`WindowsQosController.DescribeMismatch`).
+- **Eski akış üzerinde ölçüm.** R21: eşleşme transport uç noktası oluşturulurken
+  yapılır. V1 ilkeyi çalışan aktarımın *altında* oluşturup aynı aktarımı
+  ölçüyordu — yani sınırsız akışı ölçüp farkı ilkeye yazıyordu. V2 aktarımı
+  durdurtur, ilkeyi oluşturur, **yeni bir akış** görene kadar bekler (WinDivert
+  FLOW, R22) ve ancak sonra ölçer. Akış gelmezse sonuç üretilmez
+  (`TrafficGuardStatus.NeedsNewConnection`).
+- **Sınırın gerçekten uygulandığı.** Ölçülen bayt hızı sınırla tutarlı değilse
+  (`RateHonoured`) o tur, o sınır hakkında veri sayılmaz.
+
+### 4.3.2 Sabit %85 yerine ölçülen cap (V2)
+
+V1 `ThrottleShare = 0.85` sabitini kullanıyordu. Kuyruğun nerede olduğu, ne kadar
+derin olduğu ve boşalma hızının ne kadar pay gerektirdiği operatör ekipmanının
+özelliğidir; buradan bilinemez. V2 birkaç cap uygular ve ölçer
+(`TrafficGuardCapPlanner`), sıralamayı **yük altındaki p95 → p99 → kuyruklanma
+farkı → jitter → kayıp → korunan throughput** önceliğiyle yapar, ve seçilen cap'i
+**aramada kullanılmayan ayrı bir doğrulama turunda** tekrar sınar. İki mod
+vardır: *Dengeli* (throughput tabanı %70) ve *En düşük gecikme* (taban %40, kayıp
+kullanıcıya gösterilir).
 
 ### 4.4 M-Lab / NDT7 — **entegre edilmedi**
 
@@ -276,14 +372,69 @@ eklenmemiştir.
 hiçbir bayt göndermez; kullanıcı zaten yapacağı indirmeyi/gönderimi başlatır,
 uygulama bağdaştırıcı sayaçlarından hattın gerçekten dolduğunu görür ve o
 pencerede RTT ölçer. Trafik gelmezse cevap "ölçülmedi"dir, tahmin değil.
-Kapasiteyi kullanıcı biliyorsa elle girebilir (`ManualUplinkMbps`).
+Kapasiteyi kullanıcı biliyorsa elle girebilir (`ManualUplinkMbps`,
+`ManualDownlinkMbps`).
+
+**V2 ekler:** "yük altında" artık sabit bir eşik ya da görülen en yüksek hızın
+çeyreği değildir. Kapasite, **yükselip düzleşen bir rampadan** öğrenilir
+(`LinkCapacityRamp`: art arda üç pencere birbirine %15 içinde ve tepe değerin
+%90'ının üstünde), yön başına güven ve zaman damgasıyla saklanır, ve doygunluk
+**ölçülmüş** kapasitenin %85'idir. Kapasite güveni düşükse sonuç "ölçülmedi"dir;
+"bufferbloat yok" değildir. Otomatik yük sağlayıcısı **hiç eklenmediği** için
+metered/mobil bağlantılarda kapatılacak bir otomatik trafik de yoktur.
 
 ### 4.5 WinDivert tabanlı shaper — **eklenmedi**
 
 Windows QoS'un yetersiz kaldığı kanıtlanmadan kullanıcı alanında yeni bir paket
 zamanlayıcı eklenmemiştir. Görev tanımındaki ship kriterleri (per-flow adalet,
 ACK koruması, crash'te trafiğin kesilmemesi, ölçülmüş kazanç) gerçek Windows
-entegrasyon testi olmadan karşılanamaz.
+entegrasyon testi olmadan karşılanamaz. V2'de bu karar değişmedi: QoS'un
+yetersizliği hâlâ ölçülmemiştir, dolayısıyla shaper'ın gerekçesi de yoktur.
+
+### 4.6 WinDivert FLOW katmanı — **yalnız pasif keşif için eklendi (R22)**
+
+Windows'un UDP tablosu bir soketin **yalnız yerel** adresini ve portunu bildirir;
+UDP soketinin bildirecek bir uzak ucu yoktur. V1 bu yüzden UDP oynayan oyunların
+sunucusunu hiç bulamıyor ve kullanıcıdan adresi elle yazmasını istiyordu.
+
+R22'nin FLOW katmanı bu soruyu tam olarak cevaplar:
+`WINDIVERT_EVENT_FLOW_ESTABLISHED` / `..._DELETED`, süreç kimliği ve tam beşli ile,
+TCP ve UDP için. Katman `SNIFF | RECV_ONLY` ile açılmak **zorundadır** — yani
+handle hiçbir şeyi engelleyemez, değiştiremez, enjekte edemez.
+
+- **Paket yolu etkilenmez.** FLOW katmanı paket değil olay taşır; handle yalnız
+  derin test sürerken açıktır ve bitince kapanır.
+- **DPI motoruyla çakışma yok.** Farklı katman, farklı öncelik (100; motor 1000
+  ve 1001'de, Network katmanında).
+- **Belgelenmiş kısıt:** *"the WINDIVERT_LAYER_FLOW layer cannot capture flow
+  events that occurred before the handle was opened."* Bu gizlenmez: gözlem
+  başladıktan sonra yeni akış görülmediyse kullanıcıya oyuna yeniden bağlanması
+  söylenir.
+- **Gizlilik:** akışlar yalnız bir keşif turu boyunca bellekte tutulur, diske
+  yazılmaz; günlüğe IP veya süreç yolu düşmez.
+
+### 4.7 Gerçek uygulama RTT'si — iki araç (R19, R20)
+
+Rastgele bir oyun sunucusuna saniyede birkaç TCP el sıkışması açmak, o sunucunun
+anti-abuse kurallarının tam olarak durdurmak için var olduğu trafik şeklidir; ve
+el sıkışma süresi zaten oyunun oturum içi RTT'si değildir.
+
+- **TCP EStats (R19, R20).** `SetPerTcpConnectionEStats` ile
+  `TcpConnectionEstatsPath` açılır, `GetPerTcpConnectionEStats` yığının
+  **zaten ölçtüğü** `SmoothedRtt` değerini verir. Hiç paket gönderilmez.
+  R20 iki kısıtı açıkça yazar: çağrı yönetici gerektirir, ve *"the caller should
+  check the EnableCollection field … and if it is not TRUE, then the caller
+  should ignore the data"* — kod ikisini de uygular ve açılamazsa **hiç örnek
+  üretmez**, uydurma bir yedeğe düşmez. IPv4 ile sınırlıdır.
+- **Minecraft Java durum sorgusu.** Server List Ping alışverişinin sonundaki
+  Ping (0x01) paketi sunucu tarafından aynen yankılanır; bu, oyunun kendi
+  çokoyunculu listesinde gördüğü sayının ta kendisidir. Tek bağlantı üzerinden
+  ölçülür, yani sunucu bir durum bağlantısı görür. **Genelleştirilmedi:** başka
+  oyunların el sıkışmaları belgesizdir ve uydurulmuş bir tanesi "ping gibi görünen
+  ama ping olmayan" bir sayı üretir.
+
+Ölçülemeyen protokoller için sonuç **rota referansı** olarak etiketlenir
+(`LatencyEndpoint.RouteReferenceOnly`) ve oyunun ping'i olarak sunulmaz.
 
 ---
 
@@ -294,6 +445,12 @@ entegrasyon testi olmadan karşılanamaz.
 - Günlüklerde genel IP, SSID, BSSID ve tam işlem yolu yazılmaz.
 - Hiçbir ölçüm sonucu dışarı gönderilmez; tüm dosyalar
   `C:\ProgramData\DPI Bypass\` altında yereldir.
+- **V2:** WinDivert FLOW katmanından okunan akışlar (süreç kimliği, yerel/uzak
+  IP ve port) yalnız çalışan bir keşif turu boyunca bellekte tutulur; hiçbir
+  dosyaya yazılmaz ve günlüğe düşmez. Sabitlenen uç nokta ayarlarda
+  `adres:port` olarak saklanır çünkü kullanıcının bilinçli seçimidir.
+- Traffic Guard'ın eşleştirdiği uygulama yolu yalnız QoS ilkesinin kendi
+  eşleşme koşuluna girer; profil dosyasına yazılmaz.
 
 ---
 

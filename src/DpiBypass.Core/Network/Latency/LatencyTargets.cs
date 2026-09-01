@@ -13,6 +13,20 @@ public enum LatencyProtocol
     Icmp = 0,
     Tcp = 1,
     Udp = 2,
+
+    /// <summary>
+    /// The stack's own estimate for a connection the application already has open.
+    /// </summary>
+    /// <remarks>
+    /// Not a transport of its own but a different instrument on the same one: instead of
+    /// opening handshakes, IP Helper is asked what TCP has already measured on the
+    /// connection the game is using. Kept as a distinct value because its numbers must
+    /// never be pooled with handshake times.
+    /// </remarks>
+    TcpEStats = 3,
+
+    /// <summary>The Minecraft Java Server List Ping round trip, which is a real app RTT.</summary>
+    MinecraftStatus = 4,
 }
 
 /// <summary>What the user asked to measure.</summary>
@@ -57,6 +71,16 @@ public sealed record LatencyTargetSpec
     public string? ProcessName { get; init; }
 
     /// <summary>
+    /// The endpoint the user pinned out of the discovered candidates, if they pinned one.
+    /// </summary>
+    /// <remarks>
+    /// Held as "address:port" rather than as a resolved endpoint so it survives a restart
+    /// of the discovery pass. When it no longer appears among the candidates the run says
+    /// so instead of quietly measuring something else.
+    /// </remarks>
+    public string? PreferredEndpoint { get; init; }
+
+    /// <summary>
     /// A stable, non-identifying key for the profile cache.
     /// </summary>
     /// <remarks>
@@ -72,7 +96,8 @@ public sealed record LatencyTargetSpec
                 (Host ?? "-").ToLowerInvariant(),
                 Port?.ToString(CultureInfo.InvariantCulture) ?? "-",
                 Protocol.ToString(),
-                (ProcessName ?? "-").ToLowerInvariant());
+                (ProcessName ?? "-").ToLowerInvariant(),
+                (PreferredEndpoint ?? "-").ToLowerInvariant());
 
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(seed)))[..12].ToLowerInvariant();
         }
@@ -204,8 +229,21 @@ public static class LatencyProtocolExtensions
     {
         LatencyProtocol.Tcp => "TCP",
         LatencyProtocol.Udp => "UDP",
+        LatencyProtocol.TcpEStats => "TCP",
+        LatencyProtocol.MinecraftStatus => "Minecraft",
         _ => "ICMP",
     };
+
+    /// <summary>
+    /// Whether this instrument measures the application's own round trip.
+    /// </summary>
+    /// <remarks>
+    /// A TCP handshake to a game server is not the game's ping, and an echo request to
+    /// its address is the route rather than the session. Only the two instruments that
+    /// time something the application itself would have timed answer true here.
+    /// </remarks>
+    public static bool IsApplicationRoundTrip(this LatencyProtocol protocol)
+        => protocol is LatencyProtocol.TcpEStats or LatencyProtocol.MinecraftStatus;
 }
 
 /// <summary>
@@ -242,6 +280,18 @@ public sealed record LatencyEndpoint
     /// <summary>The transport the application really uses, when it differs.</summary>
     public LatencyProtocol? ApplicationProtocol { get; init; }
 
+    /// <summary>
+    /// The local end of the connection to sample, for <see cref="LatencyProtocol.TcpEStats"/>.
+    /// </summary>
+    /// <remarks>
+    /// Extended statistics are keyed on the full four-tuple, so the connection has to be
+    /// named exactly. Held only for the life of the experiment and never persisted.
+    /// </remarks>
+    public IPEndPoint? LocalEndpoint { get; init; }
+
+    /// <summary>The host name the target was resolved from, when there was one.</summary>
+    public string Host { get; init; } = string.Empty;
+
     /// <summary>Type-P identity: two measurements are only comparable if these match.</summary>
     public string Key => $"{Address}|{Protocol}|{Port?.ToString(CultureInfo.InvariantCulture) ?? "-"}";
 
@@ -249,8 +299,13 @@ public sealed record LatencyEndpoint
     {
         LatencyProtocol.Tcp => Port is { } port ? $"TCP/{port}" : "TCP",
         LatencyProtocol.Udp => Port is { } udpPort ? $"UDP/{udpPort}" : "UDP",
+        LatencyProtocol.TcpEStats => Port is { } estatsPort ? $"TCP/{estatsPort} (EStats)" : "TCP (EStats)",
+        LatencyProtocol.MinecraftStatus => Port is { } mcPort ? $"Minecraft/{mcPort}" : "Minecraft",
         _ => "ICMP",
     };
+
+    /// <summary>Whether the number this endpoint produces is the application's own RTT.</summary>
+    public bool MeasuresApplicationRoundTrip => Protocol.IsApplicationRoundTrip();
 
     public static LatencyEndpoint Icmp(IPAddress address, string label, LatencyTargetKind kind = LatencyTargetKind.Reference) => new()
     {
@@ -271,6 +326,19 @@ public sealed record LatencyTargetResolution
 
     /// <summary>Set when nothing could be measured; <see cref="Endpoints"/> is then empty.</summary>
     public string? Failure { get; init; }
+
+    /// <summary>
+    /// Everything discovery found, best first, when there was more than one answer.
+    /// </summary>
+    /// <remarks>
+    /// The run measures <see cref="Endpoints"/>[0]; this exists so the card can show the
+    /// alternatives and let the user pin a different one, rather than the app deciding
+    /// which of a game's several endpoints is the session.
+    /// </remarks>
+    public IReadOnlyList<GameEndpointCandidate> Candidates { get; init; } = [];
+
+    /// <summary>Whether the user should be asked which of the candidates to measure.</summary>
+    public bool NeedsSelection => Candidates.Count > 1;
 
     public bool Succeeded => Endpoints.Count > 0;
 
@@ -308,16 +376,25 @@ public sealed class LatencyTargetResolver : ILatencyTargetResolver
     public const string ReferenceLabel = "Genel internet referansı — oyun sunucusu değildir";
 
     private readonly IProcessEndpointProvider _endpoints;
+    private readonly IProcessFlowObserver? _flows;
+    private readonly Func<string, IReadOnlySet<uint>> _processIds;
     private readonly Func<string, CancellationToken, Task<IPAddress[]>> _resolve;
+    private readonly Func<DateTimeOffset> _now;
     private readonly Action<string>? _log;
 
     public LatencyTargetResolver(
         IProcessEndpointProvider? endpoints = null,
         Func<string, CancellationToken, Task<IPAddress[]>>? resolve = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        IProcessFlowObserver? flows = null,
+        Func<string, IReadOnlySet<uint>>? processIds = null,
+        Func<DateTimeOffset>? now = null)
     {
         _endpoints = endpoints ?? new WindowsProcessEndpointProvider(log);
         _resolve = resolve ?? ((host, token) => System.Net.Dns.GetHostAddressesAsync(host, token));
+        _flows = flows;
+        _processIds = processIds ?? ProcessIdsFor;
+        _now = now ?? (() => DateTimeOffset.UtcNow);
         _log = log;
     }
 
@@ -404,6 +481,31 @@ public sealed class LatencyTargetResolver : ILatencyTargetResolver
             };
         }
 
+        // Minecraft Java answers a documented status exchange whose Ping/Pong pair is a
+        // real application round trip, so where the port says that is what this is, it is
+        // measured properly rather than approximated by a handshake time.
+        if (spec.Protocol == LatencyProtocol.Tcp && spec.Port == MinecraftStatusProbe.DefaultPort)
+        {
+            return new LatencyTargetResolution
+            {
+                Endpoints =
+                [
+                    new LatencyEndpoint
+                    {
+                        Address = address,
+                        Port = spec.Port,
+                        Protocol = LatencyProtocol.MinecraftStatus,
+                        Kind = LatencyTargetKind.Custom,
+                        Label = label,
+                        ApplicationProtocol = LatencyProtocol.Tcp,
+                        Host = spec.Host,
+                    },
+                ],
+                Notice = "Minecraft Java durum sorgusunun Ping/Pong süresi ölçülüyor; "
+                    + "bu, sunucunun kendi yanıt süresidir.",
+            };
+        }
+
         return new LatencyTargetResolution
         {
             Endpoints =
@@ -415,11 +517,24 @@ public sealed class LatencyTargetResolver : ILatencyTargetResolver
                     Protocol = spec.Protocol,
                     Kind = LatencyTargetKind.Custom,
                     Label = label,
+                    Host = spec.Host ?? string.Empty,
                 },
             ],
+            Notice = spec.Protocol == LatencyProtocol.Tcp
+                ? "TCP el sıkışma süresi ölçülüyor; bu, uygulamanın oturum içi gidiş-dönüş süresi değildir."
+                : null,
         };
     }
 
+    /// <summary>
+    /// Finds what a running application is talking to, UDP included.
+    /// </summary>
+    /// <remarks>
+    /// Two sources, in order of how much they prove. The flow observer watched the flows
+    /// being created and knows the full five-tuple for UDP as well as TCP; the connection
+    /// table only knows about TCP but sees connections that predate the observer. Both are
+    /// ranked together and the user is told which is which.
+    /// </remarks>
     private LatencyTargetResolution ResolveApplication(LatencyTargetSpec spec)
     {
         if (string.IsNullOrWhiteSpace(spec.ProcessName))
@@ -443,43 +558,103 @@ public sealed class LatencyTargetResolver : ILatencyTargetResolver
             return LatencyTargetResolution.Failed($"'{spec.ProcessName}' çalışmıyor.");
         }
 
-        // Established TCP connections to a routable address: the control or game
-        // channel of anything that uses TCP at all.
-        var remote = endpoints.TcpRemoteEndpoints
-            .GroupBy(endpoint => endpoint.Address, EqualityComparer<IPAddress>.Default)
-            .OrderByDescending(group => group.Count())
-            .ThenBy(group => group.Key.ToString(), StringComparer.Ordinal)
-            .FirstOrDefault();
+        var pids = _processIds(spec.ProcessName);
+        var flows = _flows?.Flows() ?? [];
+        var candidates = GameEndpointDiscovery.Rank(
+            spec.ProcessName,
+            pids,
+            flows,
+            endpoints.TcpConnections,
+            _now());
 
-        if (remote is null)
+        if (candidates.Count == 0)
         {
-            return endpoints.HasUdpSockets
-                ? new LatencyTargetResolution
-                {
-                    Failure = $"'{spec.ProcessName}' yalnız UDP soketi kullanıyor. Windows, UDP soketinin uzak "
-                        + "adresini bildirmez; sunucu adresini 'Özel hedef' alanına yazın.",
-                }
-                : LatencyTargetResolution.Failed($"'{spec.ProcessName}' için etkin bir uzak bağlantı bulunamadı.");
+            return LatencyTargetResolution.Failed(DescribeNothingFound(spec.ProcessName, endpoints));
         }
 
-        var port = remote.First().Port;
+        var chosen = Pin(candidates, spec.PreferredEndpoint);
+        var notices = new List<string>();
+
+        if (spec.PreferredEndpoint is { Length: > 0 } pinned
+            && !string.Equals(EndpointKey(chosen.Endpoint), pinned, StringComparison.OrdinalIgnoreCase))
+        {
+            notices.Add($"Sabitlenen uç nokta ({pinned}) artık görünmüyor; en olası aday ölçülüyor.");
+        }
+
+        if (candidates.Count > 1)
+        {
+            notices.Add($"{candidates.Count} olası uç nokta bulundu; ölçülen: {chosen.Display} ({chosen.Why}).");
+        }
+
+        if (chosen.Endpoint.RouteReferenceOnly)
+        {
+            notices.Add("UDP oturumunun kendi gidiş-dönüş süresi dışarıdan ölçülemez; "
+                + "aynı adrese ICMP ile yalnızca rota referansı ölçülür.");
+        }
+
+        if (_flows is { IsRunning: false } observer && observer.Unavailable is { Length: > 0 } reason)
+        {
+            notices.Add($"Akış gözlemi çalışmıyor ({reason}); UDP uç noktaları bulunamayabilir.");
+        }
+        else if (flows.Count == 0 && _flows is not null)
+        {
+            notices.Add("Akış gözlemi açıldıktan sonra yeni bağlantı görülmedi. UDP oyunun sunucusunu "
+                + "bulabilmek için oyuna yeniden bağlanın.");
+        }
 
         return new LatencyTargetResolution
         {
-            Endpoints =
-            [
-                new LatencyEndpoint
-                {
-                    Address = remote.Key,
-                    Port = port,
-                    Protocol = LatencyProtocol.Tcp,
-                    Kind = LatencyTargetKind.Application,
-                    Label = $"{spec.ProcessName} → {remote.Key}:{port}",
-                },
-            ],
-            Notice = endpoints.HasUdpSockets
-                ? "Uygulama ayrıca UDP kullanıyor; ölçülen değer TCP kanalının gidiş-dönüş süresidir."
-                : null,
+            Endpoints = [chosen.Endpoint],
+            Candidates = candidates,
+            Notice = notices.Count == 0 ? null : string.Join(" ", notices),
         };
+    }
+
+    /// <summary>The candidate the user pinned, or the best-ranked one.</summary>
+    private static GameEndpointCandidate Pin(
+        IReadOnlyList<GameEndpointCandidate> candidates,
+        string? preferred)
+        => preferred is { Length: > 0 }
+            ? candidates.FirstOrDefault(candidate =>
+                string.Equals(EndpointKey(candidate.Endpoint), preferred, StringComparison.OrdinalIgnoreCase))
+                ?? candidates[0]
+            : candidates[0];
+
+    /// <summary>The stable form a pinned choice is stored as.</summary>
+    public static string EndpointKey(LatencyEndpoint endpoint)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        return $"{endpoint.Address}:{endpoint.Port?.ToString(CultureInfo.InvariantCulture) ?? "0"}";
+    }
+
+    private static string DescribeNothingFound(string processName, ProcessEndpointSet endpoints)
+        => endpoints.HasUdpSockets
+            ? $"'{processName}' yalnız UDP soketi kullanıyor ve akış gözlemi başladıktan sonra yeni bir "
+                + "bağlantı kurmadı. Oyuna yeniden bağlanın ya da sunucu adresini 'Özel hedef' alanına yazın."
+            : $"'{processName}' için etkin bir uzak bağlantı bulunamadı.";
+
+    private static IReadOnlySet<uint> ProcessIdsFor(string processName)
+    {
+        try
+        {
+            var trimmed = processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                ? processName[..^4]
+                : processName;
+
+            var pids = new HashSet<uint>();
+            foreach (var process in System.Diagnostics.Process.GetProcessesByName(trimmed))
+            {
+                using (process)
+                {
+                    pids.Add((uint)process.Id);
+                }
+            }
+
+            return pids;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or PlatformNotSupportedException)
+        {
+            return new HashSet<uint>();
+        }
     }
 }

@@ -85,6 +85,12 @@ public sealed record LatencyStatusView
 
     public LatencyDelta? Improvement { get; init; }
 
+    /// <summary>What the run established about the link's own ceiling, per direction.</summary>
+    public LinkCapacityEstimate Capacity { get; init; } = LinkCapacityEstimate.Unknown;
+
+    /// <summary>Bytes of the user's own traffic the run watched go past.</summary>
+    public long DataUsedBytes { get; init; }
+
     public bool IsBusy => State is LatencyModeState.Measuring
         or LatencyModeState.QuickTesting
         or LatencyModeState.DeepTesting;
@@ -119,6 +125,8 @@ public sealed record LatencyStatusView
             Notices = result.Notices,
             TrafficGuard = result.TrafficGuard,
             Improvement = result.VerifiedImprovement,
+            Capacity = result.Capacity,
+            DataUsedBytes = result.DataUsedBytes,
         };
     }
 
@@ -264,6 +272,16 @@ public sealed record LatencyStatusView
                     ["jitterMs"] = Round(Improvement.JitterMs),
                     ["lossPercent"] = Round(Improvement.LossPercent),
                 },
+            ["capacity"] = new JsonObject
+            {
+                ["uplinkKbps"] = Round(Capacity.UplinkKbps),
+                ["downlinkKbps"] = Round(Capacity.DownlinkKbps),
+                ["uplinkConfidence"] = Capacity.UplinkConfidence.ToString(),
+                ["downlinkConfidence"] = Capacity.DownlinkConfidence.ToString(),
+                ["uplinkObservedAt"] = Capacity.UplinkObservedAt?.ToString("O", CultureInfo.InvariantCulture),
+                ["downlinkObservedAt"] = Capacity.DownlinkObservedAt?.ToString("O", CultureInfo.InvariantCulture),
+            },
+            ["dataUsedBytes"] = DataUsedBytes,
             ["trafficGuard"] = TrafficGuard is null
                 ? null
                 : new JsonObject
@@ -273,8 +291,15 @@ public sealed record LatencyStatusView
                     ["policyName"] = TrafficGuard.PolicyName,
                     ["throttleBitsPerSecond"] = TrafficGuard.ThrottleBitsPerSecond,
                     ["application"] = TrafficGuard.ThrottledApplication,
+                    ["policyMatch"] = TrafficGuard.PolicyMatch,
+                    ["mode"] = TrafficGuard.Mode.ToString(),
                     ["uploadQueueingBeforeMs"] = Round(TrafficGuard.UploadQueueingBeforeMs),
                     ["uploadQueueingAfterMs"] = Round(TrafficGuard.UploadQueueingAfterMs),
+                    ["loadedP95BeforeMs"] = Round(TrafficGuard.LoadedP95BeforeMs),
+                    ["loadedP95AfterMs"] = Round(TrafficGuard.LoadedP95AfterMs),
+                    ["retainedThroughputShare"] = Round(TrafficGuard.RetainedThroughputShare),
+                    ["trials"] = new JsonArray(
+                        [.. TrafficGuard.Trials.Select(entry => (JsonNode)JsonValue.Create(entry)!)]),
                     ["conflicts"] = new JsonArray(
                         [.. TrafficGuard.Conflicts.Select(entry => (JsonNode)JsonValue.Create(entry)!)]),
                 },
@@ -300,6 +325,10 @@ public sealed record LatencyStatusView
             ["p99Ms"] = measurement.RemoteReplies >= 100 ? Round(measurement.P99RttMs) : null,
             ["jitterMs"] = Round(measurement.JitterMs),
             ["packetLossPercent"] = Round(measurement.PacketLossPercent),
+
+            // Reported so a consumer can tell a real difference from a rounding artefact:
+            // nothing below this is something the instrument could see.
+            ["clockResolutionMs"] = Round(measurement.ClockResolutionMs),
             ["gatewayMedianMs"] = Round(measurement.GatewayMedianRttMs),
             ["loadState"] = measurement.Load.State.ToString(),
             ["uplinkKbps"] = Round(measurement.Load.UplinkKbps),

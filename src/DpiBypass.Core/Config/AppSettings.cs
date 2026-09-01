@@ -65,6 +65,31 @@ public sealed record LatencyPreferences
     /// <summary>Uplink capacity in Mbit/s when the user knows it better than we can measure.</summary>
     public double? ManualUplinkMbps { get; set; }
 
+    /// <summary>Downlink capacity in Mbit/s, for the same reason.</summary>
+    public double? ManualDownlinkMbps { get; set; }
+
+    /// <summary>
+    /// Whether the user agreed to controlled adapter restarts during a measurement.
+    /// </summary>
+    /// <remarks>
+    /// Off by default and never inferred. Most NDIS advanced keywords only take effect
+    /// once the miniport restarts, which drops every connection on it for a few seconds -
+    /// a fair trade to measure a setting, and never something to do unasked.
+    /// </remarks>
+    public bool AllowAdapterRestart { get; set; }
+
+    /// <summary>
+    /// Which trade-off the send-rate cap search optimises for.
+    /// </summary>
+    /// <remarks>
+    /// Balanced keeps as much of the transfer as it can while emptying the queue; lowest
+    /// latency accepts a slower transfer, and shows the user what that cost.
+    /// </remarks>
+    public TrafficGuardMode GuardMode { get; set; } = TrafficGuardMode.Balanced;
+
+    /// <summary>The discovered endpoint the user pinned, as "address:port".</summary>
+    public string? PinnedEndpoint { get; set; }
+
     public LatencyTargetSpec ToSpec() => TargetKind switch
     {
         LatencyTargetKind.Custom when !string.IsNullOrWhiteSpace(TargetHost) => new LatencyTargetSpec
@@ -76,15 +101,30 @@ public sealed record LatencyPreferences
         },
         LatencyTargetKind.Application when !string.IsNullOrWhiteSpace(TargetProcess) => new LatencyTargetSpec
         {
+            PreferredEndpoint = PinnedEndpoint,
             Kind = LatencyTargetKind.Application,
             ProcessName = TargetProcess,
         },
         _ => LatencyTargetSpec.Reference,
     };
 
-    public LinkCapacityEstimate ToCapacity() => ManualUplinkMbps is { } mbps and > 0
-        ? new LinkCapacityEstimate { UplinkKbps = mbps * 1000, UserSupplied = true }
-        : LinkCapacityEstimate.Unknown;
+    public LinkCapacityEstimate ToCapacity() => LinkCapacityEstimate.FromUser(
+        ManualUplinkMbps is { } uplink and > 0 ? uplink * 1000 : null,
+        ManualDownlinkMbps is { } downlink and > 0 ? downlink * 1000 : null);
+
+    /// <summary>
+    /// What a run may do to a live adapter, given this machine as well as this setting.
+    /// </summary>
+    /// <remarks>
+    /// The remote-session half is not a preference. Restarting the adapter carrying a
+    /// Remote Desktop session takes the session away, so it is refused however the
+    /// checkbox is set.
+    /// </remarks>
+    public AdapterRestartPolicy ToRestartPolicy() => new()
+    {
+        UserConsented = AllowAdapterRestart,
+        RemoteSession = DpiBypass.Core.Interop.SessionKind.IsRemoteSession(),
+    };
 }
 
 public sealed record AppSettings : IHotspotLegacyState
@@ -359,6 +399,12 @@ public sealed class ConfigStore
         settings.Latency.TargetHost = Trim(settings.Latency.TargetHost);
         settings.Latency.TargetProcess = Trim(settings.Latency.TargetProcess);
         settings.Latency.TrafficGuardApplication = Trim(settings.Latency.TrafficGuardApplication);
+        settings.Latency.PinnedEndpoint = Trim(settings.Latency.PinnedEndpoint);
+
+        if (!Enum.IsDefined(settings.Latency.GuardMode))
+        {
+            settings.Latency.GuardMode = TrafficGuardMode.Balanced;
+        }
 
         if (settings.Latency.TargetPort is < 1 or > 65535)
         {
@@ -368,6 +414,11 @@ public sealed class ConfigStore
         if (settings.Latency.ManualUplinkMbps is <= 0 or > 100_000 or double.NaN)
         {
             settings.Latency.ManualUplinkMbps = null;
+        }
+
+        if (settings.Latency.ManualDownlinkMbps is <= 0 or > 100_000 or double.NaN)
+        {
+            settings.Latency.ManualDownlinkMbps = null;
         }
 
         settings.ExtraDomains = CleanDomains(settings.ExtraDomains);

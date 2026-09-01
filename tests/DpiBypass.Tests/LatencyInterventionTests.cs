@@ -190,7 +190,7 @@ public sealed class AdapterInterventionCatalogTests
     [Fact]
     public void PowerCostingChangesAreNotOfferedOnBatteryUnlessAllowed()
     {
-        var adapter = Fake.Capability(Fake.Network("battery"), "SelectiveSuspend");
+        var adapter = Fake.Capability(Fake.Network("battery"), AdapterInterventionCatalog.EeeKeyword);
 
         Assert.Empty(adapter.BuildSafeCandidates(new LatencyCandidateContext
         {
@@ -257,20 +257,103 @@ public sealed class AdapterInterventionCatalogTests
     }
 
     /// <summary>
-    /// A setting the driver may only honour after a miniport restart is written with no
-    /// restart and read straight back, so it is abandoned rather than applied silently.
+    /// A driver that refuses the write outright ends the candidate with nothing applied.
     /// </summary>
     [Fact]
-    public async Task ASettingThatNeedsARestartIsAbandonedWhenTheDriverDoesNotTakeItLive()
+    public async Task ASettingTheDriverRefusesIsAbandonedWithNothingLeftBehind()
     {
-        var controller = new FakeController { RefuseApply = "SelectiveSuspend" };
+        var controller = new FakeController { RefuseApply = Fake.DefaultKeyword };
         var scenario = new LatencyScenario(controller, FakeProbe.Improves(controller, gain: 8));
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("refused"));
+
+        Assert.Empty(controller.Live);
+        Assert.Null(scenario.Snapshots.Value);
+        Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+    }
+
+    /// <summary>
+    /// A value the registry accepted but the driver is not running with is not a change.
+    /// </summary>
+    /// <remarks>
+    /// This is the regression the whole apply path was rebuilt around. Microsoft's own
+    /// reference for <c>Set-NetAdapterAdvancedProperty</c> says "Many advanced properties
+    /// require restarting the network adapter before the new settings take effect", so a
+    /// keyword read back from the registry proves storage and nothing else. Without
+    /// restart consent such a candidate must be measured by nobody and kept by nobody.
+    /// </remarks>
+    [Fact]
+    public async Task ARegistryWriteTheDriverHasNotPickedUpIsNeverMeasuredOrKept()
+    {
+        var controller = new FakeController { NeedsRestart = Fake.DefaultKeyword };
+        var probe = FakeProbe.Improves(controller, gain: 8);
+        var scenario = new LatencyScenario(controller, probe);
 
         var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("restart-needed"));
 
         Assert.Empty(controller.Live);
         Assert.Null(scenario.Snapshots.Value);
         Assert.Equal(LatencyOptimizationStatus.NoGain, result.Status);
+
+        // Refused for the right reason, and the reason says so rather than blaming the
+        // driver for declining a value it actually stored.
+        var verdict = Assert.Single(result.Verdicts);
+        Assert.Contains("yeniden başlat", verdict.Reason, StringComparison.OrdinalIgnoreCase);
+
+        // And the default policy really is "do not restart the user's adapter".
+        Assert.All(controller.RestartPolicies, policy => Assert.False(policy.Allowed));
+    }
+
+    /// <summary>A remote session never gets its own adapter restarted out from under it.</summary>
+    [Fact]
+    public void ARemoteSessionRefusesAdapterRestartsEvenWithConsent()
+    {
+        var consented = new AdapterRestartPolicy { UserConsented = true, RemoteSession = true };
+
+        Assert.False(consented.Allowed);
+        Assert.Contains("Uzak oturum", consented.RefusalReason, StringComparison.Ordinal);
+        Assert.True(new AdapterRestartPolicy { UserConsented = true }.Allowed);
+        Assert.False(AdapterRestartPolicy.Never.Allowed);
+    }
+
+    /// <summary>
+    /// The two power keywords an earlier build wrote are not candidates any more.
+    /// </summary>
+    /// <remarks>
+    /// Selective suspend acts on the first packet after an idle threshold and D0 packet
+    /// coalescing acts on broadcast and multicast receives; a steady-state probe series
+    /// produces neither situation, so measuring them would spend minutes to learn nothing.
+    /// They stay restorable so an older snapshot can still be undone.
+    /// </remarks>
+    [Fact]
+    public void ThePowerKeywordsAsteadyStateExperimentCannotSeeAreNoLongerOffered()
+    {
+        Assert.Empty(AdapterInterventionCatalog.WritablePowerProperties);
+
+        Assert.Contains(
+            AdapterInterventionCatalog.SelectiveSuspendProperty,
+            AdapterInterventionCatalog.RestorablePowerProperties);
+        Assert.Contains(
+            AdapterInterventionCatalog.D0PacketCoalescingProperty,
+            AdapterInterventionCatalog.RestorablePowerProperties);
+
+        Assert.False(AdapterInterventionCatalog
+            .DescriptorFor(AdapterInterventionCatalog.SelectiveSuspendProperty).AffectsSteadyStateRtt);
+        Assert.False(AdapterInterventionCatalog
+            .DescriptorFor(AdapterInterventionCatalog.D0PacketCoalescingProperty).AffectsSteadyStateRtt);
+
+        var adapter = Fake.Capability(Fake.Network("power")) with
+        {
+            PowerManagement = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                [AdapterInterventionCatalog.SelectiveSuspendProperty] = 2,
+                [AdapterInterventionCatalog.D0PacketCoalescingProperty] = 2,
+            },
+        };
+
+        Assert.DoesNotContain(
+            adapter.BuildSafeCandidates(),
+            candidate => candidate.Kind == LatencySettingKind.PowerManagement);
     }
 
     private static AdapterAdvancedPropertyCapability Property(
@@ -384,16 +467,16 @@ public sealed class LatencyTargetTests
     }
 
     /// <summary>
-    /// Windows does not report the remote address of a UDP socket, so a UDP-only game
-    /// cannot have its server discovered. Saying so is the only honest answer.
+    /// A UDP-only game whose flows nobody watched still cannot be found, and the answer
+    /// says what to do about it rather than pointing at the wrong address.
     /// </summary>
     [Fact]
-    public async Task AUdpOnlyApplicationIsToldToSupplyItsServerAddress()
+    public async Task AUdpOnlyApplicationWithNoObservedFlowsIsToldWhatToDo()
     {
-        var resolver = new LatencyTargetResolver(new StubEndpoints
-        {
-            Set = new ProcessEndpointSet { ProcessFound = true, HasUdpSockets = true },
-        });
+        var resolver = new LatencyTargetResolver(
+            new StubEndpoints { Set = new ProcessEndpointSet { ProcessFound = true, HasUdpSockets = true } },
+            processIds: _ => new HashSet<uint> { 4242 },
+            flows: new FakeFlowObserver());
 
         var resolution = await resolver.ResolveAsync(new LatencyTargetSpec
         {
@@ -403,25 +486,28 @@ public sealed class LatencyTargetTests
 
         Assert.False(resolution.Succeeded);
         Assert.Contains("UDP", resolution.Failure, StringComparison.Ordinal);
-        Assert.Contains("Özel hedef", resolution.Failure, StringComparison.Ordinal);
+        Assert.Contains("yeniden bağlanın", resolution.Failure, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The whole point of the flow observer: a UDP game's server is now discoverable.
+    /// </summary>
+    /// <remarks>
+    /// The endpoint that comes back is honest about what it can measure. UDP has no round
+    /// trip anyone outside the protocol can time, so it is probed over ICMP to the same
+    /// address and marked a route reference - which is useful, and is never presented as
+    /// the game's own ping.
+    /// </remarks>
     [Fact]
-    public async Task AnApplicationsBusiestRemoteEndpointBecomesTheTarget()
+    public async Task AUdpGameServerIsDiscoveredFromTheObservedFlows()
     {
-        var resolver = new LatencyTargetResolver(new StubEndpoints
-        {
-            Set = new ProcessEndpointSet
-            {
-                ProcessFound = true,
-                TcpRemoteEndpoints =
-                [
-                    new IPEndPoint(IPAddress.Parse("203.0.113.9"), 25565),
-                    new IPEndPoint(IPAddress.Parse("203.0.113.9"), 25565),
-                    new IPEndPoint(IPAddress.Parse("198.51.100.4"), 443),
-                ],
-            },
-        });
+        var observer = new FakeFlowObserver();
+        observer.Observed.Add(Fake.Flow(remote: "203.0.113.9", remotePort: 27015, protocol: LatencyProtocol.Udp));
+
+        var resolver = new LatencyTargetResolver(
+            new StubEndpoints { Set = new ProcessEndpointSet { ProcessFound = true, HasUdpSockets = true } },
+            processIds: _ => new HashSet<uint> { 4242 },
+            flows: observer);
 
         var resolution = await resolver.ResolveAsync(new LatencyTargetSpec
         {
@@ -432,10 +518,89 @@ public sealed class LatencyTargetTests
         var endpoint = Assert.Single(resolution.Endpoints);
 
         Assert.Equal("203.0.113.9", endpoint.Address.ToString());
-        Assert.Equal(25565, endpoint.Port);
-        Assert.Equal(LatencyProtocol.Tcp, endpoint.Protocol);
-        Assert.False(endpoint.RouteReferenceOnly);
+        Assert.Equal(27015, endpoint.Port);
+        Assert.Equal(LatencyProtocol.Icmp, endpoint.Protocol);
+        Assert.Equal(LatencyProtocol.Udp, endpoint.ApplicationProtocol);
+        Assert.True(endpoint.RouteReferenceOnly);
+        Assert.False(endpoint.MeasuresApplicationRoundTrip);
+        Assert.Contains("rota referansı", resolution.Notice, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A live UDP session outranks a TCP endpoint that merely has more connections.
+    /// </summary>
+    /// <remarks>
+    /// The old rule - most TCP connections wins - would pick the content delivery host
+    /// every time on any game with a launcher.
+    /// </remarks>
+    [Fact]
+    public async Task AnOpenSessionOutranksTheBusiestAddress()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var observer = new FakeFlowObserver();
+        observer.Observed.Add(Fake.Flow(
+            remote: "203.0.113.9", remotePort: 27015, protocol: LatencyProtocol.Udp, at: now.AddMinutes(-5)));
+
+        var resolver = new LatencyTargetResolver(
+            new StubEndpoints
+            {
+                Set = new ProcessEndpointSet
+                {
+                    ProcessFound = true,
+                    TcpConnections =
+                    [
+                        Connection("198.51.100.4", 443),
+                        Connection("198.51.100.4", 443),
+                        Connection("198.51.100.4", 443),
+                    ],
+                },
+            },
+            processIds: _ => new HashSet<uint> { 4242 },
+            flows: observer,
+            now: () => now);
+
+        var resolution = await resolver.ResolveAsync(new LatencyTargetSpec
+        {
+            Kind = LatencyTargetKind.Application,
+            ProcessName = "game",
+        });
+
+        Assert.Equal("203.0.113.9", resolution.Endpoints[0].Address.ToString());
+        Assert.True(resolution.NeedsSelection);
+        Assert.Equal(2, resolution.Candidates.Count);
+        Assert.Contains("olası uç nokta", resolution.Notice, StringComparison.Ordinal);
+    }
+
+    /// <summary>An endpoint the user pinned is measured even when it is not the top pick.</summary>
+    [Fact]
+    public async Task APinnedEndpointIsHonouredOverTheRanking()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var observer = new FakeFlowObserver();
+        observer.Observed.Add(Fake.Flow(
+            remote: "203.0.113.9", remotePort: 27015, protocol: LatencyProtocol.Udp, at: now.AddMinutes(-5)));
+        observer.Observed.Add(Fake.Flow(
+            remote: "198.51.100.4", remotePort: 443, protocol: LatencyProtocol.Tcp, at: now.AddSeconds(-3)));
+
+        var resolver = new LatencyTargetResolver(
+            new StubEndpoints { Set = new ProcessEndpointSet { ProcessFound = true } },
+            processIds: _ => new HashSet<uint> { 4242 },
+            flows: observer,
+            now: () => now);
+
+        var resolution = await resolver.ResolveAsync(new LatencyTargetSpec
+        {
+            Kind = LatencyTargetKind.Application,
+            ProcessName = "game",
+            PreferredEndpoint = "198.51.100.4:443",
+        });
+
+        Assert.Equal("198.51.100.4", resolution.Endpoints[0].Address.ToString());
+    }
+
+    private static ProcessTcpConnection Connection(string remote, int port) => new(
+        new IPEndPoint(IPAddress.Parse("192.168.1.20"), 51000),
+        new IPEndPoint(IPAddress.Parse(remote), port));
 
     private sealed class StubEndpoints : IProcessEndpointProvider
     {
