@@ -470,8 +470,25 @@ Uygulanan davranış:
 
 Bu, bu belgedeki en önemli satırdır.
 
-**Bu sürümde hiçbir gerçek Windows ölçümü yapılmamıştır.** Denetim ve derleme
-Linux üzerinde yapılmıştır (§0.1). Aşağıdakilerin hiçbiri doğrulanmamıştır:
+**Bu sürümde hiçbir gerçek Windows *ölçümü* yapılmamıştır.** Denetim ve yerel
+derleme Linux üzerinde yapılmıştır (§0.1).
+
+Dürüst olmak için ayrım: GitHub Actions **gerçek bir Windows makinesinde** çalışır
+ve şunları doğrular — `windows-latest`, .NET 10, çalışma 79 (`4d6a04f`):
+
+- Core, App ve test projelerinin Windows'ta derlenmesi;
+- **720 birim testinin Windows üzerinde geçmesi** (Linux'ta geçip Windows'ta
+  düşen bir test bu turda gerçekten yakalandı ve düzeltildi);
+- `install.tests.ps1`, `xaml-resources.tests.ps1` ve yeni
+  `latency-harness.tests.ps1`'in Windows PowerShell 7 ile geçmesi;
+- self-contained publish, payload bütünlüğü ve **WinDivert64.sys imza doğrulaması**;
+- **gerçek WPF penceresinin açılması** (`--ui-selftest`) — yani bu turda değişen
+  XAML gerçekten render ediliyor;
+- Inno Setup ile kurulumun derlenmesi ve paketlenmesi.
+
+Bunlar gerçek Windows doğrulamalarıdır ve küçümsenmemelidir. Ama CI **hiçbir NIC
+ayarına dokunmaz, hiçbir QoS ilkesi oluşturmaz, hiçbir hattı doldurmaz.**
+Aşağıdakilerin hiçbiri doğrulanmamıştır:
 
 - Bir sürücünün `-NoRestart` sonrası hangi anahtarı canlı aldığı.
 - `Get-NetAdapterRsc/Rss/Lso` operational değerlerinin gerçek raporlaması.
@@ -548,7 +565,8 @@ içindedir, `Remove-NetQosPolicy` yalnız o adı alır. Bu kurallar CI'da
 | `pwsh -File scripts/tests/xaml-resources.tests.ps1` | ✅ 88 anahtar, 361 referans |
 | `pwsh -File scripts/tests/latency-harness.tests.ps1` | ✅ 12 test (yeni) |
 | `dotnet format --verify-no-changes` | ⚠️ yalnız taban durumdaki 94 hata (`ControlCommands.cs`); bu değişikliğin dokunduğu dosyaların hepsi temiz |
-| Gerçek Windows entegrasyonu | ❌ **NOT RUN** — §5 |
+| GitHub Actions (Windows) — derleme, testler, publish, imza, WPF penceresi, kurulum | ✅ çalışma [79](https://github.com/ATOMGAMERAGA/DPI-Bypass-Windows/actions/runs/33452738739) |
+| Gerçek NIC / QoS / hat ölçümü | ❌ **NOT RUN** — §5 |
 
 ---
 
