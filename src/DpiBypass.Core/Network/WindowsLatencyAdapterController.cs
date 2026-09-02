@@ -191,7 +191,8 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
         }
 
         var reason = dto.Reason;
-        if (state == LatencyApplyState.RestartRequired && !restart.Allowed)
+        var blockedByPermission = state == LatencyApplyState.RestartRequired && !restart.Allowed;
+        if (blockedByPermission)
         {
             reason = restart.RefusalReason ?? reason;
         }
@@ -201,6 +202,10 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
             State = state,
             Reason = reason,
             RestartPerformed = dto.Restarted,
+
+            // The one obstacle the user can lift themselves, flagged so nothing downstream
+            // records this candidate as having been measured and found wanting.
+            BlockedByPermission = blockedByPermission,
             Operational = ToOperationalState(dto.Operational),
         };
     }

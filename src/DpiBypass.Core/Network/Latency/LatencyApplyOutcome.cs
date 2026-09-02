@@ -155,6 +155,28 @@ public sealed record LatencyApplyResult
     public bool IsEffective => State is LatencyApplyState.OperationallyVerified
         or LatencyApplyState.AdapterRestarted;
 
+    /// <summary>
+    /// Whether this apply was blocked by a permission the user can still grant.
+    /// </summary>
+    /// <remarks>
+    /// Carried explicitly rather than inferred from the refusal text, because it decides
+    /// whether the outcome may be cached. A candidate held back for want of consent is
+    /// unmeasured, and has to be offered again the moment consent arrives.
+    /// </remarks>
+    public bool BlockedByPermission { get; init; }
+
+    /// <summary>How an unsuccessful apply should be classified for the cache and the card.</summary>
+    public LatencyOutcomeCause Cause => (State, BlockedByPermission) switch
+    {
+        (LatencyApplyState.OperationallyVerified or LatencyApplyState.AdapterRestarted, _)
+            => LatencyOutcomeCause.Confirmed,
+        (_, true) => LatencyOutcomeCause.AwaitingPermission,
+        (LatencyApplyState.RestartRequired, _) => LatencyOutcomeCause.AwaitingPermission,
+        (LatencyApplyState.Refused, _) => LatencyOutcomeCause.Unsupported,
+        (LatencyApplyState.LinkNotRestored, _) => LatencyOutcomeCause.ConnectivityLost,
+        _ => LatencyOutcomeCause.NotApplied,
+    };
+
     /// <summary>Whether the value is sitting in the registry unused and must be undone.</summary>
     public bool NeedsRollback => State is LatencyApplyState.RegistryWritten
         or LatencyApplyState.RestartRequired

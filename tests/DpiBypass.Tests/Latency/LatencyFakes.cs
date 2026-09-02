@@ -297,6 +297,10 @@ internal sealed class FakeController : ILatencyAdapterController
                 {
                     State = LatencyApplyState.RestartRequired,
                     Reason = restart.RefusalReason,
+
+                    // The real controller flags this, and it is what stops the outcome
+                    // being cached as a measured failure.
+                    BlockedByPermission = true,
                 };
             }
 
@@ -572,6 +576,9 @@ internal sealed class FakeQosController : IQosController
 
     public string? RefuseCreateReason { get; init; }
 
+    /// <summary>Makes the sweep throw, as a policy store that refuses a delete would.</summary>
+    public string? RefuseRemoveAllReason { get; init; }
+
     public List<string> Removed { get; } = [];
 
     public Task<QosCapability> DetectAsync(CancellationToken cancellationToken = default)
@@ -619,6 +626,11 @@ internal sealed class FakeQosController : IQosController
 
     public async Task<int> RemoveAllOwnedAsync(CancellationToken cancellationToken = default)
     {
+        if (RefuseRemoveAllReason is not null)
+        {
+            throw new InvalidOperationException(RefuseRemoveAllReason);
+        }
+
         var owned = Policies.Keys.ToArray();
         foreach (var name in owned)
         {

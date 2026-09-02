@@ -1,6 +1,7 @@
 <Window x:Class="DpiBypass.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:infra="clr-namespace:DpiBypass.App.Infrastructure"
         Title="DPI Bypass"
         Width="1080"
         Height="780"
@@ -17,6 +18,11 @@
 
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <infra:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibilityConverter" />
+        <infra:EmptyStringToCollapsedConverter x:Key="EmptyToCollapsedConverter" />
+        <infra:SeverityToBrushConverter x:Key="SeverityBrushConverter" />
+        <infra:HotspotCheckStateToBrushConverter x:Key="CheckStateBrushConverter" />
+        <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
     </Window.Resources>
 
     <!-- Shell: a compact top bar (brand, live protection status, primary action),
@@ -652,218 +658,174 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- ===== Ölçümlü düşük gecikme ===== -->
+                        <!-- ===== Ping düşürme =====
+                             Ordered as a person works: what it is, what to measure, one
+                             button, the numbers, one sentence about them, and only then
+                             the technical surface. Everything a developer needs and a
+                             user does not lives under "Ölçüm ayrıntıları". -->
                         <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                    <TextBlock Text="Ping düşürme"
-                                               Style="{StaticResource SectionTitleStyle}"
-                                               Margin="0,0,10,0"
-                                               VerticalAlignment="Center" />
-                                    <Border Style="{StaticResource BetaBadgeStyle}">
-                                        <TextBlock Text="BETA" Style="{StaticResource BetaBadgeTextStyle}" />
-                                    </Border>
-                                </StackPanel>
 
-                                <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Text="Her ayar tek tek, dönüşümlü A/B turlarıyla ölçülür: ayarsız ölç, ayarı uygula, bekle, tekrar ölç, geri al — ve sıra her turda değişir. Bir ayar yalnızca median, p95 veya jitter kazancı turlar boyunca tekrarlandığında ve yeniden örneklenen güven aralığı sıfırı dışladığında kalır. Kabul edilen ayarların tamamı en sonda birlikte yeniden ölçülür. Kazanç yoksa, kayıp arttıysa ya da bağlantı bozulduysa özgün değerler anında geri yüklenir." />
+                                <!-- 1. Title, and the two states that are not the same
+                                     thing: the switch the user set, and whether a
+                                     verified setting is in place right now. -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
 
-                                <CheckBox Content="Ping düşürmeyi etkinleştir"
-                                          Margin="0,16,0,0"
-                                          Style="{StaticResource SwitchStyle}"
-                                          IsChecked="{Binding LowLatencyMode, Mode=TwoWay}" />
+                                    <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                        <TextBlock Text="Ping düşürme"
+                                                   Style="{StaticResource SectionTitleStyle}"
+                                                   Margin="0,0,10,0"
+                                                   VerticalAlignment="Center" />
+                                        <Border Style="{StaticResource BetaBadgeStyle}" VerticalAlignment="Center">
+                                            <TextBlock Text="BETA" Style="{StaticResource BetaBadgeTextStyle}" />
+                                        </Border>
+                                    </StackPanel>
 
-                                <!-- Most NDIS advanced keywords only take effect once the miniport
-                                     restarts, and that drops every connection on it for a few
-                                     seconds. Without this the run reports them as needing a restart
-                                     rather than measuring a value the driver is not using. -->
-                                <CheckBox Content="Ölçüm sırasında bağdaştırıcının yeniden başlatılmasına izin ver"
-                                          Margin="0,12,0,0"
-                                          Style="{StaticResource SwitchStyle}"
-                                          IsChecked="{Binding AllowAdapterRestart, Mode=TwoWay}" />
-                                <TextBlock Style="{StaticResource HintStyle}"
-                                           Margin="26,4,0,0"
+                                    <CheckBox Grid.Column="1"
+                                              Content="Etkin"
+                                              Style="{StaticResource SwitchStyle}"
+                                              VerticalAlignment="Center"
+                                              AutomationProperties.Name="Ping düşürmeyi etkinleştir"
+                                              IsChecked="{Binding LowLatencyMode, Mode=TwoWay}" />
+                                </Grid>
+
+                                <TextBlock Text="{Binding LatencyHeadline}"
+                                           Style="{StaticResource LatencyHeadlineStyle}"
+                                           Margin="0,10,0,0"
                                            TextWrapping="Wrap"
-                                           Text="Çoğu NIC ayarı yalnız bağdaştırıcı yeniden başlatıldığında etkinleşir. İzin verilmezse bu ayarlar ölçülmez ve 'yeniden başlatma gerekiyor' olarak raporlanır. Bağlantı birkaç saniye kesilir; uzak masaüstü oturumlarında hiçbir koşulda yapılmaz." />
+                                           Foreground="{Binding LatencyStatusSeverity, Converter={StaticResource SeverityBrushConverter}}" />
 
-                                <!-- Hedef seçimi: ne ölçüldüğü, hangi sayının ne anlama geldiğini belirler. -->
-                                <TextBlock Text="Ölçüm hedefi" Style="{StaticResource FieldLabelStyle}" Margin="0,16,0,4" />
+                                <!-- 2. Target. Only the inputs the choice actually needs
+                                     are shown, and the error sits under the field it is
+                                     about rather than at the bottom of the card. -->
+                                <TextBlock Text="Ne ölçülsün?"
+                                           Style="{StaticResource FieldLabelStyle}"
+                                           Margin="0,16,0,4" />
                                 <ComboBox ItemsSource="{Binding LatencyTargetOptions}"
                                           SelectedItem="{Binding SelectedLatencyTarget, Mode=TwoWay}"
-                                          MinWidth="300"
+                                          MinWidth="260"
                                           MinHeight="34"
+                                          MaxWidth="420"
                                           HorizontalAlignment="Left"
+                                          AutomationProperties.Name="Ölçüm hedefi"
                                           VerticalContentAlignment="Center" />
                                 <TextBlock Text="{Binding SelectedLatencyTarget.Description}"
                                            Style="{StaticResource CaptionStyle}"
                                            Margin="0,6,0,0"
                                            TextWrapping="Wrap" />
 
-                                <Grid Margin="0,10,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBox Grid.Column="0"
-                                             MinHeight="34"
+                                <StackPanel Margin="0,10,0,0"
+                                            Visibility="{Binding IsCustomLatencyTarget, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <TextBox MinHeight="34"
+                                             MaxWidth="420"
+                                             HorizontalAlignment="Left"
                                              VerticalContentAlignment="Center"
-                                             IsEnabled="{Binding IsCustomLatencyTarget}"
-                                             Text="{Binding LatencyCustomTarget, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                    <TextBlock Grid.Column="1"
-                                               Text="host · host:port · tcp:// · udp://"
+                                             AutomationProperties.Name="Sunucu adresi"
+                                             Text="{Binding LatencyCustomTarget, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <TextBlock Text="Örnek: sunucu.com · sunucu.com:25565 · udp://1.2.3.4:7777"
                                                Style="{StaticResource HintStyle}"
-                                               Margin="10,0,0,0"
-                                               VerticalAlignment="Center" />
-                                </Grid>
+                                               Margin="0,4,0,0"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
 
-                                <Grid Margin="0,10,0,0">
+                                <Grid Margin="0,10,0,0"
+                                      Visibility="{Binding IsApplicationLatencyTarget, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" MaxWidth="420" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <ComboBox Grid.Column="0"
                                               MinHeight="34"
                                               VerticalContentAlignment="Center"
-                                              IsEnabled="{Binding IsApplicationLatencyTarget}"
+                                              AutomationProperties.Name="Ölçülecek uygulama"
                                               ItemsSource="{Binding LatencyProcesses}"
                                               SelectedItem="{Binding SelectedLatencyProcess, Mode=TwoWay}" />
                                     <Button Grid.Column="1"
-                                            Content="Uygulamaları tara"
-                                            MinWidth="150"
-                                            Margin="10,0,0,0"
+                                            Content="Yenile"
+                                            MinWidth="90"
+                                            Margin="8,0,0,0"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             Command="{Binding RefreshLatencyProcessesCommand}" />
                                 </Grid>
 
-                                <!-- Discovery can find several endpoints for one application; which of
-                                     them is the session is the user's call, not ours. -->
-                                <StackPanel Margin="0,10,0,0"
-                                            Visibility="{Binding HasLatencyEndpointChoice, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <TextBlock Text="Bulunan uç noktalar (ölçülecek olanı seçin)"
-                                               Style="{StaticResource FieldLabelStyle}"
-                                               Margin="0,0,0,4" />
-                                    <ComboBox MinHeight="34"
-                                              VerticalContentAlignment="Center"
-                                              ItemsSource="{Binding LatencyEndpoints}"
-                                              SelectedItem="{Binding SelectedLatencyEndpoint, Mode=TwoWay}">
-                                        <ComboBox.ItemTemplate>
-                                            <DataTemplate>
-                                                <StackPanel>
-                                                    <TextBlock Text="{Binding Display}" />
-                                                    <TextBlock Text="{Binding Why}" Style="{StaticResource HintStyle}" />
-                                                </StackPanel>
-                                            </DataTemplate>
-                                        </ComboBox.ItemTemplate>
-                                    </ComboBox>
-                                </StackPanel>
-
+                                <!-- The error belongs to the field above it, and the
+                                     buttons below are disabled while it is showing. -->
                                 <TextBlock Text="{Binding LatencyTargetError}"
                                            Style="{StaticResource CaptionStyle}"
                                            Margin="0,6,0,0"
                                            TextWrapping="Wrap"
-                                           Foreground="{DynamicResource AppWarningBrush}" />
+                                           AutomationProperties.LiveSetting="Assertive"
+                                           Visibility="{Binding LatencyTargetError, Converter={StaticResource EmptyToCollapsedConverter}}"
+                                           Foreground="{DynamicResource AppDangerBrush}" />
 
-                                <ProgressBar Height="3"
-                                             Margin="0,14,0,0"
-                                             IsIndeterminate="{Binding IsLatencyBusy}"
-                                             Background="{DynamicResource AppSubtleBackgroundBrush}"
-                                             Foreground="{DynamicResource AppAccentBrush}" />
+                                <!-- 3. One button. Its label is the next step the engine
+                                     itself worked out, so there is never a row of five
+                                     equally weighted actions to choose between. -->
+                                <Button Content="{Binding LatencyPrimaryAction}"
+                                        MinWidth="220"
+                                        MinHeight="38"
+                                        Margin="0,16,0,0"
+                                        HorizontalAlignment="Left"
+                                        Style="{StaticResource PrimaryActionButtonStyle}"
+                                        IsDefault="True"
+                                        Command="{Binding LatencyPrimaryCommand}" />
 
-                                <TextBlock Text="{Binding LatencyHeadline}"
-                                           Style="{StaticResource LatencyHeadlineStyle}"
-                                           Margin="0,12,0,0" />
-                                <TextBlock Text="{Binding LatencyTargetSummary}"
-                                           Style="{StaticResource CaptionStyle}"
-                                           Margin="0,4,0,0"
-                                           TextWrapping="Wrap" />
-
-                                <TextBlock Text="{Binding LatencyIdleSummary}"
-                                           Style="{StaticResource MonospaceStyle}"
-                                           Margin="0,10,0,0"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding LatencyUploadSummary}"
-                                           Style="{StaticResource MonospaceStyle}"
-                                           Margin="0,4,0,0"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding LatencyDownloadSummary}"
-                                           Style="{StaticResource MonospaceStyle}"
-                                           Margin="0,4,0,0"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding LatencyPathSummary}"
-                                           Style="{StaticResource CaptionStyle}"
-                                           Margin="0,8,0,0"
-                                           TextWrapping="Wrap" />
-
-                                <TextBlock Text="Uygulanan değişiklikler"
-                                           Style="{StaticResource FieldLabelStyle}"
-                                           Margin="0,14,0,4" />
-                                <ItemsControl ItemsSource="{Binding LatencyAppliedChanges}">
+                                <!-- 4. The numbers. A card with nothing behind it says so
+                                     and dims; it never prints a zero nobody measured. -->
+                                <ItemsControl ItemsSource="{Binding LatencyCards}" Margin="0,16,0,0">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <TextBlock Text="{Binding}"
-                                                       Style="{StaticResource CaptionStyle}"
-                                                       TextWrapping="Wrap"
-                                                       Margin="0,0,0,2" />
+                                            <Border Style="{StaticResource InfoTileStyle}"
+                                                    MinWidth="150"
+                                                    Margin="0,0,8,8"
+                                                    Opacity="{Binding Measured, Converter={StaticResource MeasuredOpacityConverter}}">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Title}"
+                                                               Style="{StaticResource InfoTileLabelStyle}"
+                                                               TextWrapping="Wrap" />
+                                                    <TextBlock Text="{Binding Value}"
+                                                               Style="{StaticResource InfoTileValueStyle}" />
+                                                    <TextBlock Text="{Binding Note}"
+                                                               Style="{StaticResource HintStyle}"
+                                                               Margin="0,2,0,0"
+                                                               MaxWidth="260"
+                                                               TextWrapping="Wrap"
+                                                               Visibility="{Binding Note, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                                </StackPanel>
+                                            </Border>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
 
-                                <TextBlock Text="Denenip geri alınan değişiklikler"
-                                           Style="{StaticResource FieldLabelStyle}"
-                                           Margin="0,10,0,4" />
-                                <ItemsControl ItemsSource="{Binding LatencyRejectedChanges}">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <TextBlock Style="{StaticResource CaptionStyle}"
-                                                       TextWrapping="Wrap"
-                                                       Margin="0,0,0,2">
-                                                <Run Text="{Binding Change, Mode=OneWay}" />
-                                                <Run Text=" — " />
-                                                <Run Text="{Binding Reason, Mode=OneWay}" />
-                                            </TextBlock>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                <TextBlock Style="{StaticResource HintStyle}" TextWrapping="Wrap">
+                                    <Run Text="{Binding LatencyTargetSummary, Mode=OneWay}" />
+                                    <Run Text=" · " />
+                                    <Run Text="{Binding LatencyMeasuredAt, Mode=OneWay}" />
+                                </TextBlock>
 
-                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,12,0,0">
-                                    <TextBlock Text="{Binding LatencyStatusLine}"
-                                               Style="{StaticResource MonospaceStyle}"
-                                               TextWrapping="Wrap" />
-                                </Border>
+                                <!-- 5. One sentence about what happened, one about what
+                                     to do next. Nothing else competes with them. -->
+                                <TextBlock Text="{Binding LatencySuggestion}"
+                                           Style="{StaticResource BodyStyle}"
+                                           Margin="0,12,0,0"
+                                           TextWrapping="Wrap"
+                                           AutomationProperties.LiveSetting="Polite"
+                                           Visibility="{Binding LatencySuggestion, Converter={StaticResource EmptyToCollapsedConverter}}" />
 
-                                <WrapPanel Margin="0,12,0,0">
-                                    <Button Content="Hızlı test"
-                                            MinWidth="130"
-                                            Margin="0,0,8,8"
-                                            Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding LatencyTestCommand}" />
-                                    <Button Content="Yük altında derin test"
-                                            MinWidth="200"
-                                            Margin="0,0,8,8"
-                                            Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding LatencyDeepTestCommand}" />
-                                    <Button Content="Zorla yeniden ölç"
-                                            MinWidth="170"
-                                            Margin="0,0,8,8"
-                                            Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding LatencyRetestCommand}" />
-                                    <Button Content="Kayıtlı sonuçları sil"
-                                            MinWidth="180"
-                                            Margin="0,0,8,8"
-                                            Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding LatencyClearProfilesCommand}" />
-                                    <Button Content="Tüm özgün ayarları geri yükle"
-                                            MinWidth="230"
-                                            Margin="0,0,0,8"
-                                            Style="{StaticResource SecondaryActionButtonStyle}"
-                                            Command="{Binding LatencyRestoreCommand}" />
-                                </WrapPanel>
-
-                                <!-- The deep test is a sequence of stages, several of which need the
-                                     user to start or stop a transfer. Each one says so as it runs. -->
+                                <!-- 6. Progress, for every run and not only the deep test,
+                                     with a stop button that is live throughout. -->
                                 <Border Style="{StaticResource StatusPanelStyle}"
-                                        Margin="0,6,0,0"
-                                        Visibility="{Binding IsDeepTestRunning, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        Margin="0,14,0,0"
+                                        Visibility="{Binding IsLatencyProgressVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <StackPanel>
                                         <Grid>
                                             <Grid.ColumnDefinitions>
@@ -871,69 +833,236 @@
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0"
-                                                       Text="{Binding LatencyStageTitle}"
+                                                       Text="{Binding LatencyProgressTitle}"
                                                        Style="{StaticResource LatencyHeadlineStyle}"
+                                                       TextWrapping="Wrap"
                                                        VerticalAlignment="Center" />
                                             <Button Grid.Column="1"
-                                                    Content="Testi durdur"
-                                                    MinWidth="130"
+                                                    Content="İptal et"
+                                                    MinWidth="110"
+                                                    Margin="8,0,0,0"
+                                                    VerticalAlignment="Center"
                                                     Style="{StaticResource SecondaryActionButtonStyle}"
                                                     Command="{Binding LatencyCancelCommand}" />
                                         </Grid>
 
+                                        <!-- Indeterminate on purpose: the run has no
+                                             predictable total, and a percentage with no
+                                             data behind it is a made-up number. -->
+                                        <ProgressBar Height="3"
+                                                     Margin="0,10,0,0"
+                                                     IsIndeterminate="True"
+                                                     Background="{DynamicResource AppSubtleBackgroundBrush}"
+                                                     Foreground="{DynamicResource AppAccentBrush}" />
+
                                         <TextBlock Text="{Binding LatencyStageInstruction}"
                                                    Style="{StaticResource CaptionStyle}"
-                                                   Margin="0,6,0,0"
-                                                   TextWrapping="Wrap" />
+                                                   Margin="0,8,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding LatencyStageInstruction, Converter={StaticResource EmptyToCollapsedConverter}}" />
                                         <TextBlock Text="{Binding LatencyStageRate}"
-                                                   Style="{StaticResource MonospaceStyle}"
-                                                   Margin="0,6,0,0" />
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,4,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding LatencyStageRate, Converter={StaticResource EmptyToCollapsedConverter}}" />
                                         <TextBlock Text="{Binding LatencyStageRemaining}"
                                                    Style="{StaticResource HintStyle}"
-                                                   Margin="0,2,0,0" />
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding LatencyStageRemaining, Converter={StaticResource EmptyToCollapsedConverter}}" />
                                         <TextBlock Text="{Binding LatencyStageData}"
                                                    Style="{StaticResource HintStyle}"
-                                                   Margin="0,2,0,0" />
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding LatencyStageData, Converter={StaticResource EmptyToCollapsedConverter}}" />
                                     </StackPanel>
                                 </Border>
 
-                                <!-- Everything the finished run measured, in one readable block. -->
-                                <TextBlock Text="Ölçüm sonucu"
-                                           Style="{StaticResource FieldLabelStyle}"
-                                           Margin="0,14,0,4" />
-                                <Border Style="{StaticResource StatusPanelStyle}">
-                                    <StackPanel>
-                                        <TextBlock Text="{Binding LatencyResultSummary}"
-                                                   Style="{StaticResource MonospaceStyle}"
-                                                   TextWrapping="Wrap" />
-                                        <TextBlock Text="{Binding LatencyDataUsedSummary}"
-                                                   Style="{StaticResource HintStyle}"
-                                                   Margin="0,8,0,0"
-                                                   TextWrapping="Wrap" />
-                                    </StackPanel>
-                                </Border>
+                                <!-- 7. Secondary actions. Undo is easy to find; everything
+                                     else is one level down. -->
+                                <WrapPanel Margin="0,14,0,0">
+                                    <Button Content="Ayarları geri al"
+                                            MinWidth="150"
+                                            Margin="0,0,8,8"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding LatencyRestoreCommand}" />
+                                    <Button Content="Yük altında test et"
+                                            MinWidth="170"
+                                            Margin="0,0,8,8"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            Command="{Binding LatencyDeepTestCommand}" />
+                                </WrapPanel>
 
-                                <Expander Style="{StaticResource AdvancedExpanderStyle}" Margin="0,14,0,0">
+                                <!-- What ran and what did not: the answer to "did it even
+                                     try?", which used to be unanswerable from the card. -->
+                                <ItemsControl ItemsSource="{Binding LatencyLanes}" Margin="0,4,0,0">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,0,0,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" MinWidth="130" />
+                                                    <ColumnDefinition Width="Auto" MinWidth="90" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0"
+                                                           Text="{Binding Title}"
+                                                           Style="{StaticResource CaptionStyle}"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Grid.Column="1"
+                                                           Text="{Binding State}"
+                                                           Style="{StaticResource HintStyle}"
+                                                           Margin="8,0,8,0" />
+                                                <TextBlock Grid.Column="2"
+                                                           Text="{Binding Detail}"
+                                                           Style="{StaticResource HintStyle}"
+                                                           TextWrapping="Wrap" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <Expander Style="{StaticResource AdvancedExpanderStyle}" Margin="0,12,0,0">
                                     <Expander.Header>
-                                        <TextBlock Text="Traffic Guard (yük altındaki gecikme)"
+                                        <TextBlock Text="Ölçüm ayrıntıları ve gelişmiş seçenekler"
                                                    Style="{StaticResource SectionTitleStyle}"
                                                    Margin="0" />
                                     </Expander.Header>
                                     <StackPanel>
                                         <TextBlock Style="{StaticResource CaptionStyle}"
                                                    TextWrapping="Wrap"
-                                                   Text="Ev bağlantılarında en büyük gecikme artışı genelde boştaki ping değil, siz bir şey gönderirken oluşan kuyruklanmadır. Bu seçenek, seçtiğiniz uygulamanın giden trafiğini sınırlamak için Windows QoS ilkesi oluşturur. Sınır varsayılan bir yüzde değildir: birkaç aday sınır uygulanıp ölçülür, en iyi sonucu veren ayrı bir doğrulama turunda tekrar sınanır. Windows QoS ilkesi yalnız ilke oluşturulduktan sonra açılan bağlantılara uygulandığı için test sırasında aktarımı durdurup yeniden başlatmanız istenir. İlke yalnız 'DPIBypass.Latency.' ön ekiyle oluşturulur; sizin veya yöneticinizin mevcut QoS ilkelerine dokunulmaz. Kuyruklanma ölçülerek azalmazsa ilke silinir. İndirme yönündeki kuyruk operatörün ekipmanında oluşur; buradan uygulanan bir sınır ona ulaşamaz ve bu durumda çözüm yönlendiricide SQM/CAKE/FQ-CoDel olduğu bildirilir." />
+                                                   Text="Her ayar tek tek, dönüşümlü A/B turlarıyla ölçülür: ayarsız ölç, ayarı uygula, bekle, tekrar ölç, geri al — ve sıra her turda değişir. Bir ayar yalnızca kazanç turlar boyunca tekrarlandığında ve güven aralığı sıfırı dışladığında kalır. Kabul edilenlerin tamamı en sonda birlikte yeniden ölçülür; kazanç yoksa özgün değerler anında geri yüklenir." />
 
-                                        <CheckBox Content="Yük altında derin testte gönderim sınırını dene"
+                                        <CheckBox Content="Ölçüm sırasında ağ kartının yeniden başlatılmasına izin ver"
                                                   Margin="0,14,0,0"
+                                                  Style="{StaticResource SwitchStyle}"
+                                                  IsChecked="{Binding AllowAdapterRestart, Mode=TwoWay}" />
+                                        <TextBlock Style="{StaticResource HintStyle}"
+                                                   Margin="26,4,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Text="Çoğu ağ kartı ayarı yalnız kart yeniden başlatıldığında etkinleşir. İzin verilmezse bu ayarlar hiç ölçülmez. İzin verirseniz bağlantınız işlem sırasında birkaç saniye kesilir; uzak masaüstü oturumlarında hiçbir koşulda yapılmaz." />
+
+                                        <StackPanel Margin="0,14,0,0"
+                                                    Visibility="{Binding HasLatencyEndpointChoice, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <TextBlock Text="Bulunan uç noktalar (ölçülecek olanı seçin)"
+                                                       Style="{StaticResource FieldLabelStyle}"
+                                                       Margin="0,0,0,4" />
+                                            <ComboBox MinHeight="34"
+                                                      MaxWidth="420"
+                                                      HorizontalAlignment="Left"
+                                                      VerticalContentAlignment="Center"
+                                                      ItemsSource="{Binding LatencyEndpoints}"
+                                                      SelectedItem="{Binding SelectedLatencyEndpoint, Mode=TwoWay}">
+                                                <ComboBox.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <StackPanel>
+                                                            <TextBlock Text="{Binding Display}" />
+                                                            <TextBlock Text="{Binding Why}" Style="{StaticResource HintStyle}" />
+                                                        </StackPanel>
+                                                    </DataTemplate>
+                                                </ComboBox.ItemTemplate>
+                                            </ComboBox>
+                                        </StackPanel>
+
+                                        <TextBlock Text="Uygulanan değişiklikler"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,14,0,4" />
+                                        <ItemsControl ItemsSource="{Binding LatencyAppliedChanges}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding}"
+                                                               Style="{StaticResource CaptionStyle}"
+                                                               TextWrapping="Wrap"
+                                                               Margin="0,0,0,2" />
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+
+                                        <TextBlock Text="Tutulmayan değişiklikler"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,10,0,4" />
+                                        <ItemsControl ItemsSource="{Binding LatencyRejectedChanges}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Style="{StaticResource CaptionStyle}"
+                                                               TextWrapping="Wrap"
+                                                               Margin="0,0,0,2">
+                                                        <Run Text="{Binding Kind, Mode=OneWay}" FontWeight="SemiBold" />
+                                                        <Run Text=" · " />
+                                                        <Run Text="{Binding Change, Mode=OneWay}" />
+                                                        <Run Text=" — " />
+                                                        <Run Text="{Binding Reason, Mode=OneWay}" />
+                                                    </TextBlock>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+
+                                        <TextBlock Text="{Binding LatencyPathSummary}"
+                                                   Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,10,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding LatencyPathSummary, Converter={StaticResource EmptyToCollapsedConverter}}" />
+
+                                        <TextBlock Text="{Binding LatencyStatusLine}"
+                                                   Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,12,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding LatencyStatusLine, Converter={StaticResource EmptyToCollapsedConverter}}" />
+
+                                        <TextBlock Text="Tam ölçüm raporu"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,14,0,4" />
+                                        <Border Style="{StaticResource StatusPanelStyle}">
+                                            <StackPanel>
+                                                <ScrollViewer MaxHeight="220"
+                                                              HorizontalScrollBarVisibility="Auto"
+                                                              VerticalScrollBarVisibility="Auto">
+                                                    <TextBlock Text="{Binding LatencyResultSummary}"
+                                                               Style="{StaticResource MonospaceStyle}"
+                                                               TextWrapping="Wrap" />
+                                                </ScrollViewer>
+                                                <TextBlock Text="{Binding LatencyDataUsedSummary}"
+                                                           Style="{StaticResource HintStyle}"
+                                                           Margin="0,8,0,0"
+                                                           TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Border>
+
+                                        <WrapPanel Margin="0,12,0,0">
+                                            <Button Content="Hızlı ölçüm"
+                                                    MinWidth="130"
+                                                    Margin="0,0,8,8"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                                    Command="{Binding LatencyTestCommand}" />
+                                            <Button Content="Zorla yeniden ölç"
+                                                    MinWidth="160"
+                                                    Margin="0,0,8,8"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                                    Command="{Binding LatencyRetestCommand}" />
+                                            <Button Content="Kayıtlı sonuçları sil"
+                                                    MinWidth="170"
+                                                    Margin="0,0,0,8"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                                    Command="{Binding LatencyClearProfilesCommand}" />
+                                        </WrapPanel>
+
+                                        <!-- Traffic Guard: the one intervention that moves
+                                             loaded latency, and the one that costs upload
+                                             speed. Both halves are stated. -->
+                                        <TextBlock Text="Gönderim sınırı (Traffic Guard)"
+                                                   Style="{StaticResource SectionTitleStyle}"
+                                                   Margin="0,16,0,6" />
+                                        <TextBlock Style="{StaticResource CaptionStyle}"
+                                                   TextWrapping="Wrap"
+                                                   Text="Ev bağlantılarında en büyük gecikme artışı boştaki ping değil, siz bir şey gönderirken oluşan kuyruklanmadır. Bu seçenek, seçtiğiniz uygulamanın giden trafiğini sınırlamak için bir Windows QoS ilkesi oluşturur; birkaç aday sınır ölçülür ve en iyisi ayrı bir turda doğrulanır. Kuyruklanma ölçülerek azalmazsa ilke silinir. Yalnız bu uygulamanın oluşturduğu ilkeler yönetilir; oyununuz sınırlanmaz. İndirme yönündeki kuyruk operatörün ekipmanında oluşur ve buradan uygulanan bir sınır ona ulaşamaz." />
+
+                                        <CheckBox Content="Yük altında testte gönderim sınırını dene"
+                                                  Margin="0,12,0,0"
                                                   Style="{StaticResource SwitchStyle}"
                                                   IsChecked="{Binding TrafficGuardEnabled, Mode=TwoWay}" />
 
-                                        <TextBlock Text="Hedef"
+                                        <TextBlock Text="Tercih"
                                                    Style="{StaticResource FieldLabelStyle}"
-                                                   Margin="0,14,0,4" />
+                                                   Margin="0,12,0,4" />
                                         <ComboBox MinHeight="34"
-                                                  MinWidth="300"
+                                                  MaxWidth="320"
                                                   HorizontalAlignment="Left"
                                                   VerticalContentAlignment="Center"
                                                   ItemsSource="{Binding GuardModeOptions}"
@@ -943,10 +1072,12 @@
                                                    Margin="0,6,0,0"
                                                    TextWrapping="Wrap" />
 
-                                        <TextBlock Text="Sınırlanacak uygulama — oyun değil, toplu aktarım yapan program (örnek: steam.exe)"
+                                        <TextBlock Text="Sınırlanacak uygulama — oyun değil, toplu aktarım yapan program"
                                                    Style="{StaticResource FieldLabelStyle}"
-                                                   Margin="0,14,0,4" />
+                                                   Margin="0,12,0,4" />
                                         <ComboBox MinHeight="34"
+                                                  MaxWidth="420"
+                                                  HorizontalAlignment="Left"
                                                   IsEditable="True"
                                                   VerticalContentAlignment="Center"
                                                   ItemsSource="{Binding LatencyProcesses}"
@@ -954,124 +1085,295 @@
                                         <TextBlock Style="{StaticResource HintStyle}"
                                                    Margin="0,4,0,0"
                                                    TextWrapping="Wrap"
-                                                   Text="Seçilen program çalışıyor olmalıdır: ilke, çalışan sürecin görüntü adı ya da doğrulanmış tam yolu ile eşleştirilir. Oyununuz asla sınırlanmaz." />
+                                                   Text="Seçilen program çalışıyor olmalıdır; ilke, çalışan sürecin görüntü adı veya doğrulanmış tam yolu ile eşleştirilir." />
 
-                                        <TextBlock Text="Gönderim hızınız (Mbit/s, biliyorsanız)"
-                                                   Style="{StaticResource FieldLabelStyle}"
-                                                   Margin="0,14,0,4" />
-                                        <TextBox MinHeight="34"
-                                                 MaxWidth="160"
-                                                 HorizontalAlignment="Left"
-                                                 VerticalContentAlignment="Center"
-                                                 Text="{Binding ManualUplinkMbps, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-
-                                        <TextBlock Text="İndirme hızınız (Mbit/s, biliyorsanız)"
-                                                   Style="{StaticResource FieldLabelStyle}"
-                                                   Margin="0,14,0,4" />
-                                        <TextBox MinHeight="34"
-                                                 MaxWidth="160"
-                                                 HorizontalAlignment="Left"
-                                                 VerticalContentAlignment="Center"
-                                                 Text="{Binding ManualDownlinkMbps, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                        <Grid Margin="0,12,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Margin="0,0,16,0">
+                                                <TextBlock Text="Gönderim hızınız (Mbit/s)"
+                                                           Style="{StaticResource FieldLabelStyle}"
+                                                           Margin="0,0,0,4" />
+                                                <TextBox MinHeight="34"
+                                                         Width="120"
+                                                         HorizontalAlignment="Left"
+                                                         VerticalContentAlignment="Center"
+                                                         Text="{Binding ManualUplinkMbps, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock Text="İndirme hızınız (Mbit/s)"
+                                                           Style="{StaticResource FieldLabelStyle}"
+                                                           Margin="0,0,0,4" />
+                                                <TextBox MinHeight="34"
+                                                         Width="120"
+                                                         HorizontalAlignment="Left"
+                                                         VerticalContentAlignment="Center"
+                                                         Text="{Binding ManualDownlinkMbps, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                            </StackPanel>
+                                        </Grid>
 
                                         <TextBlock Text="{Binding LatencyGuardSummary}"
-                                                   Style="{StaticResource MonospaceStyle}"
+                                                   Style="{StaticResource CaptionStyle}"
                                                    Margin="0,12,0,0"
                                                    TextWrapping="Wrap" />
+
+                                        <TextBlock Style="{StaticResource HintStyle}"
+                                                   Margin="0,14,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Text="Yalnızca ağ kartının geri alınabilir ayarları ve bu uygulamanın kendi QoS ilkeleri değiştirilir; IP, DHCP, ağ geçidi, DNS, IPv6 ve TCP kayıt defteri ayarları ile paket yolu bu özellik tarafından değiştirilmez." />
                                     </StackPanel>
                                 </Expander>
-
-                                <TextBlock Style="{StaticResource CaptionStyle}"
-                                           Margin="0,12,0,0"
-                                           TextWrapping="Wrap"
-                                           Text="Yalnızca bağdaştırıcının geri alınabilir ayarları ve bu uygulamanın kendi QoS ilkeleri değiştirilir; IP, DHCP, gateway, DNS, IPv6, TCP kayıt defteri ayarları ve paket yolu bu özellik tarafından değiştirilmez. Oyun ve ses trafiği normal Windows ağ yolunda kalır. Boştaki ping, yük altındaki gecikme, jitter, paket kaybı, DNS çözümleme süresi ve ISP/WAN rota gecikmesi ayrı şeylerdir; hiçbiri diğerinin yerine gösterilmez." />
                             </StackPanel>
                         </Border>
 
-                        <!-- ===== Vodafone Sınırsız Modu ===== -->
+                        <!-- ===== Vodafone Sınırsız Modu =====
+                             Same shape: what network you are on, what the mode is doing
+                             here, one button, then the findings as cards. The raw report
+                             lives under "Teknik ayrıntılar" and is never parsed. -->
                         <Border Style="{StaticResource CardStyle}">
-                            <Expander Style="{StaticResource AdvancedExpanderStyle}">
-                                <Expander.Header>
-                                    <TextBlock Text="Vodafone Sınırsız Modu"
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Text="Vodafone Sınırsız Modu"
                                                Style="{StaticResource SectionTitleStyle}"
+                                               VerticalAlignment="Center"
                                                Margin="0" />
-                                </Expander.Header>
-                                <StackPanel>
-                                    <TextBlock Style="{StaticResource CaptionStyle}"
-                                               Text="Vodafone mobil bağlantıları ve telefon paylaşımı için ağ bazlı uyumluluk ve tanılama sunar: IPv4/IPv6, DNS, gecikme, kayıp, MTU, bağdaştırıcı ve olası etkin VPN incelenir. Ölçüm sıradan ağ tanılama paketleri gönderir; kalıcı ağ ayarı veya trafik sınıflandırma kuralı oluşturmaz." />
-
-                                    <CheckBox Content="Bu ağda Vodafone Sınırsız Modu'nu etkinleştir"
-                                              Margin="0,14,0,0"
+                                    <CheckBox Grid.Column="1"
+                                              Content="Etkin"
                                               Style="{StaticResource SwitchStyle}"
+                                              VerticalAlignment="Center"
+                                              AutomationProperties.Name="Vodafone Sınırsız Modu'nu etkinleştir"
                                               IsChecked="{Binding VodafoneModeEnabled, Mode=TwoWay}" />
-                                    <TextBlock Text="{Binding VodafoneStatusLine}"
-                                               Style="{StaticResource MonospaceStyle}"
-                                               Margin="26,6,0,0"
-                                               TextWrapping="Wrap" />
+                                </Grid>
 
-                                    <CheckBox Content="Kayıtlı ağa geçildiğinde bağlantıyı kendiliğinden incele"
+                                <TextBlock Text="{Binding VodafoneStatusLine}"
+                                           Style="{StaticResource LatencyHeadlineStyle}"
+                                           Margin="0,10,0,0"
+                                           TextWrapping="Wrap"
+                                           Foreground="{Binding HotspotStatusSeverity, Converter={StaticResource SeverityBrushConverter}}" />
+                                <TextBlock Text="{Binding HotspotCheckedAt}"
+                                           Style="{StaticResource HintStyle}"
+                                           Margin="0,4,0,0" />
+
+                                <Button Content="Bağlantıyı kontrol et"
+                                        MinWidth="200"
+                                        MinHeight="38"
+                                        Margin="0,14,0,0"
+                                        HorizontalAlignment="Left"
+                                        Style="{StaticResource PrimaryActionButtonStyle}"
+                                        Command="{Binding HotspotDiagnoseCommand}" />
+
+                                <ProgressBar Height="3"
+                                             Margin="0,12,0,0"
+                                             IsIndeterminate="{Binding IsHotspotBusy}"
+                                             Visibility="{Binding IsHotspotBusy, Converter={StaticResource BoolToVisibilityConverter}}"
+                                             Background="{DynamicResource AppSubtleBackgroundBrush}"
+                                             Foreground="{DynamicResource AppAccentBrush}" />
+
+                                <!-- The findings as cards. "Desteklenmiyor",
+                                     "kullanılmıyor" and "ölçülemedi" each get their own
+                                     wording and colour; only a real fault is red. -->
+                                <ItemsControl ItemsSource="{Binding HotspotCards}"
                                               Margin="0,14,0,0"
-                                              Style="{StaticResource SwitchStyle}"
-                                              IsChecked="{Binding HotspotDiagnostics, Mode=TwoWay}" />
-                                    <TextBlock Style="{StaticResource CaptionStyle}"
-                                               Margin="26,4,0,0"
-                                               Text="Kısa bir inceleme çalıştırır ve sonucu günlüğe yazar. Kapalıyken “Tanıla” düğmesi yine kullanılabilir." />
+                                              Visibility="{Binding HasHotspotResult, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Style="{StaticResource InfoTileStyle}"
+                                                    MinWidth="180"
+                                                    MaxWidth="320"
+                                                    Margin="0,0,8,8">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Title}"
+                                                               Style="{StaticResource InfoTileLabelStyle}"
+                                                               TextWrapping="Wrap" />
+                                                    <TextBlock Text="{Binding Value}"
+                                                               Style="{StaticResource InfoTileValueStyle}"
+                                                               TextWrapping="Wrap"
+                                                               Foreground="{Binding State, Converter={StaticResource CheckStateBrushConverter}}" />
+                                                    <TextBlock Text="{Binding Detail}"
+                                                               Style="{StaticResource HintStyle}"
+                                                               Margin="0,4,0,0"
+                                                               TextWrapping="Wrap"
+                                                               Visibility="{Binding Detail, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
 
-                                    <ProgressBar Height="3"
-                                                 Margin="0,14,0,0"
-                                                 IsIndeterminate="{Binding IsHotspotBusy}"
-                                                 Background="{DynamicResource AppSubtleBackgroundBrush}"
-                                                 Foreground="{DynamicResource AppAccentBrush}" />
+                                <TextBlock Text="{Binding HotspotSuggestion}"
+                                           Style="{StaticResource BodyStyle}"
+                                           Margin="0,8,0,0"
+                                           TextWrapping="Wrap"
+                                           AutomationProperties.LiveSetting="Polite"
+                                           Visibility="{Binding HotspotSuggestion, Converter={StaticResource EmptyToCollapsedConverter}}" />
 
-                                    <Border Style="{StaticResource StatusPanelStyle}" Margin="0,10,0,0">
-                                        <TextBlock Text="{Binding HotspotStatusLine}"
-                                                   Style="{StaticResource MonospaceStyle}"
-                                                   TextWrapping="Wrap" />
-                                    </Border>
+                                <!-- The two options users confuse, side by side with the
+                                     difference spelled out. -->
+                                <Border Style="{StaticResource InfoTileStyle}" Margin="0,16,0,0">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="Bu ağda kullan"
+                                                           Style="{StaticResource FieldLabelStyle}"
+                                                           Margin="0" />
+                                                <TextBlock Style="{StaticResource HintStyle}"
+                                                           Margin="0,2,0,0"
+                                                           TextWrapping="Wrap"
+                                                           Text="Şu anda bağlı olduğunuz ağı listeye ekler. Modu kapatıp açmanız gerekmez." />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Content="Bu ağı kaydet"
+                                                    MinWidth="140"
+                                                    Margin="12,0,0,0"
+                                                    VerticalAlignment="Center"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                                    Command="{Binding RememberVodafoneNetworkCommand}" />
+                                        </Grid>
 
-                                    <WrapPanel Margin="0,12,0,0">
-                                        <Button Content="Tanıla"
-                                                MinWidth="130"
-                                                Margin="0,0,8,0"
-                                                Style="{StaticResource SecondaryActionButtonStyle}"
-                                                Command="{Binding HotspotDiagnoseCommand}" />
-                                        <Button Content="Eski TTL alt özelliğini temizle"
-                                                MinWidth="230"
-                                                Style="{StaticResource SecondaryActionButtonStyle}"
-                                                Command="{Binding HotspotCleanupCommand}" />
-                                    </WrapPanel>
+                                        <CheckBox Content="Kayıtlı ağlarda otomatik kontrol"
+                                                  Margin="0,14,0,0"
+                                                  Style="{StaticResource SwitchStyle}"
+                                                  IsChecked="{Binding HotspotDiagnostics, Mode=TwoWay}" />
+                                        <TextBlock Style="{StaticResource HintStyle}"
+                                                   Margin="26,2,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Text="Kayıtlı bir ağa geçtiğinizde kontrolü kendiliğinden çalıştırır. Kapalıyken yukarıdaki düğme yine kullanılabilir." />
+                                    </StackPanel>
+                                </Border>
 
-                                    <TextBlock Text="Vodafone modu için kayıtlı ağlar"
-                                               Style="{StaticResource FieldLabelStyle}"
-                                               Margin="0,16,0,4" />
-                                    <TextBlock Style="{StaticResource CaptionStyle}"
-                                               Margin="0,0,0,6"
-                                               Text="Eski sürümlerde kaydedilmiş ağlar güvenli tanılama listesine taşınır; mod kapatıldığında liste silinmez." />
+                                <TextBlock Text="Kayıtlı ağlar"
+                                           Style="{StaticResource FieldLabelStyle}"
+                                           Margin="0,16,0,4" />
+
+                                <TextBlock Style="{StaticResource HintStyle}"
+                                           TextWrapping="Wrap"
+                                           Visibility="{Binding HasVodafoneNetworks, Converter={StaticResource InverseBoolToVisibilityConverter}}"
+                                           Text="Henüz kayıtlı ağ yok. Telefonunuzun paylaşımına bağlıyken “Bu ağı kaydet” ile ekleyebilirsiniz." />
+
+                                <StackPanel Visibility="{Binding HasVodafoneNetworks, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <Border Style="{StaticResource MonoPanelStyle}" Padding="6">
-                                        <ListBox Style="{StaticResource MonospaceListStyle}"
-                                                 ItemContainerStyle="{StaticResource DomainRowStyle}"
+                                        <ListBox Style="{StaticResource PlainListStyle}"
                                                  MaxHeight="140"
+                                                 AutomationProperties.Name="Kayıtlı ağlar"
                                                  ItemsSource="{Binding VodafoneNetworks}"
-                                                 DisplayMemberPath="Display"
-                                                 SelectedItem="{Binding SelectedVodafoneNetwork, Mode=TwoWay}" />
+                                                 SelectedItem="{Binding SelectedVodafoneNetwork, Mode=TwoWay}">
+                                            <ListBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0"
+                                                                   Text="{Binding Display}"
+                                                                   TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding Marker}"
+                                                                   Margin="10,0,0,0"
+                                                                   Style="{StaticResource HintStyle}" />
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ListBox.ItemTemplate>
+                                        </ListBox>
                                     </Border>
+                                    <TextBlock Style="{StaticResource HintStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap"
+                                               Text="Modu kapatmak kayıtlı ağları silmez; bir ağı listeden çıkarmak için seçip “Seçili ağı unut” deyin." />
                                     <Button Content="Seçili ağı unut"
                                             MinWidth="150"
                                             Margin="0,8,0,0"
                                             HorizontalAlignment="Left"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             Command="{Binding ForgetVodafoneNetworkCommand}" />
+                                </StackPanel>
 
+                                <Expander Style="{StaticResource AdvancedExpanderStyle}" Margin="0,16,0,0">
+                                    <Expander.Header>
+                                        <TextBlock Text="Teknik ayrıntılar"
+                                                   Style="{StaticResource SectionTitleStyle}"
+                                                   Margin="0" />
+                                    </Expander.Header>
                                     <StackPanel>
                                         <TextBlock Style="{StaticResource CaptionStyle}"
-                                                   Margin="0,14,0,0"
-                                                   Text="Geri yüklenen özellik: Vodafone Sınırsız Modu adı, ağ tercihleri, durum, tanılama ve kurtarma araçları." />
-                                        <TextBlock Style="{StaticResource CaptionStyle}"
-                                                   Margin="0,4,0,0"
-                                                   Text="Geri getirilmeyen alt özellik: hotspot kotasını gizlemek için paket TTL'sini yeniden yazma ve IPv6'yı düşürme. Plan / hotspot hakkı tanılamada &quot;Bilinmiyor&quot; olarak kalır." />
+                                                   TextWrapping="Wrap"
+                                                   Text="Kontrol sıradan ağ tanılama paketleri gönderir: kalıcı ağ ayarı, paket değişikliği veya trafik sınıflandırma kuralı oluşturmaz. Tarife ve hotspot hakkı ölçümle belirlenemediği için “Bilinmiyor” olarak kalır." />
+
+                                        <ItemsControl ItemsSource="{Binding HotspotDetails}" Margin="0,12,0,0">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,0,0,6">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" MinWidth="120" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0"
+                                                                   Text="{Binding Title}"
+                                                                   Style="{StaticResource CaptionStyle}"
+                                                                   TextWrapping="Wrap" />
+                                                        <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                                            <TextBlock Text="{Binding Value}"
+                                                                       Style="{StaticResource CaptionStyle}"
+                                                                       TextWrapping="Wrap"
+                                                                       Foreground="{Binding State, Converter={StaticResource CheckStateBrushConverter}}" />
+                                                            <TextBlock Text="{Binding Detail}"
+                                                                       Style="{StaticResource HintStyle}"
+                                                                       TextWrapping="Wrap"
+                                                                       Visibility="{Binding Detail, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+
+                                        <TextBlock Text="Tam rapor"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,12,0,4"
+                                                   Visibility="{Binding HotspotReport, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                        <Border Style="{StaticResource MonoPanelStyle}"
+                                                Visibility="{Binding HotspotReport, Converter={StaticResource EmptyToCollapsedConverter}}">
+                                            <ScrollViewer MaxHeight="200"
+                                                          HorizontalScrollBarVisibility="Auto"
+                                                          VerticalScrollBarVisibility="Auto">
+                                                <TextBlock Text="{Binding HotspotReport}"
+                                                           Style="{StaticResource MonospaceStyle}"
+                                                           TextWrapping="Wrap" />
+                                            </ScrollViewer>
+                                        </Border>
+
+                                        <!-- Only shown when an older build actually left
+                                             something behind on this machine. -->
+                                        <StackPanel Margin="0,14,0,0"
+                                                    Visibility="{Binding IsLegacyCleanupAvailable, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <TextBlock Style="{StaticResource CaptionStyle}"
+                                                       TextWrapping="Wrap"
+                                                       Text="Bu bilgisayarda eski sürümden kalan hotspot ayarları bulundu. Kaldırmak güvenlidir ve kayıtlı ağlarınızı silmez." />
+                                            <Button Content="Eski kalıntıları temizle"
+                                                    MinWidth="190"
+                                                    Margin="0,8,0,0"
+                                                    HorizontalAlignment="Left"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                                    Command="{Binding HotspotCleanupCommand}" />
+                                        </StackPanel>
                                     </StackPanel>
-                                </StackPanel>
-                            </Expander>
+                                </Expander>
+                            </StackPanel>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>

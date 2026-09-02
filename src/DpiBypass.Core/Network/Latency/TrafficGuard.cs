@@ -83,6 +83,16 @@ public sealed record TrafficGuardState
 
     public double? LoadedP95AfterMs { get; init; }
 
+    /// <summary>
+    /// The whole loaded window measured with the kept cap in place, when there is one.
+    /// </summary>
+    /// <remarks>
+    /// Carried so the card can show "loaded before" and "loaded after" as a pair of real
+    /// measurements of the same thing, rather than as two headline scalars that a reader
+    /// has to trust were measured the same way.
+    /// </remarks>
+    public LatencyMeasurement? LoadedAfter { get; init; }
+
     /// <summary>Every cap that was applied and measured, for the report.</summary>
     public IReadOnlyList<string> Trials { get; init; } = [];
 
@@ -132,14 +142,24 @@ public sealed record TrafficGuardRequest
 
     /// <summary>How many caps the search is allowed to apply and measure.</summary>
     /// <remarks>
-    /// Two by default. Each one costs the user a stop and a restart of their transfer, so
-    /// the search is deliberately short: the shares are ordered least-disruptive first and
-    /// the confirmation round is what actually decides.
+    /// Each trial costs the user a stop and a restart of their transfer, so the search is
+    /// short and stops as soon as it has an answer: the shares are ordered
+    /// least-disruptive first, and a cap that already clears the acceptance rules ends the
+    /// search rather than spending a trial to find a harsher one. What the ceiling must
+    /// not do is silently truncate the ladder - it was two while the planner offered three
+    /// shares, so the gentlest-but-one cap was the last one ever tried and the most
+    /// effective option in the list could not be reached on any run.
     /// </remarks>
     public int MaximumTrials { get; init; } = DefaultMaximumTrials;
 
-    /// <summary>The default, exposed so a caller can bound the search without guessing.</summary>
-    public const int DefaultMaximumTrials = 2;
+    /// <summary>
+    /// The default: the whole ladder the planner defines, with early stopping.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the planner rather than written as a literal, so adding a share
+    /// cannot leave a candidate unreachable again.
+    /// </remarks>
+    public static readonly int DefaultMaximumTrials = TrafficGuardCapPlanner.MaximumShares;
 
     /// <summary>How long to wait for the paced application to open a new flow.</summary>
     public TimeSpan NewFlowTimeout { get; init; } = TimeSpan.FromSeconds(60);
@@ -339,6 +359,19 @@ public sealed class TrafficGuard
                 {
                     trials.Add(measured);
                     descriptions.Add(Describe(measured, queueingBefore));
+
+                    // Deliberate early stop. The shares are ordered least disruptive
+                    // first, so once one of them clears the acceptance rules on its own,
+                    // a harsher cap could only cost more throughput to buy latency the
+                    // user has already been given - and every further trial costs them
+                    // another stop and restart of their transfer.
+                    if (TrafficGuardCapPlanner.Choose([measured], before, request.Mode) is not null)
+                    {
+                        _log?.Invoke(
+                            $"latency.guard.search: {measured.Share:P0} sınırı ölçütleri karşıladı; "
+                            + "daha sert sınırlar denenmedi.");
+                        break;
+                    }
                 }
             }
 
@@ -441,6 +474,7 @@ public sealed class TrafficGuard
                     UplinkAfterKbps = kept.ThroughputKbps,
                     LoadedP95BeforeMs = before.Loaded?.P95RttMs,
                     LoadedP95AfterMs = kept.LoadedP95Ms,
+                    LoadedAfter = kept.Result.Loaded,
                     Trials = descriptions,
                     DataUsedBytes = dataUsed,
                     Mode = request.Mode,

@@ -11,15 +11,21 @@ namespace DpiBypass.Tests;
 public sealed class TrafficGuardTests
 {
     /// <summary>
-    /// The search applies more than one cap and keeps the one that measured best, and the
-    /// choice is then confirmed in a round of its own.
+    /// The cap comes from measurement, and the choice is confirmed in a round of its own.
     /// </summary>
+    /// <remarks>
+    /// Each trial costs the user a stop and a restart of their transfer, so the search
+    /// stops at the gentlest cap that already clears the acceptance rules rather than
+    /// spending their time proving a harsher one also works. Here the first cap empties
+    /// most of the queue, so the second is never applied and the run goes straight to the
+    /// independent confirmation round.
+    /// </remarks>
     [Fact]
     public async Task TheCapIsChosenByMeasurementAndConfirmedSeparately()
     {
         var qos = new FakeQosController();
 
-        // Baseline, two search trials, then the confirmation round for the winner.
+        // Baseline, one search trial that works, then the confirmation round for it.
         var load = new FakeLoadExperiment(
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, loadedP95: 190),
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 60, loadedP95: 88, uplinkKbps: 18_400),
@@ -32,11 +38,14 @@ public sealed class TrafficGuardTests
         Assert.Single(qos.Policies);
         Assert.StartsWith(WindowsQosController.PolicyNamePrefix, outcome.State.PolicyName, StringComparison.Ordinal);
         Assert.Equal(116, outcome.State.UploadQueueingBeforeMs);
-        Assert.Equal(11, outcome.State.UploadQueueingAfterMs);
 
-        // Two caps were measured, and a fourth round ran that the search never saw.
-        Assert.Equal(2, outcome.State.Trials.Count);
-        Assert.Equal(4, load.Calls);
+        // The "after" figure comes from the confirmation round, not from the search trial
+        // that chose the cap.
+        Assert.Equal(10, outcome.State.UploadQueueingAfterMs);
+
+        // One cap measured, then confirmed: three rounds, and the harsher caps untouched.
+        Assert.Single(outcome.State.Trials);
+        Assert.Equal(3, load.Calls);
 
         // The cap that was kept is not the fixed 85 percent an earlier build assumed.
         Assert.NotEqual(
@@ -45,6 +54,48 @@ public sealed class TrafficGuardTests
 
         Assert.NotNull(outcome.Resource);
         Assert.Equal(LatencyResourceKind.QosPolicy, outcome.Resource!.Kind);
+
+        // The loaded window measured with the cap in place travels with the state, so the
+        // card can show loaded-before against loaded-after as two real measurements.
+        Assert.NotNull(outcome.State.LoadedAfter);
+    }
+
+    /// <summary>
+    /// The last cap on the planner's ladder is reachable when the gentler ones are not enough.
+    /// </summary>
+    /// <remarks>
+    /// It was not: the trial budget defaulted to two while the planner defined three
+    /// shares, and the search truncated the list, so on a link that needed the harshest
+    /// cap the one option that would have worked was never applied on any run.
+    /// </remarks>
+    [Fact]
+    public async Task TheHarshestCapOnTheLadderCanStillBeReached()
+    {
+        Assert.Equal(
+            TrafficGuardCapPlanner.SharesFor(TrafficGuardMode.Balanced).Count,
+            TrafficGuardRequest.DefaultMaximumTrials);
+
+        var qos = new FakeQosController();
+
+        // Baseline, two caps that barely move the queue, a third that empties it, then
+        // the confirmation round for that third cap.
+        var load = new FakeLoadExperiment(
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 140, loadedP95: 190),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 138, loadedP95: 186, uplinkKbps: 18_400),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 132, loadedP95: 178, uplinkKbps: 16_000),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 40, loadedP95: 52, uplinkKbps: 14_000),
+            FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 42, loadedP95: 55, uplinkKbps: 14_000));
+
+        var outcome = await Guard(qos, load).RunAsync(Request());
+
+        Assert.Equal(TrafficGuardStatus.Active, outcome.State.Status);
+        Assert.Equal(3, outcome.State.Trials.Count);
+
+        // The third share of the balanced ladder, which the old budget cut off.
+        var shares = TrafficGuardCapPlanner.SharesFor(TrafficGuardMode.Balanced);
+        Assert.Equal(
+            TrafficGuardCapPlanner.CapFor(20_000, shares[^1]),
+            outcome.State.ThrottleBitsPerSecond);
     }
 
     /// <summary>

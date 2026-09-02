@@ -542,6 +542,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 StatusLine = restored
                     ? "Ölçüm iptal edildi; uygulanan NIC ayarları geri alındı."
                     : "Ölçüm iptal edildi; bazı NIC ayarları geri yüklenemedi ve snapshot korundu.",
+                RestoreFailed = !restored,
                 AdapterName = network.AdapterName ?? network.DisplayName,
                 NetworkKey = network.Key,
             });
@@ -557,6 +558,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 StatusLine = restored
                     ? $"Optimizasyon başarısız oldu; uygulanan değişiklikler geri alındı. {ex.Message}"
                     : $"Optimizasyon başarısız oldu; bazı NIC ayarları geri yüklenemedi ve snapshot korundu. {ex.Message}",
+                RestoreFailed = !restored,
                 AdapterName = network.AdapterName ?? network.DisplayName,
                 NetworkKey = network.Key,
             });
@@ -580,6 +582,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             {
                 Status = LatencyOptimizationStatus.Failed,
                 StatusLine = "Önceki NIC ayarları geri yüklenemedi; yeni optimizasyon güvenlik için başlatılmadı.",
+                RestoreFailed = true,
                 AdapterName = network.AdapterName ?? network.DisplayName,
                 NetworkKey = network.Key,
             });
@@ -603,18 +606,14 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             NetworkKey = network.Key,
         });
 
+        // The adapter lane is one of several, so its absence is established here and
+        // acted on after the target has been measured. Ending the run at this point - as
+        // an earlier build did - threw away the connection measurement, the path split
+        // and the loaded-lane suggestion, none of which need a driver candidate to be
+        // useful, and told the user the feature was unsupported when only one part was.
         var adapter = await _controller.DetectAsync(network, token).ConfigureAwait(false);
-        if (adapter is null || !adapter.IsEligible)
-        {
-            return Publish(new LatencyOptimizationResult
-            {
-                Status = LatencyOptimizationStatus.Unsupported,
-                StatusLine = "Desteklenen aktif fiziksel düşük-gecikme NIC ayarı bulunamadı."
-                    + " Hedef ve yük tanılaması yine kullanılabilir.",
-                AdapterName = adapter?.AdapterName ?? network.AdapterName ?? network.DisplayName,
-                NetworkKey = network.Key,
-            });
-        }
+        var adapterUsable = adapter is not null && adapter.IsEligible;
+        var adapterName = adapter?.AdapterName ?? network.AdapterName ?? network.DisplayName;
 
         var resolution = await _targets.ResolveAsync(Target, token).ConfigureAwait(false);
         if (!resolution.Succeeded)
@@ -623,15 +622,20 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             {
                 Status = LatencyOptimizationStatus.Offline,
                 StatusLine = resolution.Failure ?? "Ölçüm hedefi çözümlenemedi; hiçbir NIC ayarı değiştirilmedi.",
-                AdapterName = adapter.AdapterName,
+                AdapterName = adapterName,
                 NetworkKey = network.Key,
                 TargetLabel = Target.Describe(),
+                Lanes =
+                [
+                    Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Blocked,
+                        resolution.Failure ?? "Ölçüm hedefi çözümlenemedi."),
+                ],
             });
         }
 
         // One short pass settles which endpoint answers here; every later measurement in
         // this run uses that same pinned endpoint so the numbers can be subtracted.
-        _log?.Invoke($"latency.baseline.started: {adapter.AdapterName} · ağ {network.Key}");
+        _log?.Invoke($"latency.baseline.started: {adapterName} · ağ {network.Key}");
         var (baseline, endpoint) = await MeasureTargetAsync(network, resolution, token).ConfigureAwait(false);
         var benchmark = _options.Benchmark.For(endpoint);
 
@@ -642,31 +646,79 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             {
                 Status = LatencyOptimizationStatus.Offline,
                 StatusLine = "Uzak IP gecikmesi ölçülemedi; hiçbir NIC ayarı değiştirilmedi.",
-                AdapterName = adapter.AdapterName,
+                AdapterName = adapterName,
                 NetworkKey = network.Key,
                 Before = baseline,
                 TargetLabel = endpoint.Label,
                 TargetProtocol = endpoint.ProtocolLabel,
+                Lanes =
+                [
+                    Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Incomplete,
+                        $"{endpoint.Label} yanıt vermedi, bu yüzden ölçüm tamamlanamadı."),
+                ],
             });
         }
 
         var path = LatencyPathAnalysis.Describe(baseline);
         _log?.Invoke($"latency.baseline.completed: {LatencyReport.Compact(baseline)} · {path.Bottleneck}");
 
+        // No driver candidate is a fact about one lane. The measurement stands, the path
+        // split stands, and the loaded lane is still the thing most likely to help.
+        if (!adapterUsable)
+        {
+            _log?.Invoke("latency.adapter: uygun fiziksel bağdaştırıcı adayı yok; ölçüm yolları açık kalıyor.");
+
+            return Publish(new LatencyOptimizationResult
+            {
+                Status = LatencyOptimizationStatus.Unsupported,
+                StatusLine = LatencyReport.NoGain(
+                    "Bu bilgisayarda değiştirilebilecek bir ağ kartı ayarı bulunamadı; "
+                        + "bağlantı ölçümü ve yük testi kullanılabilir.",
+                    baseline,
+                    [],
+                    path),
+                AdapterName = adapterName,
+                NetworkKey = network.Key,
+                Before = baseline,
+                Path = path,
+                TargetLabel = endpoint.Label,
+                TargetProtocol = endpoint.ProtocolLabel,
+                RouteReferenceOnly = endpoint.RouteReferenceOnly,
+                Candidates = resolution.Candidates,
+                Notices = resolution.Notice is null ? [] : [resolution.Notice],
+                Lanes =
+                [
+                    Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Completed,
+                        $"{endpoint.Label} ölçüldü ({endpoint.ProtocolLabel})."),
+                    Lane(LatencyLane.AdapterSettings, LatencyLaneState.NotApplicable,
+                        "Bu makinede ayarı değiştirilebilecek fiziksel bir ağ kartı bulunamadı."),
+                    Lane(LatencyLane.LoadedLatency, LatencyLaneState.Available,
+                        path.TrafficGuardApplicable
+                            ? "Ölçümler gönderim sırasında kuyruklanmaya işaret ediyor; yük altında test önerilir."
+                            : "Yük altındaki gecikme henüz ölçülmedi."),
+                ],
+            });
+        }
+
         var environment = _environmentSampler.Sample(network);
-        var context = LatencyProfileContext.From(Target, environment, loadedEvidence: false, qosAvailable: false);
+        var context = LatencyProfileContext.From(
+            Target,
+            environment,
+            loadedEvidence: false,
+            qosAvailable: false,
+            restartAllowed: Restart.Allowed);
 
         var ignoreCache = _ignoreCacheOnce;
         _ignoreCacheOnce = false;
         if (ignoreCache)
         {
             _log?.Invoke("latency.profile: kullanıcı yeniden ölçüm istedi; kayıtlı sonuçlar atlanıyor.");
-            await RemoveProfileSafelyAsync(network, adapter).ConfigureAwait(false);
+            await RemoveProfileSafelyAsync(network, adapter!).ConfigureAwait(false);
         }
 
         var profile = ignoreCache
             ? null
-            : await LoadUsableProfileAsync(network, adapter, context, token).ConfigureAwait(false);
+            : await LoadUsableProfileAsync(network, adapter!, context, token).ConfigureAwait(false);
 
         // A profile verified here, on this adapter, against this driver is worth
         // re-applying rather than re-earning: a full paired benchmark on every logon
@@ -676,7 +728,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         if (profile is { AcceptedProperties.Count: > 0 })
         {
             var replayed = await ReplayProfileAsync(
-                network, adapter, profile, baseline, benchmark, path, endpoint, environment, token).ConfigureAwait(false);
+                network, adapter!, profile, baseline, benchmark, path, endpoint, environment, token).ConfigureAwait(false);
 
             if (replayed is not null)
             {
@@ -689,18 +741,27 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             profile = null;
         }
 
-        var candidates = SelectCandidates(adapter, profile, endpoint, environment, context);
+        var candidates = SelectCandidates(adapter!, profile, endpoint, environment, context);
         if (candidates.Count == 0)
         {
             return Publish(new LatencyOptimizationResult
             {
                 Status = LatencyOptimizationStatus.NoGain,
                 StatusLine = LatencyReport.NoGain(
-                    $"Etkin · {adapter.AdapterName} üzerinde denenecek güvenli bir ayar kalmadı.",
+                    $"Etkin · {adapterName} üzerinde denenecek güvenli bir ayar kalmadı.",
                     baseline,
                     [],
                     path),
-                AdapterName = adapter.AdapterName,
+                AdapterName = adapterName,
+                Lanes =
+                [
+                    Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Completed,
+                        $"{endpoint.Label} ölçüldü ({endpoint.ProtocolLabel})."),
+                    Lane(LatencyLane.AdapterSettings, LatencyLaneState.Completed,
+                        "Bu sürücüde denenebilecek güvenli bir ayar kalmadı."),
+                    Lane(LatencyLane.LoadedLatency, LatencyLaneState.Available,
+                        "Yük altındaki gecikme henüz ölçülmedi."),
+                ],
                 NetworkKey = network.Key,
                 Before = baseline,
                 After = baseline,
@@ -713,7 +774,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         }
 
         return await RunCandidatesAsync(
-            network, adapter, baseline, benchmark, path, candidates, endpoint, environment, context, resolution, token)
+            network, adapter!, baseline, benchmark, path, candidates, endpoint, environment, context, resolution, token)
             .ConfigureAwait(false);
     }
 
@@ -811,6 +872,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                         Status = LatencyOptimizationStatus.Failed,
                         StatusLine = "Bağlantı denetimi başarısız oldu ve bazı NIC ayarları geri yüklenemedi; "
                             + "snapshot kurtarma için korundu.",
+                        RestoreFailed = true,
                         AdapterName = adapter.AdapterName,
                         NetworkKey = network.Key,
                         Before = baseline,
@@ -873,6 +935,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     Status = LatencyOptimizationStatus.Failed,
                     StatusLine = "Adaylar elendi ancak bazı NIC ayarları geri yüklenemedi; "
                         + "snapshot kurtarma için korundu.",
+                    RestoreFailed = true,
                     AdapterName = adapter.AdapterName,
                     NetworkKey = network.Key,
                     Before = baseline,
@@ -920,6 +983,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     Status = LatencyOptimizationStatus.Failed,
                     StatusLine = "Son doğrulama geçilemedi ve bazı NIC ayarları geri yüklenemedi; "
                         + "snapshot kurtarma için korundu.",
+                    RestoreFailed = true,
                     AdapterName = adapter.AdapterName,
                     NetworkKey = network.Key,
                     Before = baseline,
@@ -956,10 +1020,12 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         _lastNetworkKey = network.Key;
 
-        // Per-candidate paired deltas remain in Verdicts for diagnostics. The headline
-        // is the paired difference the bundle confirmation measured, which is the only
-        // number that describes the machine as it is actually being left.
-        var improvement = LatencyDelta.Between(baseline, final!);
+        // Per-candidate paired deltas remain in Verdicts for diagnostics. The headline is
+        // the confirmation's own paired difference: its two arms alternated, so drift
+        // over the run cancels instead of being credited to the settings. The plain
+        // start-to-finish difference is reported next to it, and never as a causal claim.
+        var improvement = confirmation.Verdict.Delta;
+        var drift = LatencyDelta.Between(baseline, final!);
         var applied = accepted.Select(candidate => candidate.Description).ToArray();
 
         _log?.Invoke($"latency.committed: {applied.Length} ayar · median {improvement.MedianMs:F1} ms · p95 {improvement.P95Ms:F1} ms");
@@ -976,6 +1042,17 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             Path = path,
             Verdicts = verdicts,
             VerifiedImprovement = improvement,
+            BaselineComparison = drift,
+            ImprovedMetric = confirmation.Verdict.WinningMetric,
+            Lanes =
+            [
+                Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Completed,
+                    $"{endpoint.Label} ölçüldü ({endpoint.ProtocolLabel})."),
+                Lane(LatencyLane.AdapterSettings, LatencyLaneState.Completed,
+                    $"{applied.Length} ayar ölçüldü, doğrulandı ve uygulandı."),
+                Lane(LatencyLane.LoadedLatency, LatencyLaneState.Available,
+                    "Yük altındaki gecikme henüz ölçülmedi."),
+            ],
             TargetLabel = endpoint.Label,
             TargetProtocol = endpoint.ProtocolLabel,
             RouteReferenceOnly = endpoint.RouteReferenceOnly,
@@ -993,7 +1070,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     /// the number the user is shown was measured minutes after the baseline only in the
     /// sense that both halves were.
     /// </remarks>
-    private async Task<(bool Confirmed, LatencyMeasurement? Final)> ConfirmBundleAsync(
+    private async Task<BundleConfirmation> ConfirmBundleAsync(
         NetworkFingerprint network,
         AdapterLatencyCapability adapter,
         LatencyOptimizationSnapshot snapshot,
@@ -1045,7 +1122,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         if (!outcome.Verdict.Accepted)
         {
-            return (false, outcome.LastOptimised);
+            return new BundleConfirmation(false, outcome.LastOptimised, outcome.Verdict);
         }
 
         // Confirmed: put the set back on and leave it there.
@@ -1056,12 +1133,35 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
             if (!reapplied.Applied)
             {
-                return (false, outcome.LastOptimised);
+                return new BundleConfirmation(
+                    false,
+                    outcome.LastOptimised,
+                    outcome.Verdict with
+                    {
+                        Outcome = LatencyVerdictOutcome.NotMeasured,
+                        Cause = reapplied.Cause,
+                        Reason = $"doğrulandıktan sonra kalıcı olarak uygulanamadı: {reapplied.Reason}",
+                    });
             }
         }
 
-        return (true, outcome.LastOptimised);
+        return new BundleConfirmation(true, outcome.LastOptimised, outcome.Verdict);
     }
+
+    /// <summary>
+    /// What the independent confirmation established, including its own paired delta.
+    /// </summary>
+    /// <remarks>
+    /// The verdict travels back with the measurement because the verdict is where the
+    /// causal number lives. Its <see cref="LatencyVerdict.Delta"/> is the mean of the
+    /// confirmation's own alternating cycles - baseline against optimised, minutes apart
+    /// in both directions - which is the only difference here that the settings can be
+    /// said to have caused.
+    /// </remarks>
+    private readonly record struct BundleConfirmation(
+        bool Confirmed,
+        LatencyMeasurement? Final,
+        LatencyVerdict Verdict);
 
     /// <summary>Applies and restores one candidate, with the snapshot kept in step.</summary>
     private sealed class CandidateArm : ILatencyExperimentArm
@@ -1228,13 +1328,13 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
             _log?.Invoke($"latency.candidate.skipped: {candidate.PropertyName} · {moved}");
             await RestoreCandidateAndTrimAsync(snapshot, candidate, token).ConfigureAwait(false);
-            return LatencyArmOutcome.Failed(moved);
+            return LatencyArmOutcome.Failed(moved, LatencyOutcomeCause.EnvironmentChanged);
         }
 
         var reason = applied.Describe();
         _log?.Invoke($"latency.candidate.skipped: {candidate.PropertyName} · {reason}");
         await RestoreCandidateAndTrimAsync(snapshot, candidate, token).ConfigureAwait(false);
-        return LatencyArmOutcome.Failed(reason);
+        return LatencyArmOutcome.Failed(reason, applied.Cause);
     }
 
     /// <summary>
@@ -1527,6 +1627,11 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         _lastNetworkKey = network.Key;
         var applied = candidates.Select(candidate => candidate.Description).ToArray();
+
+        // A replay re-applies a profile that a paired experiment verified on an earlier
+        // run and checks it still beats a fresh baseline. That check is a single
+        // before/after reading, not an alternating experiment, so it is reported as the
+        // baseline comparison it is. The causal claim belongs to the run that earned it.
         var improvement = LatencyDelta.Between(baseline, confirmation);
         var refreshedProfile = profile with
         {
@@ -1549,7 +1654,16 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             After = confirmation,
             AppliedChanges = applied,
             Path = path,
-            VerifiedImprovement = improvement,
+            BaselineComparison = improvement,
+            Lanes =
+            [
+                Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Completed,
+                    $"{endpoint.Label} ölçüldü ({endpoint.ProtocolLabel})."),
+                Lane(LatencyLane.AdapterSettings, LatencyLaneState.Completed,
+                    $"Bu ağda daha önce doğrulanan {applied.Length} ayar yeniden uygulandı ve kontrol edildi."),
+                Lane(LatencyLane.LoadedLatency, LatencyLaneState.Available,
+                    "Yük altındaki gecikme henüz ölçülmedi."),
+            ],
             TargetLabel = endpoint.Label,
             TargetProtocol = endpoint.ProtocolLabel,
             RouteReferenceOnly = endpoint.RouteReferenceOnly,
@@ -1622,7 +1736,27 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     CapabilityFingerprint = adapter.CapabilityFingerprint,
                     VerifiedAt = _now(),
                     AcceptedProperties = [.. verdicts.Where(v => v.Accepted).Select(v => v.PropertyName)],
-                    RejectedProperties = [.. verdicts.Where(v => !v.Accepted).Select(v => v.PropertyName)],
+
+                    // Only a completed experiment may stop a candidate being tried again.
+                    // Everything else - awaiting permission, unsupported, out of budget,
+                    // cancelled, network moved - is recorded separately, for the report,
+                    // and never consulted when candidates are chosen.
+                    RejectedProperties =
+                    [
+                        .. verdicts
+                            .Where(v => !v.Accepted && v.Cause.IsPerformanceEvidence())
+                            .Select(v => v.PropertyName),
+                    ],
+                    Unmeasured =
+                    [
+                        .. verdicts
+                            .Where(v => !v.Accepted && !v.Cause.IsPerformanceEvidence())
+                            .Select(v => new LatencyUnmeasuredEntry
+                            {
+                                PropertyName = v.PropertyName,
+                                Cause = v.Cause,
+                            }),
+                    ],
                     Baseline = LatencySummary.From(baseline),
                     Optimized = optimized is null ? null : LatencySummary.From(optimized),
                     Bottleneck = path.Bottleneck,
@@ -1654,6 +1788,21 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         {
             Status = LatencyOptimizationStatus.NoGain,
             StatusLine = LatencyReport.NoGain(headline, after ?? before, verdicts, path),
+            Lanes =
+            [
+                Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Completed,
+                    endpoint is null
+                        ? "Bağlantı ölçüldü."
+                        : $"{endpoint.Label} ölçüldü ({endpoint.ProtocolLabel})."),
+                Lane(
+                    LatencyLane.AdapterSettings,
+                    verdicts.Any(verdict => verdict.Cause.IsPerformanceEvidence())
+                        ? LatencyLaneState.Completed
+                        : LatencyLaneState.Incomplete,
+                    DescribeAdapterLane(verdicts)),
+                Lane(LatencyLane.LoadedLatency, LatencyLaneState.Available,
+                    "Yük altındaki gecikme henüz ölçülmedi."),
+            ],
             AdapterName = adapter.AdapterName,
             NetworkKey = network.Key,
             Before = before,
@@ -1665,6 +1814,47 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             RouteReferenceOnly = endpoint?.RouteReferenceOnly ?? false,
             Notices = notices ?? [],
         };
+
+    private static LatencyLaneReport Lane(LatencyLane lane, LatencyLaneState state, string detail)
+        => new() { Lane = lane, State = state, Detail = detail };
+
+    /// <summary>
+    /// What the adapter lane actually did, counted rather than summarised as "no gain".
+    /// </summary>
+    /// <remarks>
+    /// A run where four candidates were measured and none helped and a run where four
+    /// candidates were skipped for want of consent both used to read "no improvement
+    /// found". They call for opposite next steps, so the counts are separated.
+    /// </remarks>
+    private static string DescribeAdapterLane(IReadOnlyList<LatencyVerdict> verdicts)
+    {
+        if (verdicts.Count == 0)
+        {
+            return "Hiçbir ayar ölçülmedi.";
+        }
+
+        var measured = verdicts.Count(verdict => verdict.Cause.IsPerformanceEvidence());
+        var awaiting = verdicts.Count(verdict => verdict.Cause == LatencyOutcomeCause.AwaitingPermission);
+        var unmeasured = verdicts.Count - measured;
+
+        var parts = new List<string>();
+        if (measured > 0)
+        {
+            parts.Add($"{measured} ayar ölçüldü, kazanç çıkmadı");
+        }
+
+        if (awaiting > 0)
+        {
+            parts.Add($"{awaiting} ayar izin verilmediği için denenemedi");
+        }
+
+        if (unmeasured - awaiting > 0)
+        {
+            parts.Add($"{unmeasured - awaiting} ayar ölçülemedi");
+        }
+
+        return parts.Count == 0 ? "Hiçbir ayar ölçülmedi." : string.Join(" · ", parts) + ".";
+    }
 
     private LatencyOptimizationResult Publish(LatencyOptimizationResult result)
     {

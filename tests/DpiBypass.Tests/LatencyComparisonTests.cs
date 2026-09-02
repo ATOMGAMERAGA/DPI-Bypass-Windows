@@ -259,9 +259,13 @@ public sealed class LatencyComparisonTests
         var invalidBaseline = Fake.Measurement(30) with { MedianRttMs = double.NaN };
         var invalidOrdering = Fake.Measurement(25, p95: 24, p99: 30);
 
-        Assert.Equal(
-            LatencyVerdictOutcome.Rejected,
-            Evaluate([Pair(invalidBaseline, Fake.Measurement(20))]).Outcome);
+        // Not "rejected": a malformed measurement says nothing about the setting, so the
+        // verdict has to be one the profile cache will not remember as a real answer.
+        var verdict = Evaluate([Pair(invalidBaseline, Fake.Measurement(20))]);
+        Assert.Equal(LatencyVerdictOutcome.NotMeasured, verdict.Outcome);
+        Assert.Equal(LatencyOutcomeCause.InsufficientData, verdict.Cause);
+        Assert.False(verdict.Cause.IsPerformanceEvidence());
+
         Assert.False(LatencyComparison.ConfirmsMeaningfulImprovement(
             Fake.Measurement(30),
             invalidOrdering));
@@ -334,7 +338,15 @@ public sealed class LatencyComparisonTests
         };
 
         // Three enormous "gains", none of which measured the same conditions twice.
-        Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(pairs).Outcome);
+        var verdict = Evaluate(pairs);
+
+        Assert.False(verdict.Accepted);
+
+        // And it is recorded as unmeasured rather than measured-and-useless, so the
+        // candidate is offered again instead of being skipped on the strength of pairs
+        // that were never comparable.
+        Assert.Equal(LatencyVerdictOutcome.NotMeasured, verdict.Outcome);
+        Assert.False(verdict.Cause.IsPerformanceEvidence());
     }
 
     // --- cost ------------------------------------------------------------------------

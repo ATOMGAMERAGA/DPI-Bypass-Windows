@@ -14,7 +14,8 @@ public sealed record LatencySummary
 
     public required double JitterMs { get; init; }
 
-    public required double PacketLossPercent { get; init; }
+    /// <summary>Loss over the series, or null when the instrument does not count packets.</summary>
+    public double? PacketLossPercent { get; init; }
 
     public static LatencySummary From(LatencyMeasurement measurement)
     {
@@ -70,11 +71,23 @@ public sealed record LatencyProfileContext
 
     public bool QosAvailable { get; init; }
 
+    /// <summary>
+    /// Whether the run that produced this record was allowed to restart the adapter.
+    /// </summary>
+    /// <remarks>
+    /// Part of the context because it changes which candidates can be measured at all.
+    /// Most NDIS keywords only take effect after a miniport restart, so a run without
+    /// consent simply cannot reach them - and a record written by that run must not be
+    /// allowed to answer for the run where consent has since been given.
+    /// </remarks>
+    public bool RestartAllowed { get; init; }
+
     public static LatencyProfileContext From(
         LatencyTargetSpec target,
         LatencyEnvironment environment,
         bool loadedEvidence,
-        bool qosAvailable)
+        bool qosAvailable,
+        bool restartAllowed = false)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(environment);
@@ -88,6 +101,7 @@ public sealed record LatencyProfileContext
             LinkRateBucket = environment.WifiRxRateKbps is { } rate ? (int)(rate / 10_000) : null,
             LoadedEvidence = loadedEvidence,
             QosAvailable = qosAvailable,
+            RestartAllowed = restartAllowed,
         };
     }
 
@@ -102,7 +116,12 @@ public sealed record LatencyProfileContext
             && SameOrUnknown(SignalBucket, other.SignalBucket)
             && SameOrUnknown(LinkRateBucket, other.LinkRateBucket)
             && LoadedEvidence == other.LoadedEvidence
-            && QosAvailable == other.QosAvailable;
+            && QosAvailable == other.QosAvailable
+
+            // A record made without restart permission covers a run that also has none.
+            // The moment permission is granted, more candidates become reachable and the
+            // old record no longer describes the same experiment.
+            && (RestartAllowed || !other.RestartAllowed);
     }
 
     private static bool SameOrUnknown(string? first, string? second)
@@ -110,6 +129,14 @@ public sealed record LatencyProfileContext
 
     private static bool SameOrUnknown(int? first, int? second)
         => first is null || second is null || first == second;
+}
+
+/// <summary>One candidate a run could not measure, with the obstacle that stopped it.</summary>
+public sealed record LatencyUnmeasuredEntry
+{
+    public required string PropertyName { get; init; }
+
+    public required LatencyOutcomeCause Cause { get; init; }
 }
 
 public sealed record LatencyProfile
@@ -121,11 +148,20 @@ public sealed record LatencyProfile
     /// Bumped when the measurement method changes.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A result reached by a weaker method is not evidence for a stronger one. Version 2
     /// is the alternating, settled, environment-validated design; anything recorded by
     /// version 1 was accepted on rules this build no longer trusts.
+    /// </para>
+    /// <para>
+    /// Version 3 is the migration for the rejection bug: versions 1 and 2 wrote every
+    /// non-acceptance into <see cref="RejectedProperties"/>, including candidates that
+    /// were never applied at all, and then skipped them for three days. Those records
+    /// cannot be repaired - the file does not say which entries were measured - so the
+    /// version bump retires them wholesale rather than replaying a wrong answer. Nothing
+    /// is lost but one re-measurement.
     /// </remarks>
-    public const int CurrentMethodologyVersion = 2;
+    public const int CurrentMethodologyVersion = 3;
 
     /// <summary>Beyond this a profile is re-measured rather than trusted.</summary>
     public static readonly TimeSpan MaximumAge = TimeSpan.FromDays(30);
@@ -157,8 +193,26 @@ public sealed record LatencyProfile
     /// <summary>Properties a paired benchmark verified as an improvement here.</summary>
     public List<string> AcceptedProperties { get; init; } = [];
 
-    /// <summary>Properties a paired benchmark measured and found not worth keeping.</summary>
+    /// <summary>
+    /// Properties a completed paired benchmark measured and found not worth keeping.
+    /// </summary>
+    /// <remarks>
+    /// Only measured outcomes belong here. A candidate that was never applied - awaiting
+    /// permission, unsupported, cut short by the time budget, interrupted by a network
+    /// change - has produced no evidence about its performance, and writing it here made
+    /// the next run skip a setting nobody had ever tried.
+    /// </remarks>
     public List<string> RejectedProperties { get; init; } = [];
+
+    /// <summary>
+    /// Candidates this run could not measure, and why, kept for the report only.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately never consulted by candidate selection. It exists so the card can say
+    /// "this needs permission" instead of silently offering the same setting again with
+    /// no explanation, and so a support log shows what a run could not reach.
+    /// </remarks>
+    public List<LatencyUnmeasuredEntry> Unmeasured { get; init; } = [];
 
     public LatencySummary? Baseline { get; init; }
 

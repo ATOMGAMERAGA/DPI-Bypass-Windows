@@ -39,6 +39,19 @@ public sealed record HotspotDiagnosticResult
 
     public required string NetworkName { get; init; }
 
+    /// <summary>
+    /// The network this ran on, so a result cannot be shown under a different one.
+    /// </summary>
+    /// <remarks>
+    /// The display name is not enough: two networks can share one, and moving between
+    /// them is exactly when a user is looking at this card. The key is the same hash the
+    /// rest of the app uses to identify a network.
+    /// </remarks>
+    public string NetworkKey { get; init; } = string.Empty;
+
+    /// <summary>When the checks finished, so the card can say how fresh they are.</summary>
+    public DateTimeOffset CompletedAt { get; init; } = DateTimeOffset.UtcNow;
+
     public required string AdapterName { get; init; }
 
     public required bool HasIpv4 { get; init; }
@@ -186,11 +199,16 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
 
     private readonly ILatencyProbe _probe;
     private readonly Action<string>? _log;
+    private readonly Func<DateTimeOffset> _now;
 
-    public MobileHotspotDiagnostics(ILatencyProbe? probe = null, Action<string>? log = null)
+    public MobileHotspotDiagnostics(
+        ILatencyProbe? probe = null,
+        Action<string>? log = null,
+        Func<DateTimeOffset>? now = null)
     {
         _probe = probe ?? new LatencyProbe();
         _log = log;
+        _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
     public async Task<HotspotDiagnosticResult> RunAsync(
@@ -210,6 +228,8 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
         var result = new HotspotDiagnosticResult
         {
             NetworkName = network.DisplayName,
+            NetworkKey = network.Key,
+            CompletedAt = _now(),
             AdapterName = network.AdapterName ?? "-",
             HasIpv4 = addresses.HasIpv4,
             HasIpv6 = addresses.HasIpv6,

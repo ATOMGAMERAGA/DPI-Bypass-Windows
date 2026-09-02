@@ -152,6 +152,16 @@ public sealed class LatencyProbe : ILatencyProbe
     /// <summary>How many gateway probes may overshoot the request before the series stops.</summary>
     private const int MaximumGatewayOvershoot = 4;
 
+    /// <summary>
+    /// Consecutive reads with no new round trip before a passive series gives up.
+    /// </summary>
+    /// <remarks>
+    /// At the default pacing this is a couple of seconds of a connection sending nothing.
+    /// The series then reports what it has rather than sitting on a counter that is not
+    /// going to move, which is what an idle game session looks like.
+    /// </remarks>
+    private const int StalledPollLimit = 40;
+
     /// <summary>Deadline for the yes/no reachability checks between experiment arms.</summary>
     private const int ConnectivityTimeoutMs = 900;
 
@@ -160,9 +170,13 @@ public sealed class LatencyProbe : ILatencyProbe
     private static IReadOnlyList<IPAddress> ReferenceEndpoints => LatencyTargetResolver.ReferenceAddresses;
 
     private readonly INetworkLoadSampler _load;
+    private readonly Action<string>? _log;
 
-    public LatencyProbe(INetworkLoadSampler? loadSampler = null)
-        => _load = loadSampler ?? new NetworkLoadSampler();
+    public LatencyProbe(INetworkLoadSampler? loadSampler = null, Action<string>? log = null)
+    {
+        _load = loadSampler ?? new NetworkLoadSampler();
+        _log = log;
+    }
 
     public async Task<LatencyMeasurement> MeasureAsync(
         NetworkFingerprint network,
@@ -212,7 +226,8 @@ public sealed class LatencyProbe : ILatencyProbe
             gatewaySamples.Samples,
             gatewaySamples.Attempts,
             NetworkLoadSample.Between(loadStart, _load.Read(network)),
-            clockResolutionMs: series.ClockResolutionMs);
+            clockResolutionMs: series.ClockResolutionMs,
+            source: series.Source);
     }
 
     /// <summary>Dispatches to the instrument the pinned endpoint actually calls for.</summary>
@@ -272,7 +287,8 @@ public sealed class LatencyProbe : ILatencyProbe
         string Protocol,
         IReadOnlyList<double> Samples,
         int Attempts,
-        double ClockResolutionMs = IcmpResolutionMs);
+        double ClockResolutionMs = IcmpResolutionMs,
+        LatencySampleSource Source = LatencySampleSource.ActiveProbe);
 
     /// <summary>The gateway half of a measurement, with the attempts it really made.</summary>
     private sealed record GatewaySeries(IReadOnlyList<double> Samples, int Attempts)
@@ -330,7 +346,8 @@ public sealed class LatencyProbe : ILatencyProbe
     private static async Task<SeriesResult> MeasureTcpAsync(
         LatencyEndpoint endpoint,
         LatencyProbeRequest request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? fallbackReason = null)
     {
         var port = endpoint.Port ?? 443;
         var attempts = Math.Clamp(request.ProbeCount, 3, MaximumTcpProbes);
@@ -358,7 +375,9 @@ public sealed class LatencyProbe : ILatencyProbe
 
         return new SeriesResult(
             endpoint.Address.ToString(),
-            $"TCP/{port} (el sıkışma süresi)",
+            fallbackReason is null
+                ? $"TCP/{port} (el sıkışma süresi)"
+                : $"TCP/{port} (el sıkışma süresi; {fallbackReason})",
             samples,
             attempts,
             StopwatchResolutionMs);
@@ -368,13 +387,23 @@ public sealed class LatencyProbe : ILatencyProbe
     /// Samples what TCP has already measured on a connection the application owns.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// No packets are sent. Each sample is a read of the stack's smoothed estimate, which
     /// makes this the only instrument here that reports a running game's own round trip
     /// without adding a single connection to the server it is talking to. A stack that
     /// will not enable collection produces no samples at all rather than a fallback
     /// wearing the same label.
+    /// </para>
+    /// <para>
+    /// A new sample is recognised by <c>CountRtt</c> advancing, which is the counter the
+    /// stack increments when it measures a packet - not by <c>SmoothedRtt</c> changing
+    /// value. The filtered estimate can repeat across genuinely new measurements on a
+    /// stable link, and can also sit still for many polls, so reading it as an event
+    /// source both drops real samples and invents variation. The series is marked as a
+    /// passive observation so nothing downstream turns the poll count into packet loss.
+    /// </para>
     /// </remarks>
-    private static async Task<SeriesResult> MeasureEStatsAsync(
+    private async Task<SeriesResult> MeasureEStatsAsync(
         LatencyEndpoint endpoint,
         LatencyProbeRequest request,
         CancellationToken cancellationToken)
@@ -383,42 +412,77 @@ public sealed class LatencyProbe : ILatencyProbe
         var remote = new IPEndPoint(endpoint.Address, endpoint.Port ?? 0);
         var label = $"TCP/{remote.Port} (EStats)";
 
-        if (!TcpEStats.TryEnable(local, remote))
+        var enabled = TcpEStats.Enable(local, remote);
+        if (!enabled.Enabled)
         {
             // Not supported here, or not permitted. The handshake series is a real
             // measurement of a different thing, so it is used and said to be different -
-            // never reported under the label of the connection's own round trip.
-            return await MeasureTcpAsync(endpoint, request, cancellationToken).ConfigureAwait(false);
+            // never reported under the label of the connection's own round trip. The
+            // native error travels with the label so a support log says which it was.
+            _log?.Invoke($"latency.estats: {enabled.Failure}");
+            return await MeasureTcpAsync(
+                endpoint,
+                request,
+                cancellationToken,
+                $"EStats açılamadı, Windows hata kodu {enabled.NativeError}").ConfigureAwait(false);
         }
 
-        var attempts = Math.Max(1, request.ProbeCount);
-        var samples = new List<double>(attempts);
+        var wanted = Math.Max(1, request.ProbeCount);
+        var samples = new List<double>(wanted);
         var pacing = request.Pacing > TimeSpan.Zero ? request.Pacing : TimeSpan.FromMilliseconds(45);
-        var previous = double.NaN;
+        var polls = 0;
+        var warmupLeft = Math.Max(0, request.WarmupCount);
+        var stalled = 0;
+        uint? lastCount = null;
+        TcpEStats.PathRead last = default;
 
-        for (var index = 0; index < attempts + request.WarmupCount; index++)
+        // Two ceilings, because a passive series is bounded by the connection's own
+        // traffic rather than by anything this code controls. The first stops a busy
+        // connection from being polled indefinitely; the second stops a quiet one from
+        // holding the series open at all, since a connection nobody is sending on has no
+        // new round trips to observe and waiting will not produce any.
+        var maximumPolls = (wanted + warmupLeft) * 4;
+
+        while (samples.Count < wanted && polls < maximumPolls && stalled < StalledPollLimit)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var sample = TcpEStats.TryRead(local, remote);
-            if (sample is null)
+            polls++;
+            last = TcpEStats.Read(local, remote);
+
+            if (last.Status is TcpEStats.PathReadStatus.CallFailed
+                or TcpEStats.PathReadStatus.CollectionDisabled
+                or TcpEStats.PathReadStatus.Unsupported)
             {
-                // The connection went away mid-series. What was collected still describes
-                // it; nothing is invented to fill the rest.
+                // The connection went away mid-series, or the stack stopped answering.
+                // What was collected still describes it; nothing is invented for the rest.
                 break;
             }
 
-            // The smoothed estimate only moves when the stack takes a new measurement, so
-            // repeating an unchanged value would report the same round trip several times
-            // and shrink the apparent variation to nothing.
-            if (index >= request.WarmupCount && !AreClose(sample.SmoothedRttMs, previous))
+            if (last.Sample is { } sample)
             {
-                samples.Add(sample.SmoothedRttMs);
+                // CountRtt is the stack's own count of measured packets. It advancing is
+                // the only reliable statement that there is something new to record; the
+                // same smoothed value arriving twice with a higher count is two samples,
+                // and an unchanged count is none however much the estimate drifts.
+                var isNew = lastCount is null || sample.CountRtt != lastCount;
+                lastCount = sample.CountRtt;
+                stalled = isNew ? 0 : stalled + 1;
+
+                if (isNew)
+                {
+                    if (warmupLeft > 0)
+                    {
+                        warmupLeft--;
+                    }
+                    else
+                    {
+                        samples.Add(sample.SmoothedRttMs);
+                    }
+                }
             }
 
-            previous = sample.SmoothedRttMs;
-
-            if (index + 1 < attempts + request.WarmupCount)
+            if (samples.Count < wanted && polls < maximumPolls)
             {
                 await Task.Delay(pacing, cancellationToken).ConfigureAwait(false);
             }
@@ -427,15 +491,25 @@ public sealed class LatencyProbe : ILatencyProbe
         if (samples.Count == 0)
         {
             // Collection was enabled but the connection produced nothing usable - it ended,
-            // or the stack has not measured it yet. Fall back rather than report an empty
-            // series as an unreachable target, and label what the fallback actually is.
-            return await MeasureTcpAsync(endpoint, request, cancellationToken).ConfigureAwait(false);
+            // it is idle, or the stack has not measured it yet. Fall back rather than
+            // report an empty series as an unreachable target, and label the fallback.
+            _log?.Invoke($"latency.estats: {last.Describe()}");
+            return await MeasureTcpAsync(
+                endpoint,
+                request,
+                cancellationToken,
+                last.Status == default ? "EStats örneği alınamadı" : last.Describe()).ConfigureAwait(false);
         }
 
-        return new SeriesResult(endpoint.Address.ToString(), label, samples, attempts, IcmpResolutionMs);
-
-        static bool AreClose(double first, double second)
-            => double.IsFinite(second) && Math.Abs(first - second) < 0.0001;
+        // Attempts is the count of things sent, and this instrument sends nothing. The
+        // poll count goes nowhere near it.
+        return new SeriesResult(
+            endpoint.Address.ToString(),
+            label,
+            samples,
+            Attempts: 0,
+            IcmpResolutionMs,
+            LatencySampleSource.PassiveObservation);
     }
 
     /// <summary>Times the Minecraft Java status Ping/Pong exchange: a real application RTT.</summary>

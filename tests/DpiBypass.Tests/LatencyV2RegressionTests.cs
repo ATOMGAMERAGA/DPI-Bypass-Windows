@@ -529,19 +529,48 @@ public sealed class LatencyCardMarkupTests
     [Fact]
     public void TheCardShowsTheStagePanelTheCancelButtonAndTheResultBlock()
     {
-        var markup = File.ReadAllText(RepoFiles.MainWindowXaml);
+        var bindings = UiBindings.PathsIn(RepoFiles.MainWindowXaml);
 
-        Assert.Contains("{Binding LatencyStageTitle}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyStageInstruction}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyStageRate}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyStageRemaining}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyStageData}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyCancelCommand}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyResultSummary}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyDataUsedSummary}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding AllowAdapterRestart", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding SelectedGuardMode", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding LatencyEndpoints}", markup, StringComparison.Ordinal);
+        foreach (var member in new[]
+        {
+            "LatencyStageInstruction",
+            "LatencyStageRate",
+            "LatencyStageRemaining",
+            "LatencyStageData",
+            "LatencyProgressTitle",
+            "LatencyCancelCommand",
+            "LatencyResultSummary",
+            "LatencyDataUsedSummary",
+            "AllowAdapterRestart",
+            "SelectedGuardMode",
+            "LatencyEndpoints",
+        })
+        {
+            Assert.Contains(member, bindings);
+        }
+    }
+
+    /// <summary>
+    /// The progress area belongs to every run, not only to the deep test.
+    /// </summary>
+    /// <remarks>
+    /// Turning the mode on starts a paired benchmark that takes minutes. It used to show
+    /// a bare indeterminate bar with a stop button wired only to the loaded lane, so the
+    /// longest-running operation in the feature was the one that could not be stopped.
+    /// </remarks>
+    [Fact]
+    public void TheProgressAreaAndTheStopButtonCoverEveryRun()
+    {
+        var viewModel = File.ReadAllText(RepoFiles.MainViewModel);
+        var bindings = UiBindings.PathsIn(RepoFiles.MainWindowXaml);
+
+        Assert.Contains("IsLatencyProgressVisible", bindings);
+        Assert.Contains("public bool IsLatencyProgressVisible => _isLatencyBusy;", viewModel, StringComparison.Ordinal);
+
+        // The cancel button follows the service's own answer rather than the deep-test
+        // flag, so it is live during the ordinary optimization too.
+        Assert.Contains("_service.CancelLatencyRun()", viewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("_isDeepTestRunning && _latencyStageCanCancel", viewModel, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -554,17 +583,27 @@ public sealed class LatencyCardMarkupTests
         var markup = File.ReadAllText(RepoFiles.MainWindowXaml);
 
         Assert.Contains("oyun değil", markup, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Oyununuz asla sınırlanmaz", markup, StringComparison.Ordinal);
+        Assert.Contains("oyununuz sınırlanmaz", markup, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The download half is diagnosed honestly rather than promised a fix.</summary>
+    /// <summary>
+    /// The download half is diagnosed honestly rather than promised a fix.
+    /// </summary>
+    /// <remarks>
+    /// Asserted against the engine that produces the notice rather than against the
+    /// card's own paragraph: the sentence a user sees when their download queue is the
+    /// problem is generated from the measurement, so that is where it has to be right.
+    /// </remarks>
     [Fact]
     public void TheCardIsHonestAboutWhatALocalLimitCannotReach()
     {
         var markup = File.ReadAllText(RepoFiles.MainWindowXaml);
+        var lane = File.ReadAllText(Path.Combine(
+            RepoFiles.CoreProjectDirectory, "Network", "Latency", "LoadedLatencyLane.cs"));
 
         Assert.Contains("operatörün ekipmanında", markup, StringComparison.Ordinal);
-        Assert.Contains("SQM/CAKE", markup, StringComparison.Ordinal);
+        Assert.Contains("operatörün", lane, StringComparison.Ordinal);
+        Assert.Contains("SQM/CAKE", lane, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -590,11 +629,12 @@ public sealed class LatencyCardMarkupTests
             "SetLowLatencyModeAsync",
             "TestLatencyAsync",
             "RunLoadedLatencyTestAsync",
-            "CancelLoadedLatencyTest",
+            "CancelLatencyRun",
             "RetestLatencyAsync",
             "RestoreLatencyAsync",
             "ClearLatencyProfiles",
             "SetLatencyPreferences",
+            "RememberCurrentVodafoneNetwork",
         ];
 
         foreach (var method in required)

@@ -119,18 +119,30 @@ public sealed class LoadedLatencyLane
             // Cancellation is a state the user chose, not a failure, and it still has to
             // leave the machine as it was found: every policy this run created is ours,
             // and the sweep removes ours and only ours.
-            var removed = await ClearOwnedPoliciesAsync(CancellationToken.None).ConfigureAwait(false);
-            Report(LoadedLaneStage.Cancelled, string.Empty, removed > 0
-                ? $"İptal edildi; oluşturulan {removed} QoS ilkesi kaldırıldı."
-                : "İptal edildi; kaldırılacak bir ilke yoktu.");
+            var sweep = await SweepOwnedPoliciesAsync(CancellationToken.None).ConfigureAwait(false);
+            Report(LoadedLaneStage.Cancelled, string.Empty, $"İptal edildi. {sweep.Describe()}");
 
+            // A sweep that failed leaves a rate limit on the machine. That is a failure
+            // with a recovery action, not a tidy cancellation, and it says so.
             return new LatencyOptimizationResult
             {
-                Status = LatencyOptimizationStatus.Cancelled,
-                StatusLine = removed > 0
-                    ? $"Derin test iptal edildi; bu çalışmanın oluşturduğu {removed} QoS ilkesi kaldırıldı."
-                    : "Derin test iptal edildi; hiçbir ayar değiştirilmemişti.",
+                Status = sweep.IsClean ? LatencyOptimizationStatus.Cancelled : LatencyOptimizationStatus.Failed,
+                StatusLine = sweep.IsClean
+                    ? $"Derin test iptal edildi. {sweep.Describe()}"
+                    : "Derin test iptal edildi, ancak bu uygulamanın oluşturduğu QoS ilkeleri kaldırılamadı; "
+                        + $"gönderim hızınız hâlâ sınırlı olabilir. {sweep.Failure} "
+                        + "\"Ayarları geri al\" ile yeniden deneyin.",
+                RestoreFailed = !sweep.IsClean,
                 TargetLabel = request.Target.Describe(),
+                Lanes =
+                [
+                    new LatencyLaneReport
+                    {
+                        Lane = LatencyLane.TrafficGuard,
+                        State = sweep.IsClean ? LatencyLaneState.Incomplete : LatencyLaneState.Blocked,
+                        Detail = sweep.Describe(),
+                    },
+                ],
             };
         }
     }
@@ -154,12 +166,43 @@ public sealed class LoadedLatencyLane
             return Failed(request, resolution.Failure ?? "Ölçüm hedefi çözümlenemedi.", network.Key);
         }
 
-        var endpoint = resolution.Endpoints[0];
+        // The same choice the idle lane makes, made the same way: survey the target's own
+        // addresses and pin the one that answers. Taking Endpoints[0] regardless meant a
+        // target whose first address is silent produced a failure on one lane and a
+        // measurement on the other.
+        var choice = await LatencyEndpointSelector.ChooseAsync(
+            resolution,
+            (candidate, token) => _probe.MeasureAsync(network, LatencyProbeRequest.Survey.For(candidate), token),
+            cancellationToken).ConfigureAwait(false);
+
+        var endpoint = choice.Endpoint;
         var probe = request.Probe.For(endpoint);
+
+        if (choice.Notice is not null)
+        {
+            return Failed(request, choice.Notice, network.Key, endpoint);
+        }
 
         // --- 2. a quiet link, then the idle baseline ---------------------------------
         Report(LoadedLaneStage.WaitingForQuietLink, StopInstruction(LoadDirection.Upload));
-        await _load.WaitForQuietLinkAsync(network, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
+
+        // A link that never went quiet means the "idle" baseline was measured over
+        // somebody's download. Every queueing number in this run is that baseline
+        // subtracted from a loaded one, so continuing without saying so would report a
+        // queue that had already been counted into both halves.
+        var quiet = await _load
+            .WaitForQuietLinkAsync(network, TimeSpan.FromSeconds(20), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!quiet)
+        {
+            return Incomplete(
+                request,
+                "Hat ölçüm için yeterince boşalmadı; boştaki gecikme ölçülemedi. "
+                    + "Süren aktarımları durdurup yeniden deneyin.",
+                network.Key,
+                endpoint);
+        }
 
         Report(LoadedLaneStage.IdleBaseline, string.Empty);
         var idle = await _probe.MeasureAsync(network, probe, cancellationToken).ConfigureAwait(false);
@@ -192,12 +235,27 @@ public sealed class LoadedLatencyLane
 
         // --- 4. the download half, which is a separate stage and says so -------------
         LoadExperimentResult? download = null;
+        var downloadSkipped = (string?)null;
+
         if (request.MeasureDownload)
         {
             Report(LoadedLaneStage.AwaitingUploadStop, StopInstruction(LoadDirection.Upload));
-            await _load.WaitForQuietLinkAsync(network, TimeSpan.FromSeconds(30), cancellationToken)
+            var settled = await _load
+                .WaitForQuietLinkAsync(network, TimeSpan.FromSeconds(30), cancellationToken)
                 .ConfigureAwait(false);
 
+            // The download half is measured against the idle baseline, so it needs the
+            // upload to have actually stopped. If it did not, the half is skipped and
+            // said to be skipped, rather than producing a difference of two loaded
+            // windows and labelling it download queueing.
+            if (!settled)
+            {
+                downloadSkipped = "Gönderim durmadığı için indirme ölçümü yapılmadı.";
+            }
+        }
+
+        if (request.MeasureDownload && downloadSkipped is null)
+        {
             download = await _load.RunAsync(
                 network,
                 new LoadExperimentRequest
@@ -236,7 +294,7 @@ public sealed class LoadedLatencyLane
             $"latency.loaded.completed: gönderim kuyruğu {Describe(upload.QueueingMs)} · "
             + $"indirme kuyruğu {Describe(download?.QueueingMs)}");
 
-        var notices = BuildNotices(resolution, upload, download, capacity);
+        var notices = BuildNotices(resolution, upload, download, capacity, downloadSkipped);
         var status = guard.IsActive
             ? LatencyOptimizationStatus.TrafficGuardActive
             : upload.Succeeded || download is { Succeeded: true }
@@ -258,9 +316,15 @@ public sealed class LoadedLatencyLane
             AdapterName = network.AdapterName ?? network.DisplayName,
             NetworkKey = network.Key,
             Before = upload.Idle ?? idle,
-            After = upload.Loaded ?? download?.Loaded,
+
+            // Deliberately null. This lane changes no adapter setting, so there is no
+            // "idle after" to report; putting the loaded window here is what let the card
+            // print a round trip measured mid-upload as the user's idle ping.
+            After = null,
             UploadLoaded = upload.Loaded,
             DownloadLoaded = download?.Loaded,
+            UploadLoadedAfter = guard.LoadedAfter,
+            Lanes = BuildLanes(endpoint, upload, download, downloadSkipped, guard),
             Path = path,
             TrafficGuard = guard,
             TargetLabel = endpoint.Label,
@@ -273,12 +337,41 @@ public sealed class LoadedLatencyLane
         };
     }
 
+    /// <summary>
+    /// What a sweep of this application's own QoS policies actually achieved.
+    /// </summary>
+    /// <remarks>
+    /// Returning a bare count made "there was nothing to remove" and "removal failed"
+    /// both come back as zero, so a rollback that left a rate limit in place printed the
+    /// same reassuring sentence as a clean run. A user whose upload is still capped needs
+    /// to be told, and told what to do about it.
+    /// </remarks>
+    public readonly record struct QosSweepResult(bool Succeeded, int Removed, string? Failure)
+    {
+        public static readonly QosSweepResult Nothing = new(true, 0, null);
+
+        /// <summary>Whether the machine is now free of policies this application made.</summary>
+        public bool IsClean => Succeeded;
+
+        public string Describe() => (Succeeded, Removed) switch
+        {
+            (false, _) => $"QoS ilkeleri kaldırılamadı: {Failure}",
+            (true, 0) => "Kaldırılacak bir QoS ilkesi yoktu.",
+            _ => $"Bu çalışmanın oluşturduğu {Removed} QoS ilkesi kaldırıldı.",
+        };
+    }
+
     /// <summary>Removes every QoS policy this application owns, wherever it came from.</summary>
     public async Task<int> ClearOwnedPoliciesAsync(CancellationToken cancellationToken = default)
+        => (await SweepOwnedPoliciesAsync(cancellationToken).ConfigureAwait(false)).Removed;
+
+    /// <summary>The same sweep, with the failure kept rather than flattened into zero.</summary>
+    public async Task<QosSweepResult> SweepOwnedPoliciesAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            return await _qos.RemoveAllOwnedAsync(cancellationToken).ConfigureAwait(false);
+            var removed = await _qos.RemoveAllOwnedAsync(cancellationToken).ConfigureAwait(false);
+            return new QosSweepResult(true, removed, null);
         }
         catch (OperationCanceledException)
         {
@@ -287,7 +380,7 @@ public sealed class LoadedLatencyLane
         catch (Exception ex)
         {
             _log?.Invoke($"latency.guard: ilkeler temizlenemedi ({ex.Message}).");
-            return 0;
+            return new QosSweepResult(false, 0, ex.Message);
         }
     }
 
@@ -391,13 +484,19 @@ public sealed class LoadedLatencyLane
         LatencyTargetResolution resolution,
         LoadExperimentResult upload,
         LoadExperimentResult? download,
-        LinkCapacityEstimate capacity)
+        LinkCapacityEstimate capacity,
+        string? downloadSkipped)
     {
         var notices = new List<string>();
 
         if (resolution.Notice is not null)
         {
             notices.Add(resolution.Notice);
+        }
+
+        if (downloadSkipped is not null)
+        {
+            notices.Add(downloadSkipped);
         }
 
         if (upload.Failure is not null)
@@ -426,6 +525,63 @@ public sealed class LoadedLatencyLane
         return notices;
     }
 
+    /// <summary>What this run measured and what it did not, one line each.</summary>
+    private static IReadOnlyList<LatencyLaneReport> BuildLanes(
+        LatencyEndpoint endpoint,
+        LoadExperimentResult upload,
+        LoadExperimentResult? download,
+        string? downloadSkipped,
+        TrafficGuardState guard)
+    {
+        var lanes = new List<LatencyLaneReport>
+        {
+            new()
+            {
+                Lane = LatencyLane.TargetMeasurement,
+                State = LatencyLaneState.Completed,
+                Detail = $"{endpoint.Label} ölçüldü ({endpoint.ProtocolLabel}).",
+            },
+            new()
+            {
+                Lane = LatencyLane.LoadedLatency,
+
+                // "Succeeded" here means enough load and enough samples to compare. A run
+                // where the user never started a transfer is incomplete, not a finding of
+                // no queueing.
+                State = upload.Succeeded || download is { Succeeded: true }
+                    ? LatencyLaneState.Completed
+                    : LatencyLaneState.Incomplete,
+                Detail = (upload.Succeeded, download?.Succeeded, downloadSkipped) switch
+                {
+                    (true, true, _) => "Gönderim ve indirme sırasındaki gecikme ölçüldü.",
+                    (true, _, { } skipped) => $"Gönderim sırasındaki gecikme ölçüldü. {skipped}",
+                    (true, _, _) => "Gönderim sırasındaki gecikme ölçüldü.",
+                    (false, true, _) => "İndirme sırasındaki gecikme ölçüldü; gönderim ölçümü tamamlanamadı.",
+                    _ => upload.Failure ?? "Yeterli yük oluşmadığı için ölçüm tamamlanamadı.",
+                },
+            },
+        };
+
+        lanes.Add(new LatencyLaneReport
+        {
+            Lane = LatencyLane.TrafficGuard,
+            State = guard.Status switch
+            {
+                TrafficGuardStatus.Off => LatencyLaneState.Available,
+                TrafficGuardStatus.Active => LatencyLaneState.Completed,
+                TrafficGuardStatus.RolledBack => LatencyLaneState.Completed,
+                TrafficGuardStatus.ApplicationNotRunning => LatencyLaneState.Blocked,
+                TrafficGuardStatus.NotMeasured => LatencyLaneState.Incomplete,
+                _ => LatencyLaneState.Incomplete,
+            },
+            Detail = string.IsNullOrWhiteSpace(guard.Summary)
+                ? "Gönderim sınırı denenmedi."
+                : guard.Summary,
+        });
+
+        return lanes;
+    }
+
     private void Report(
         LoadedLaneStage stage,
         string instruction,
@@ -441,6 +597,40 @@ public sealed class LoadedLatencyLane
             CanCancel = stage is not (LoadedLaneStage.Committed or LoadedLaneStage.NoGain
                 or LoadedLaneStage.RolledBack or LoadedLaneStage.Cancelled or LoadedLaneStage.Failed),
         });
+
+    /// <summary>
+    /// The run could not finish measuring, which is not the same as finding no gain.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="Failed"/> because the user's next step differs: this one
+    /// names the condition that was missing and can be retried immediately.
+    /// </remarks>
+    private LatencyOptimizationResult Incomplete(
+        LoadedLaneRequest request,
+        string reason,
+        string networkKey,
+        LatencyEndpoint? endpoint = null)
+    {
+        Report(LoadedLaneStage.Failed, string.Empty, reason);
+
+        return new LatencyOptimizationResult
+        {
+            Status = LatencyOptimizationStatus.NeedsDeepTest,
+            StatusLine = reason,
+            NetworkKey = networkKey,
+            TargetLabel = endpoint?.Label ?? request.Target.Describe(),
+            TargetProtocol = endpoint?.ProtocolLabel ?? string.Empty,
+            Lanes =
+            [
+                new LatencyLaneReport
+                {
+                    Lane = LatencyLane.LoadedLatency,
+                    State = LatencyLaneState.Incomplete,
+                    Detail = reason,
+                },
+            ],
+        };
+    }
 
     private LatencyOptimizationResult Failed(
         LoadedLaneRequest request,

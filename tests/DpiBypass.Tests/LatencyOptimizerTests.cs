@@ -719,7 +719,12 @@ public sealed class LatencyOptimizerTests
         var result = await replay.Optimizer.OptimizeAsync(network);
 
         Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
-        Assert.Equal(6, result.VerifiedImprovement!.MedianMs);
+
+        // A replay re-applies a profile an earlier run verified and checks it against a
+        // fresh baseline. That single before/after reading is a baseline comparison, not
+        // a paired experiment, so it is not reported as a verified causal gain.
+        Assert.Null(result.VerifiedImprovement);
+        Assert.Equal(6, result.BaselineComparison!.MedianMs);
         Assert.Contains(Fake.DefaultKeyword, controller.Live);
         Assert.Single(controller.Applied);
     }
