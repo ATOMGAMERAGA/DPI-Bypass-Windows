@@ -60,21 +60,57 @@ public sealed class UiMarkupTests
     [Fact]
     public void VodafoneFeatureIdentityAndHotspotDiagnosticsAreBothPresent()
     {
-        var document = XDocument.Load(FindMainWindow());
-        var markup = document.ToString(SaveOptions.DisableFormatting);
+        var bindings = UiBindings.PathsIn(FindMainWindow());
+        var markup = XDocument.Load(FindMainWindow()).ToString(SaveOptions.DisableFormatting);
 
+        // The name and the switch stay visible; the feature was never up for removal.
         Assert.Contains("Vodafone Sınırsız Modu", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding VodafoneModeEnabled, Mode=TwoWay}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding VodafoneStatusLine}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding VodafoneNetworks}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding ForgetVodafoneNetworkCommand}", markup, StringComparison.Ordinal);
 
-        Assert.Contains("{Binding HotspotDiagnostics, Mode=TwoWay}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding HotspotDiagnoseCommand}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding HotspotCleanupCommand}", markup, StringComparison.Ordinal);
-        Assert.Contains("{Binding HotspotStatusLine}", markup, StringComparison.Ordinal);
+        // Every capability the section has is reachable from the card. Checked as
+        // view-model members rather than as exact binding strings, so rearranging the
+        // markup does not fail the test while dropping a control still does.
+        foreach (var member in new[]
+        {
+            "VodafoneModeEnabled",
+            "VodafoneStatusLine",
+            "VodafoneNetworks",
+            "ForgetVodafoneNetworkCommand",
+            "RememberVodafoneNetworkCommand",
+            "HotspotDiagnostics",
+            "HotspotDiagnoseCommand",
+            "HotspotCleanupCommand",
+            "HotspotCards",
+            "HotspotDetails",
+            "HotspotSuggestion",
+            "HotspotCheckedAt",
+        })
+        {
+            Assert.Contains(member, bindings);
+        }
+    }
 
-        Assert.DoesNotContain("Vodafone sınırsız modu&quot; (hotspot TTL yeniden yazımı) kaldırıldı", markup, StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// The Vodafone card renders structured findings, not the report text.
+    /// </summary>
+    /// <remarks>
+    /// <c>ToReport()</c> is written for a person to paste into a support thread. Printing
+    /// it into the main area was the whole of the result presentation, and reading it back
+    /// would make the interface depend on the exact wording of a diagnostic sentence. It
+    /// belongs under "Teknik ayrıntılar" and nowhere else.
+    /// </remarks>
+    [Fact]
+    public void TheVodafoneCardShowsStructuredFindingsRatherThanTheRawReport()
+    {
+        var viewModel = File.ReadAllText(RepoFiles.MainViewModel);
+        var bindings = UiBindings.PathsIn(FindMainWindow());
+
+        // The card is built from HotspotStatusView, and the raw report is only ever
+        // copied across as one field - never parsed.
+        Assert.Contains("_service.HotspotView", viewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ToReport()", viewModel, StringComparison.Ordinal);
+
+        Assert.Contains("HotspotCards", bindings);
+        Assert.Contains("HotspotReport", bindings);
     }
 
     /// <summary>
@@ -84,35 +120,36 @@ public sealed class UiMarkupTests
     [Fact]
     public void TheLatencyCardExposesTheTargetPickerTheTestsAndTheGuard()
     {
-        var markup = XDocument.Load(FindMainWindow()).ToString(SaveOptions.DisableFormatting);
+        var bindings = UiBindings.PathsIn(FindMainWindow());
 
         foreach (var binding in new[]
         {
-            "{Binding LowLatencyMode, Mode=TwoWay}",
-            "{Binding LatencyTargetOptions}",
-            "{Binding SelectedLatencyTarget, Mode=TwoWay}",
-            "{Binding LatencyCustomTarget, Mode=TwoWay, UpdateSourceTrigger=LostFocus}",
-            "{Binding LatencyProcesses}",
-            "{Binding SelectedLatencyProcess, Mode=TwoWay}",
-            "{Binding RefreshLatencyProcessesCommand}",
-            "{Binding LatencyTestCommand}",
-            "{Binding LatencyDeepTestCommand}",
-            "{Binding LatencyRetestCommand}",
-            "{Binding LatencyRestoreCommand}",
-            "{Binding LatencyClearProfilesCommand}",
-            "{Binding LatencyHeadline}",
-            "{Binding LatencyTargetSummary}",
-            "{Binding LatencyIdleSummary}",
-            "{Binding LatencyUploadSummary}",
-            "{Binding LatencyDownloadSummary}",
-            "{Binding LatencyPathSummary}",
-            "{Binding LatencyAppliedChanges}",
-            "{Binding LatencyRejectedChanges}",
-            "{Binding TrafficGuardEnabled, Mode=TwoWay}",
-            "{Binding LatencyGuardSummary}",
+            "LowLatencyMode",
+            "LatencyTargetOptions",
+            "SelectedLatencyTarget",
+            "LatencyCustomTarget",
+            "LatencyProcesses",
+            "SelectedLatencyProcess",
+            "RefreshLatencyProcessesCommand",
+            "LatencyPrimaryCommand",
+            "LatencyTestCommand",
+            "LatencyDeepTestCommand",
+            "LatencyRetestCommand",
+            "LatencyRestoreCommand",
+            "LatencyClearProfilesCommand",
+            "LatencyCancelCommand",
+            "LatencyHeadline",
+            "LatencySuggestion",
+            "LatencyCards",
+            "LatencyLanes",
+            "LatencyTargetError",
+            "LatencyAppliedChanges",
+            "LatencyRejectedChanges",
+            "TrafficGuardEnabled",
+            "LatencyGuardSummary",
         })
         {
-            Assert.Contains(binding, markup, StringComparison.Ordinal);
+            Assert.Contains(binding, bindings);
         }
     }
 
@@ -124,13 +161,21 @@ public sealed class UiMarkupTests
     public void TheLatencyCardSeparatesIdleLoadedAndRouteDelayInWords()
     {
         var markup = XDocument.Load(FindMainWindow()).ToString(SaveOptions.DisableFormatting);
+        var bindings = UiBindings.PathsIn(FindMainWindow());
 
-        Assert.Contains("Boştaki ping, yük altındaki gecikme, jitter, paket kaybı", markup, StringComparison.Ordinal);
-        Assert.Contains("ISP/WAN rota gecikmesi ayrı şeylerdir", markup, StringComparison.Ordinal);
-        Assert.Contains("Yük altında derin test", markup, StringComparison.Ordinal);
+        // Idle and loaded are separate cards fed by separate fields, so the screen cannot
+        // present one as the other however the measurements arrive. The titles come from
+        // the view model, which is where the cards are built.
+        var viewModel = File.ReadAllText(RepoFiles.MainViewModel);
 
-        // The QoS namespace is named where the user can see it, because the promise that
-        // nothing else is touched is only worth anything if it is checkable.
-        Assert.Contains("DPIBypass.Latency.", markup, StringComparison.Ordinal);
+        Assert.Contains("LatencyCards", bindings);
+        Assert.Contains("\"Boştaki ping\"", viewModel, StringComparison.Ordinal);
+        Assert.Contains("\"Yük altında ping\"", viewModel, StringComparison.Ordinal);
+        Assert.Contains("Yük altında test et", markup, StringComparison.Ordinal);
+
+        // The route-versus-local distinction stays available; it just lives in the
+        // details rather than as a paragraph on the main screen.
+        Assert.Contains("LatencyPathSummary", bindings);
     }
+
 }

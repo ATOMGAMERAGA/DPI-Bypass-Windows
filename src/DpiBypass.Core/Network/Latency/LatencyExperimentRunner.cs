@@ -10,11 +10,24 @@ namespace DpiBypass.Core.Network;
 /// written but only takes effect after a restart nobody consented to" are different
 /// facts, and a user reading a rejection deserves the one that actually happened.
 /// </remarks>
-public readonly record struct LatencyArmOutcome(bool Applied, string? Reason = null)
+public readonly record struct LatencyArmOutcome(
+    bool Applied,
+    string? Reason = null,
+    LatencyOutcomeCause Cause = LatencyOutcomeCause.NotApplied)
 {
-    public static readonly LatencyArmOutcome Success = new(true);
+    public static readonly LatencyArmOutcome Success = new(true, null, LatencyOutcomeCause.Confirmed);
 
-    public static LatencyArmOutcome Failed(string reason) => new(false, reason);
+    /// <summary>
+    /// The arm could not be put in place, and why.
+    /// </summary>
+    /// <remarks>
+    /// The cause is required rather than defaulted at the call sites that know it,
+    /// because this is the boundary where "the user has not consented to a restart" used
+    /// to become indistinguishable from "we measured this and it was useless".
+    /// </remarks>
+    public static LatencyArmOutcome Failed(
+        string reason,
+        LatencyOutcomeCause cause = LatencyOutcomeCause.NotApplied) => new(false, reason, cause);
 }
 
 /// <summary>The two things an experiment needs to be able to do to a machine.</summary>
@@ -188,7 +201,7 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
                 var applied = await arm.ApplyAsync(cancellationToken).ConfigureAwait(false);
                 if (!applied.Applied)
                 {
-                    return Refused(verdict, pairs, lastOptimised, applied.Reason);
+                    return Refused(verdict, pairs, lastOptimised, applied.Reason, applied.Cause);
                 }
 
                 await SettleAsync(plan, cancellationToken).ConfigureAwait(false);
@@ -207,7 +220,7 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
                 var applied = await arm.ApplyAsync(cancellationToken).ConfigureAwait(false);
                 if (!applied.Applied)
                 {
-                    return Refused(verdict, pairs, lastOptimised, applied.Reason);
+                    return Refused(verdict, pairs, lastOptimised, applied.Reason, applied.Cause);
                 }
 
                 await SettleAsync(plan, cancellationToken).ConfigureAwait(false);
@@ -245,7 +258,10 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
                 {
                     Verdict = verdict with
                     {
-                        Outcome = LatencyVerdictOutcome.Rejected,
+                        // Not a performance answer: the experiment was interrupted, so
+                        // this candidate is still unmeasured and must be tried again.
+                        Outcome = LatencyVerdictOutcome.NotMeasured,
+                        Cause = LatencyOutcomeCause.EnvironmentChanged,
                         Reason = "ölçüm sırasında ağ/rota değişti",
                         Cycles = pairs.Count,
                     },
@@ -288,10 +304,20 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
 
         if (verdict.Outcome == LatencyVerdictOutcome.Inconclusive)
         {
+            // Running out of cycles with a real, valid, but too-small effect is a
+            // measured answer: the gain is not there at a size worth keeping. Running out
+            // of wall-clock time, or never producing a usable pair, is not an answer at
+            // all - so the two end in different outcomes and only the first is cacheable.
+            var ranOutOfTime = elapsed.Elapsed > plan.Budget;
+            var neverMeasured = ranOutOfTime || !verdict.Cause.IsPerformanceEvidence();
+
             verdict = verdict with
             {
-                Outcome = LatencyVerdictOutcome.Rejected,
-                Reason = $"{pairs.Count} turda kararlı bir sonuç çıkmadı ({verdict.Reason})",
+                Outcome = neverMeasured ? LatencyVerdictOutcome.NotMeasured : LatencyVerdictOutcome.Rejected,
+                Cause = ranOutOfTime ? LatencyOutcomeCause.BudgetExhausted : verdict.Cause,
+                Reason = ranOutOfTime
+                    ? $"süre sınırına ulaşıldı; {pairs.Count} turda karar verilemedi ({verdict.Reason})"
+                    : $"{pairs.Count} turda kararlı bir sonuç çıkmadı ({verdict.Reason})",
             };
         }
 
@@ -350,15 +376,26 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
         return $"yük durumu eşleşmedi ({pair.Baseline.Load.State} / {pair.Candidate.Load.State})";
     }
 
+    /// <summary>
+    /// The arm never went in, so nothing about its performance was learned.
+    /// </summary>
+    /// <remarks>
+    /// This is the path a candidate takes when it needs an adapter restart the user has
+    /// not agreed to. It reports <see cref="LatencyVerdictOutcome.NotMeasured"/> so the
+    /// profile cache cannot record it as a tried-and-rejected setting and skip it on the
+    /// very next run, which is when consent is most likely to have been given.
+    /// </remarks>
     private static LatencyExperimentOutcome Refused(
         LatencyVerdict verdict,
         IReadOnlyList<LatencyPair> pairs,
         LatencyMeasurement? last,
-        string? reason = null) => new()
+        string? reason = null,
+        LatencyOutcomeCause cause = LatencyOutcomeCause.NotApplied) => new()
         {
             Verdict = verdict with
             {
-                Outcome = LatencyVerdictOutcome.Rejected,
+                Outcome = LatencyVerdictOutcome.NotMeasured,
+                Cause = cause,
                 Reason = reason ?? "sürücü değeri canlı olarak uygulamadı",
                 Cycles = pairs.Count,
             },
@@ -374,7 +411,10 @@ public sealed class PairedLatencyExperimentRunner : ILatencyExperimentRunner
         {
             Verdict = verdict with
             {
+                // Measured, and the measurement is that this setting takes the link down.
+                // That is a real performance answer and stays one.
                 Outcome = LatencyVerdictOutcome.Rejected,
+                Cause = LatencyOutcomeCause.ConnectivityLost,
                 Reason = "bağlantı koptu",
                 Cycles = pairs.Count,
             },

@@ -104,6 +104,10 @@ public sealed class LatencyStatusViewTests
                 new LatencyVerdict
                 {
                     Outcome = LatencyVerdictOutcome.Rejected,
+
+                    // The cause, not the wording, is what tells the card this was a
+                    // measured regression that got taken back off.
+                    Cause = LatencyOutcomeCause.MeasuredRegression,
                     PropertyName = Fake.DefaultKeyword,
                     Description = "Seçmeli askıya alma kapalı",
                     Reason = "bir turda paket kaybı %8.3 arttı",
@@ -114,9 +118,41 @@ public sealed class LatencyStatusViewTests
 
         var status = LatencyStatusView.From(modeEnabled: true, result);
 
+        Assert.Equal(LatencySituation.RolledBack, status.Situation);
         Assert.Contains("müdahale geri alındı", status.Headline, StringComparison.Ordinal);
         Assert.Contains("paket kaybı", status.Headline, StringComparison.Ordinal);
         Assert.Single(status.Rejected);
+        Assert.True(status.Rejected[0].WasMeasured);
+    }
+
+    /// <summary>
+    /// The same shape of result, with a cause that means nothing was ever measured, must
+    /// not be presented as a change that was tried and taken back off.
+    /// </summary>
+    [Fact]
+    public void ACandidateBlockedOnPermissionIsNotShownAsARollback()
+    {
+        var result = Result(LatencyOptimizationStatus.NoGain) with
+        {
+            Verdicts =
+            [
+                new LatencyVerdict
+                {
+                    Outcome = LatencyVerdictOutcome.NotMeasured,
+                    Cause = LatencyOutcomeCause.AwaitingPermission,
+                    PropertyName = Fake.DefaultKeyword,
+                    Description = "Kesme yumuşatma kapalı",
+                    Reason = "yeniden başlatma onayı verilmedi",
+                    Cycles = 0,
+                },
+            ],
+        };
+
+        var status = LatencyStatusView.From(modeEnabled: true, result);
+
+        Assert.Equal(LatencySituation.NotAvailableNow, status.Situation);
+        Assert.Equal(LatencyNextAction.AllowRestart, status.NextAction);
+        Assert.False(status.Rejected[0].WasMeasured);
     }
 
     [Fact]

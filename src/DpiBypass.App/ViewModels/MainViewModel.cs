@@ -50,7 +50,12 @@ public sealed record DomainEntry(string Domain, DomainOrigin Origin)
     public bool CanRemove => true;
 }
 
-public sealed record VodafoneNetworkEntry(string Key, string Display);
+/// <summary>One remembered network, and whether it is the one we are on now.</summary>
+public sealed record VodafoneNetworkEntry(string Key, string Display, bool IsCurrent)
+{
+    /// <summary>Marks the current network in the list, in words rather than by colour.</summary>
+    public string Marker => IsCurrent ? "Şu anki ağ" : string.Empty;
+}
 
 /// <summary>One choice in the latency target picker.</summary>
 public sealed record LatencyTargetOption(LatencyTargetKind Kind, string Display, string Description)
@@ -58,8 +63,29 @@ public sealed record LatencyTargetOption(LatencyTargetKind Kind, string Display,
     public override string ToString() => Display;
 }
 
-/// <summary>A change that was measured and put back, with the reason it was.</summary>
-public sealed record LatencyRejectionEntry(string Change, string Reason);
+/// <summary>A change that was not kept, with the reason and whether it was measured.</summary>
+public sealed record LatencyRejectionEntry(string Change, string Reason, bool WasMeasured)
+{
+    /// <summary>"Ölçüldü" or "Denenmedi": the two are different facts and read as such.</summary>
+    public string Kind => WasMeasured ? "Ölçüldü" : "Denenmedi";
+}
+
+/// <summary>
+/// One short result card on the main screen: a number, or an honest absence of one.
+/// </summary>
+/// <remarks>
+/// <see cref="Measured"/> exists so a card can never print 0 for something nobody
+/// measured. Zero milliseconds of jitter and "we did not measure jitter" look identical
+/// once they are both formatted as a number, and only one of them is good news.
+/// </remarks>
+public sealed record LatencyCard(string Title, string Value, bool Measured, string Note = "")
+{
+    public static LatencyCard NotMeasured(string title, string note = "Ölçülmedi")
+        => new(title, "—", false, note);
+}
+
+/// <summary>One lane of the engine, and how far it got on this run.</summary>
+public sealed record LatencyLaneEntry(string Title, string Detail, string State);
 
 /// <summary>One endpoint discovery found for the chosen application.</summary>
 public sealed record LatencyEndpointEntry(string Key, string Display, string Why)
@@ -128,9 +154,6 @@ public sealed class MainViewModel : ObservableObject
     private string _latencyHeadline = "Kapalı";
     private string _latencyStatusSeverity = "off";
     private string _latencyTargetSummary = "Genel internet referansı — oyun sunucusu değildir";
-    private string _latencyIdleSummary = "Henüz ölçülmedi.";
-    private string _latencyUploadSummary = "Yük altında derin test yapılmadı.";
-    private string _latencyDownloadSummary = "Yük altında derin test yapılmadı.";
     private string _latencyPathSummary = string.Empty;
     private string _latencyGuardSummary = "Traffic Guard kapalı.";
     private LatencyTargetOption _selectedLatencyTarget;
@@ -148,11 +171,20 @@ public sealed class MainViewModel : ObservableObject
     private TrafficGuardModeOption _selectedGuardMode;
     private string _latencyResultSummary = string.Empty;
     private string _latencyDataUsedSummary = string.Empty;
+    private string _latencySuggestion = string.Empty;
+    private string _latencyPrimaryAction = "Bağlantımı analiz et";
+    private string _latencyMeasuredAt = string.Empty;
+    private bool _isLatencyTargetValid = true;
+    private HotspotStatusView _hotspotView = HotspotStatusView.Empty;
     private string _domainStatus = string.Empty;
     private string _domainStatusSeverity = string.Empty;
     private string _domainFilter = string.Empty;
     private VodafoneNetworkEntry? _selectedVodafoneNetwork;
     private string _vodafoneStatusLine = "Kapalı.";
+    private string _hotspotStatusSeverity = "off";
+    private string _hotspotSuggestion = string.Empty;
+    private string _hotspotCheckedAt = string.Empty;
+    private string _hotspotReport = string.Empty;
     private bool _isTuning;
     private bool _suppressPersist;
 
@@ -283,20 +315,32 @@ public sealed class MainViewModel : ObservableObject
         TestCommand = new AsyncRelayCommand(TestAsync);
         RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !IsTuning);
         TestAllCommand = new AsyncRelayCommand(TestAllAsync);
-        LatencyTestCommand = new AsyncRelayCommand(TestLatencyAsync, () => !_isLatencyBusy);
-        LatencyDeepTestCommand = new AsyncRelayCommand(RunLatencyDeepTestAsync, () => !_isLatencyBusy);
-        LatencyRetestCommand = new AsyncRelayCommand(RetestLatencyAsync, () => !_isLatencyBusy);
+        // Every command that measures is gated on the target being valid as well as on the
+        // card being free. Without the first half, a user who typed a bad address saw the
+        // error, pressed the button anyway and got a measurement of the previous target
+        // filed under the new one's name.
+        LatencyTestCommand = new AsyncRelayCommand(TestLatencyAsync, CanRunLatency);
+        LatencyDeepTestCommand = new AsyncRelayCommand(RunLatencyDeepTestAsync, CanRunLatency);
+        LatencyRetestCommand = new AsyncRelayCommand(RetestLatencyAsync, CanRunLatency);
         LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
         LatencyClearProfilesCommand = new RelayCommand(ClearLatencyProfiles);
         RefreshLatencyProcessesCommand = new AsyncRelayCommand(RefreshLatencyProcessesAsync);
+        LatencyPrimaryCommand = new AsyncRelayCommand(RunLatencyPrimaryActionAsync, CanRunLatency);
+
+        // Cancellation is no longer tied to the deep test: turning the mode on runs a
+        // paired benchmark that takes minutes, and a quick test pings for several
+        // seconds. Both are stoppable now, so the button follows the service.
         LatencyCancelCommand = new RelayCommand(
-            CancelLatencyDeepTest,
-            () => _isDeepTestRunning && _latencyStageCanCancel && _service.CanCancelLatencyRun);
+            CancelLatencyRun,
+            () => _service.CanCancelLatencyRun);
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
         AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
         RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
         HotspotDiagnoseCommand = new AsyncRelayCommand(RunHotspotDiagnosticsAsync, () => !_isHotspotBusy);
         HotspotCleanupCommand = new RelayCommand(CleanUpLegacyHotspot);
+        RememberVodafoneNetworkCommand = new RelayCommand(
+            RememberCurrentVodafoneNetwork,
+            () => _hotspotView.CanRememberThisNetwork);
         ForgetVodafoneNetworkCommand = new RelayCommand(
             ForgetSelectedVodafoneNetwork,
             () => _selectedVodafoneNetwork is not null);
@@ -372,6 +416,17 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>Stops a running deep test. The run puts everything back on its way out.</summary>
     public RelayCommand LatencyCancelCommand { get; }
 
+    /// <summary>
+    /// The one button on the card. What it does follows the result.
+    /// </summary>
+    /// <remarks>
+    /// The card used to offer five equally weighted buttons - quick test, deep test,
+    /// force re-measure, clear saved results, restore everything - with nothing to say
+    /// which one a person in front of an unmeasured connection should press. The engine
+    /// already knows what the sensible next step is, so it names it.
+    /// </remarks>
+    public AsyncRelayCommand LatencyPrimaryCommand { get; }
+
     public AsyncRelayCommand RefreshLatencyProcessesCommand { get; }
 
     public ObservableCollection<LatencyTargetOption> LatencyTargetOptions { get; }
@@ -388,6 +443,18 @@ public sealed class MainViewModel : ObservableObject
 
     public ObservableCollection<LatencyRejectionEntry> LatencyRejectedChanges { get; } = [];
 
+    /// <summary>The four short result cards the main screen shows.</summary>
+    public ObservableCollection<LatencyCard> LatencyCards { get; } = [];
+
+    /// <summary>What the run tried and what it did not, one row each.</summary>
+    public ObservableCollection<LatencyLaneEntry> LatencyLanes { get; } = [];
+
+    /// <summary>The Vodafone card's summary checks.</summary>
+    public ObservableCollection<HotspotCheckCard> HotspotCards { get; } = [];
+
+    /// <summary>Addresses, MTU, adapter and VPN, for the details section.</summary>
+    public ObservableCollection<HotspotCheckCard> HotspotDetails { get; } = [];
+
     public RelayCommand OpenLogFolderCommand { get; }
 
     public RelayCommand AddDomainCommand { get; }
@@ -399,6 +466,9 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand HotspotCleanupCommand { get; }
 
     public RelayCommand ForgetVodafoneNetworkCommand { get; }
+
+    /// <summary>Adds the network we are on now to the remembered list, in place.</summary>
+    public RelayCommand RememberVodafoneNetworkCommand { get; }
 
     public RelayCommand ClearDomainFilterCommand { get; }
 
@@ -656,10 +726,9 @@ public sealed class MainViewModel : ObservableObject
         {
             if (Set(ref _isLatencyBusy, value))
             {
-                LatencyTestCommand.RaiseCanExecuteChanged();
-                LatencyDeepTestCommand.RaiseCanExecuteChanged();
-                LatencyRetestCommand.RaiseCanExecuteChanged();
-                LatencyRestoreCommand.RaiseCanExecuteChanged();
+                RaiseLatencyCommandStates();
+                Raise(nameof(IsLatencyProgressVisible));
+                Raise(nameof(LatencyProgressTitle));
             }
         }
     }
@@ -697,23 +766,8 @@ public sealed class MainViewModel : ObservableObject
         private set => Set(ref _latencyTargetSummary, value);
     }
 
-    public string LatencyIdleSummary
-    {
-        get => _latencyIdleSummary;
-        private set => Set(ref _latencyIdleSummary, value);
-    }
 
-    public string LatencyUploadSummary
-    {
-        get => _latencyUploadSummary;
-        private set => Set(ref _latencyUploadSummary, value);
-    }
 
-    public string LatencyDownloadSummary
-    {
-        get => _latencyDownloadSummary;
-        private set => Set(ref _latencyDownloadSummary, value);
-    }
 
     /// <summary>Where the measurements say the delay is, in the user's own words.</summary>
     public string LatencyPathSummary
@@ -782,9 +836,25 @@ public sealed class MainViewModel : ObservableObject
             if (Set(ref _isDeepTestRunning, value))
             {
                 LatencyCancelCommand.RaiseCanExecuteChanged();
+                Raise(nameof(IsLatencyProgressVisible));
             }
         }
     }
+
+    /// <summary>
+    /// Whether the progress area is shown at all.
+    /// </summary>
+    /// <remarks>
+    /// Any running measurement gets one, not only the deep test. A user who turned the
+    /// mode on and waited three minutes for a paired benchmark previously had a bare
+    /// indeterminate bar and a stop button that did nothing.
+    /// </remarks>
+    public bool IsLatencyProgressVisible => _isLatencyBusy;
+
+    /// <summary>The stage line, or a plain sentence for the runs that have no stages.</summary>
+    public string LatencyProgressTitle => _isDeepTestRunning
+        ? _latencyStageTitle
+        : _isLatencyBusy ? "Bağlantı ölçülüyor" : string.Empty;
 
     /// <summary>Everything the finished run measured, as the result panel prints it.</summary>
     public string LatencyResultSummary
@@ -1008,13 +1078,13 @@ public sealed class MainViewModel : ObservableObject
         {
             if (string.IsNullOrWhiteSpace(_latencyCustomTarget))
             {
-                LatencyTargetError = "Ölçülecek bir ana bilgisayar veya IP girin.";
+                InvalidTarget("Ölçülecek bir ana bilgisayar veya IP girin.");
                 return;
             }
 
             if (!LatencyTargetSpec.TryParse(_latencyCustomTarget, out var spec, out var error))
             {
-                LatencyTargetError = error ?? "Hedef ayrıştırılamadı.";
+                InvalidTarget(error ?? "Hedef ayrıştırılamadı.");
                 return;
             }
 
@@ -1029,13 +1099,139 @@ public sealed class MainViewModel : ObservableObject
         if (_selectedLatencyTarget.Kind == LatencyTargetKind.Application
             && string.IsNullOrWhiteSpace(_selectedLatencyProcess))
         {
-            LatencyTargetError = "Ölçülecek çalışan bir uygulama seçin.";
+            InvalidTarget("Ölçülecek çalışan bir uygulama seçin.");
             return;
         }
 
+        IsLatencyTargetValid = true;
         _service.SetLatencyPreferences(preferences);
         LatencyTargetSummary = preferences.ToSpec().Describe();
     }
+
+    /// <summary>
+    /// Records that what is on screen is not measurable, and stops the buttons.
+    /// </summary>
+    /// <remarks>
+    /// The service keeps its previous target, which is right - nothing should be silently
+    /// pointed somewhere the user did not choose - but the commands must not run against
+    /// it while the screen shows something else. Writing the error and leaving the buttons
+    /// live is how a measurement of the old target ended up under the new target's name.
+    /// </remarks>
+    private void InvalidTarget(string message)
+    {
+        LatencyTargetError = message;
+        IsLatencyTargetValid = false;
+    }
+
+    /// <summary>Whether a measurement may start: nothing running, and a usable target.</summary>
+    private bool CanRunLatency() => !_isLatencyBusy && _isLatencyTargetValid;
+
+    /// <summary>
+    /// Whether the target on screen can actually be measured.
+    /// </summary>
+    /// <remarks>
+    /// Bound by the card so the error text and the disabled buttons cannot disagree, and
+    /// checked by every measuring command's <c>CanExecute</c> - which also covers the
+    /// keyboard, since a disabled command does not run on Enter either.
+    /// </remarks>
+    public bool IsLatencyTargetValid
+    {
+        get => _isLatencyTargetValid;
+        private set
+        {
+            if (Set(ref _isLatencyTargetValid, value))
+            {
+                RaiseLatencyCommandStates();
+            }
+        }
+    }
+
+    private void RaiseLatencyCommandStates()
+    {
+        LatencyTestCommand.RaiseCanExecuteChanged();
+        LatencyDeepTestCommand.RaiseCanExecuteChanged();
+        LatencyRetestCommand.RaiseCanExecuteChanged();
+        LatencyRestoreCommand.RaiseCanExecuteChanged();
+        LatencyPrimaryCommand.RaiseCanExecuteChanged();
+        LatencyCancelCommand.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>One sentence saying what to do next, from the engine's own verdict.</summary>
+    public string LatencySuggestion
+    {
+        get => _latencySuggestion;
+        private set => Set(ref _latencySuggestion, value);
+    }
+
+    /// <summary>The label on the single primary button, which follows the result.</summary>
+    public string LatencyPrimaryAction
+    {
+        get => _latencyPrimaryAction;
+        private set => Set(ref _latencyPrimaryAction, value);
+    }
+
+    /// <summary>When the numbers on screen were measured.</summary>
+    public string LatencyMeasuredAt
+    {
+        get => _latencyMeasuredAt;
+        private set => Set(ref _latencyMeasuredAt, value);
+    }
+
+    /// <summary>
+    /// Runs whatever the card is currently offering as the next step.
+    /// </summary>
+    /// <remarks>
+    /// The two actions that are not measurements - allowing adapter restarts and
+    /// restoring - are performed here too, so the button always does what its label says
+    /// rather than sending the user hunting through the secondary area.
+    /// </remarks>
+    private async Task RunLatencyPrimaryActionAsync()
+    {
+        switch (_service.LatencyStatus.NextAction)
+        {
+            case LatencyNextAction.LoadTest:
+                await RunLatencyDeepTestAsync().ConfigureAwait(true);
+                return;
+
+            case LatencyNextAction.Remeasure:
+                await RetestLatencyAsync().ConfigureAwait(true);
+                return;
+
+            case LatencyNextAction.Restore:
+            case LatencyNextAction.Recover:
+                await RestoreLatencyAsync().ConfigureAwait(true);
+                return;
+
+            case LatencyNextAction.AllowRestart:
+                // Consent, then immediately measure the candidates it unblocks - which is
+                // the whole reason the user pressed it.
+                AllowAdapterRestart = true;
+                Raise(nameof(AllowAdapterRestart));
+                await RetestLatencyAsync().ConfigureAwait(true);
+                return;
+
+            case LatencyNextAction.TryCandidates:
+                await ApplyLowLatencyModeAsync(enabled: true).ConfigureAwait(true);
+                return;
+
+            default:
+                await TestLatencyAsync().ConfigureAwait(true);
+                return;
+        }
+    }
+
+    /// <summary>The button label for one next action.</summary>
+    private static string DescribeAction(LatencyNextAction action) => action switch
+    {
+        LatencyNextAction.LoadTest => "Yük altında test et",
+        LatencyNextAction.Remeasure => "Yeniden ölç",
+        LatencyNextAction.TryCandidates => "Uygun ayarları dene",
+        LatencyNextAction.Restore => "Ayarları geri al",
+        LatencyNextAction.Recover => "Kurtarmayı çalıştır",
+        LatencyNextAction.AllowRestart => "İzin ver ve ölç",
+        LatencyNextAction.ViewResult => "Yeniden ölç",
+        _ => "Bağlantımı analiz et",
+    };
 
     /// <summary>
     /// Fills the application picker from the live connection table.
@@ -1077,6 +1273,75 @@ public sealed class MainViewModel : ObservableObject
     /// trip or a route reference to the same address, because those are different claims
     /// and only one of them is a game's ping.
     /// </remarks>
+    /// <summary>
+    /// The four numbers the main screen shows, each either measured or plainly absent.
+    /// </summary>
+    /// <remarks>
+    /// Before and after are only ever offered for the same condition against the same
+    /// target: idle against idle, loaded against loaded. A card never prints a zero for
+    /// something that was not measured, which is why loss is a nullable all the way down
+    /// from the probe.
+    /// </remarks>
+    private void BuildLatencyCards(LatencyStatusView status)
+    {
+        LatencyCards.Clear();
+
+        LatencyCards.Add(status.Idle is { } idle
+            ? new LatencyCard(
+                "Boştaki ping",
+                $"{idle.MedianRttMs:F0} ms",
+                true,
+                IdleChange(status))
+            : LatencyCard.NotMeasured("Boştaki ping", "Analiz çalıştırın"));
+
+        LatencyCards.Add(status.UploadLoaded is { } loaded
+            ? new LatencyCard(
+                "Yük altında ping",
+                $"{loaded.MedianRttMs:F0} ms",
+                true,
+                LoadedChange(status))
+            : LatencyCard.NotMeasured("Yük altında ping", "Yük altında test edilmedi"));
+
+        LatencyCards.Add(status.Idle is { } jitter
+            ? new LatencyCard("Ping dalgalanması", $"{jitter.JitterMs:F0} ms", true)
+            : LatencyCard.NotMeasured("Ping dalgalanması", "Analiz çalıştırın"));
+
+        // Loss is null, not zero, whenever the instrument does not count packets - a
+        // passive read of the TCP stack's own estimate, for one.
+        LatencyCards.Add(status.Idle?.PacketLossPercent is { } loss
+            ? new LatencyCard("Paket kaybı", $"%{loss:F1}", true)
+            : LatencyCard.NotMeasured("Paket kaybı", "Bu ölçümde sayılmadı"));
+    }
+
+    /// <summary>
+    /// The idle before/after note, from two measurements of the same condition.
+    /// </summary>
+    /// <remarks>
+    /// Both halves are real readings taken with the link idle against the same target.
+    /// Reconstructing the "before" by adding the delta back onto the "after" would put a
+    /// number on screen that was never measured.
+    /// </remarks>
+    private static string IdleChange(LatencyStatusView status)
+        => status is { IdleBefore: { } before, IdleAfter: { } after }
+            && !ReferenceEquals(before, after)
+            ? $"Önce {before.MedianRttMs:F0} ms → sonra {after.MedianRttMs:F0} ms"
+            : string.Empty;
+
+    /// <summary>The loaded before/after note, only when a cap was measured both ways.</summary>
+    private static string LoadedChange(LatencyStatusView status)
+        => status is { UploadLoaded: { } before, UploadLoadedAfter: { } after }
+            ? $"Sınır öncesi {before.MedianRttMs:F0} ms → sonrası {after.MedianRttMs:F0} ms"
+            : string.Empty;
+
+    private static string DescribeLane(LatencyLaneState state) => state switch
+    {
+        LatencyLaneState.Completed => "Yapıldı",
+        LatencyLaneState.Available => "Denenmedi",
+        LatencyLaneState.NotApplicable => "Uygun değil",
+        LatencyLaneState.Blocked => "Engelli",
+        _ => "Tamamlanmadı",
+    };
+
     private void ApplyLatencyResultSummary(LatencyStatusView status)
     {
         var result = _service.LatencyResult;
@@ -1226,7 +1491,15 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private void CancelLatencyDeepTest() => _service.CancelLoadedLatencyTest();
+    /// <summary>
+    /// Stops whatever latency work is running, not only the deep test.
+    /// </summary>
+    /// <remarks>
+    /// Every path restores what it changed on the way out, so this is safe from any of
+    /// them; the button used to be inert during the ordinary optimization, which is the
+    /// longest running of the three.
+    /// </remarks>
+    private void CancelLatencyRun() => _service.CancelLatencyRun();
 
     /// <summary>The service publishes stages off the UI thread; marshal before binding.</summary>
     private void OnLatencyStageChanged(LoadedLaneProgress progress)
@@ -1255,6 +1528,7 @@ public sealed class MainViewModel : ObservableObject
         // A stage that has already committed or rolled back has nothing left to stop.
         _latencyStageCanCancel = progress.CanCancel;
         LatencyCancelCommand.RaiseCanExecuteChanged();
+        Raise(nameof(IsLatencyProgressVisible));
 
         if (progress.Outcome is { Length: > 0 } outcome)
         {
@@ -1294,15 +1568,26 @@ public sealed class MainViewModel : ObservableObject
             : $"{status.Target} ({status.Protocol})"
                 + (status.RouteReferenceOnly ? " · rota referansı, uygulamanın kendi RTT'si değil" : string.Empty);
 
-        LatencyIdleSummary = Describe(status.Idle, "Boşta");
-        LatencyUploadSummary = status.UploadLoaded is null
-            ? "Gönderim sırasında ölçülmedi — \"Yük altında derin test\" çalıştırın."
-            : Describe(status.UploadLoaded, "Gönderim sırasında");
-        LatencyDownloadSummary = status.DownloadLoaded is null
-            ? "İndirme sırasında ölçülmedi — \"Yük altında derin test\" çalıştırın."
-            : Describe(status.DownloadLoaded, "İndirme sırasında");
         LatencyPathSummary = status.Path?.Summary ?? string.Empty;
         LatencyGuardSummary = status.TrafficGuard?.Summary ?? "Traffic Guard kapalı.";
+
+        // One sentence and one action, both from the engine's own structured verdict
+        // rather than assembled here from words in a report.
+        LatencySuggestion = status.Suggestion;
+        LatencyPrimaryAction = DescribeAction(status.NextAction);
+        LatencyMeasuredAt = status.Idle is { } measured
+            ? $"Son ölçüm: {measured.MeasuredAt.ToLocalTime():HH:mm}"
+            : string.Empty;
+
+        BuildLatencyCards(status);
+
+        LatencyLanes.Clear();
+        foreach (var lane in status.Lanes)
+        {
+            LatencyLanes.Add(new LatencyLaneEntry(lane.Title, lane.Detail, DescribeLane(lane.State)));
+        }
+
+        RaiseLatencyCommandStates();
 
         LatencyAppliedChanges.Clear();
         foreach (var change in status.Applied)
@@ -1313,7 +1598,13 @@ public sealed class MainViewModel : ObservableObject
         LatencyRejectedChanges.Clear();
         foreach (var rejection in status.Rejected)
         {
-            LatencyRejectedChanges.Add(new LatencyRejectionEntry(rejection.Change, rejection.Reason));
+            LatencyRejectedChanges.Add(new LatencyRejectionEntry(
+                rejection.Change,
+
+                // The cause is shown next to the reason so "measured and useless" and
+                // "never tried" cannot read as the same outcome.
+                $"{rejection.CauseLabel} — {rejection.Reason}",
+                rejection.WasMeasured));
         }
 
         // Discovery can find several endpoints for one application, and which of them is
@@ -1333,12 +1624,6 @@ public sealed class MainViewModel : ObservableObject
         Raise(nameof(HasLatencyEndpointChoice));
 
         ApplyLatencyResultSummary(status);
-
-        static string Describe(LatencyMeasurement? measurement, string title) => measurement is null
-            ? $"{title}: ölçülmedi."
-            : $"{title}: median {measurement.MedianRttMs:F1} ms · p95 {measurement.P95RttMs:F1} ms · "
-                + $"jitter {measurement.JitterMs:F1} ms · kayıp %{measurement.PacketLossPercent:F1}"
-                + (measurement.RemoteReplies >= 100 ? $" · p99 {measurement.P99RttMs:F1} ms" : " · p99 için örnek yetersiz");
     }
 
     private async Task ApplyLowLatencyModeAsync(bool enabled)
@@ -1694,31 +1979,139 @@ public sealed class MainViewModel : ObservableObject
     private async Task RunHotspotDiagnosticsAsync()
     {
         IsHotspotBusy = true;
-        HotspotStatusLine = "Bağlantı inceleniyor…";
+        HotspotStatusLine = "Bağlantı kontrol ediliyor…";
+        ApplyHotspotView();
 
         try
         {
-            var result = await _service.RunHotspotDiagnosticsAsync().ConfigureAwait(true);
-            HotspotStatusLine = result.ToReport();
+            await _service.RunHotspotDiagnosticsAsync().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // The user moved networks or switched the mode off; the service has already
+            // dropped the result that would no longer describe where we are.
         }
         catch (Exception ex)
         {
             AppLog.Error("Hotspot tanılaması başarısız", ex);
-            HotspotStatusLine = $"Tanılama tamamlanamadı: {ex.Message}";
         }
         finally
         {
             IsHotspotBusy = false;
+
+            // The card is rebuilt from the service's own view, so the result shown is
+            // always the one the service accepted for the network we are on now.
+            ApplyHotspotView();
         }
+    }
+
+    /// <summary>Remembers the network we are on, without switching the mode off and on.</summary>
+    private void RememberCurrentVodafoneNetwork()
+    {
+        try
+        {
+            _service.RememberCurrentVodafoneNetwork();
+        }
+        catch (InvalidOperationException ex)
+        {
+            HotspotSuggestion = ex.Message;
+            return;
+        }
+
+        RefreshVodafoneNetworks();
+    }
+
+    /// <summary>
+    /// Copies the service's structured hotspot state onto the card.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here reads <c>ToReport()</c>. That text is written for a person to paste
+    /// into a support thread; it lives under "Teknik ayrıntılar" and is never the source
+    /// of what the interface believes.
+    /// </remarks>
+    private void ApplyHotspotView()
+    {
+        var view = _service.HotspotView;
+        _hotspotView = view;
+
+        HotspotCards.Clear();
+        foreach (var card in view.Cards)
+        {
+            HotspotCards.Add(card);
+        }
+
+        HotspotDetails.Clear();
+        foreach (var detail in view.TechnicalDetails)
+        {
+            HotspotDetails.Add(detail);
+        }
+
+        VodafoneStatusLine = view.Headline;
+        HotspotStatusSeverity = view.Severity;
+        HotspotSuggestion = view.Suggestion ?? string.Empty;
+        HotspotReport = view.Report;
+        HotspotCheckedAt = view.CheckedAt is { } checkedAt
+            ? $"Son kontrol: {checkedAt.ToLocalTime():dd.MM.yyyy HH:mm}"
+            : "Bu ağda henüz kontrol yapılmadı.";
+        HotspotStatusLine = view.Run == HotspotRunState.Running
+            ? "Bağlantı kontrol ediliyor…"
+            : view.Headline;
+
+        Raise(nameof(HasHotspotResult));
+        Raise(nameof(HasVodafoneNetworks));
+        Raise(nameof(IsLegacyCleanupAvailable));
+        RememberVodafoneNetworkCommand.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>Whether there are numbers to show, as opposed to an empty state.</summary>
+    public bool HasHotspotResult => _hotspotView.Run == HotspotRunState.Completed;
+
+    /// <summary>Whether the remembered-network list has anything in it.</summary>
+    public bool HasVodafoneNetworks => VodafoneNetworks.Count > 0;
+
+    /// <summary>
+    /// Whether an older build actually left something to clean up on this machine.
+    /// </summary>
+    /// <remarks>
+    /// The button is hidden otherwise. A migration note about a retired sub-feature is
+    /// not something to show somebody who installed the app last week.
+    /// </remarks>
+    public bool IsLegacyCleanupAvailable => _hotspotView.LegacyCleanupAvailable;
+
+    public string HotspotStatusSeverity
+    {
+        get => _hotspotStatusSeverity;
+        private set => Set(ref _hotspotStatusSeverity, value);
+    }
+
+    /// <summary>The single suggested next step for this network.</summary>
+    public string HotspotSuggestion
+    {
+        get => _hotspotSuggestion;
+        private set => Set(ref _hotspotSuggestion, value);
+    }
+
+    /// <summary>When the shown result was measured.</summary>
+    public string HotspotCheckedAt
+    {
+        get => _hotspotCheckedAt;
+        private set => Set(ref _hotspotCheckedAt, value);
+    }
+
+    /// <summary>The full report, for the details section only.</summary>
+    public string HotspotReport
+    {
+        get => _hotspotReport;
+        private set => Set(ref _hotspotReport, value);
     }
 
     private void CleanUpLegacyHotspot()
     {
         var migration = _service.CleanUpLegacyHotspotConfiguration();
-        HotspotStatusLine = migration.Summary;
         Raise(nameof(HotspotDiagnostics));
         Raise(nameof(VodafoneModeEnabled));
         RefreshVodafoneNetworks();
+        HotspotSuggestion = migration.Summary;
     }
 
     private void ForgetSelectedVodafoneNetwork()
@@ -1739,29 +2132,19 @@ public sealed class MainViewModel : ObservableObject
         {
             var name = string.IsNullOrWhiteSpace(network.DisplayName) ? network.Key : network.DisplayName;
             var adapter = string.IsNullOrWhiteSpace(network.AdapterName) ? string.Empty : $"  ({network.AdapterName})";
-            VodafoneNetworks.Add(new VodafoneNetworkEntry(network.Key, name + adapter));
+            VodafoneNetworks.Add(new VodafoneNetworkEntry(
+                network.Key,
+                name + adapter,
+                string.Equals(network.Key, _service.Network.Key, StringComparison.Ordinal)));
         }
 
         SelectedVodafoneNetwork = null;
+        Raise(nameof(HasVodafoneNetworks));
         RefreshVodafoneModeStatus();
     }
 
-    private void RefreshVodafoneModeStatus()
-    {
-        var status = _service.HotspotStatus;
-        VodafoneStatusLine = status switch
-        {
-            { VodafoneModeEnabled: false } =>
-                "Kapalı. Tanılama düğmesi yine de kullanılabilir; kayıtlı ağlar silinmez.",
-            { RegisteredHere: true } =>
-                $"Etkin · {status.NetworkName} · otomatik tanılama "
-                    + (status.DiagnosticsEnabled ? "açık" : "kapalı"),
-            { RegisteredNetworks: 0 } =>
-                "Etkin · PR #11'den ağ kaydı kurtarılamadı; otomatik tanılama şimdilik tüm ağlarda çalışır. "
-                    + "Bağlı olduğunuz ağı kaydetmek için modu kapatıp yeniden açın.",
-            _ => $"Etkin, ancak bu ağ ('{status.NetworkName}') kayıtlı değil.",
-        };
-    }
+    /// <summary>The headline and the cards both come from the one structured view.</summary>
+    private void RefreshVodafoneModeStatus() => ApplyHotspotView();
 
     private void RefreshHotspotStatus()
     {
@@ -1772,15 +2155,7 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        var status = _service.HotspotStatus;
-
-        if (status.LastResult is { } result)
-        {
-            HotspotStatusLine = result.ToReport();
-            return;
-        }
-
-        HotspotStatusLine = "Henüz çalıştırılmadı. Telefonunuzun paylaşımına bağlıyken \u201cTanıla\u201d düğmesine basın.";
+        ApplyHotspotView();
     }
 
     public bool StartEngineOnLaunch

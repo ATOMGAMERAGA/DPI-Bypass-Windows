@@ -85,6 +85,28 @@ public sealed class ProtectionService : IAsyncDisposable
     private CancellationTokenSource? _hotspotDiagnosticsCancellation;
     private CancellationTokenSource? _loadedLatencyCancellation;
 
+    /// <summary>
+    /// The cancellation source of whichever latency run is in flight, of any kind.
+    /// </summary>
+    /// <remarks>
+    /// Only the deep test used to be interruptible. Turning the mode on runs a full
+    /// paired benchmark that can take minutes, and a quick test still pings for several
+    /// seconds; both left the card with a disabled stop button and no way out but waiting.
+    /// One source covers all three, and the run that owns it clears it on the way out.
+    /// </remarks>
+    private CancellationTokenSource? _latencyRunCancellation;
+
+    /// <summary>
+    /// Which run's results the card is allowed to accept.
+    /// </summary>
+    /// <remarks>
+    /// Incremented whenever a run starts or the target changes. A run whose stamp is
+    /// stale by the time it finishes has been superseded - the user switched targets, or
+    /// started another test - and publishing it would put an answer about the old target
+    /// under the new one's heading.
+    /// </remarks>
+    private int _latencyRunGeneration;
+
     public ProtectionService(
         ConfigStore? store = null,
         LearnedDomainStore? learnedDomains = null,
@@ -161,7 +183,16 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <summary>The whole latency picture, for the UI and for the JSON status command.</summary>
     public LatencyStatusView LatencyStatus => LatencyStatusView.From(Settings.LowLatencyMode, _latencyResult);
 
-    public bool IsLatencyBusy => _latencyOptimizer.IsBusy || _loadedLatencyBusy;
+    /// <summary>
+    /// Whether any latency work is in flight.
+    /// </summary>
+    /// <remarks>
+    /// Includes a run that has been registered but has not yet reached a state the
+    /// optimizer calls busy. Without that window the card's progress area flickered off
+    /// between the user pressing the button and the first measurement starting, which is
+    /// also the window in which the stop button would have read as disabled.
+    /// </remarks>
+    public bool IsLatencyBusy => _latencyOptimizer.IsBusy || _loadedLatencyBusy || CanCancelLatencyRun;
 
     private volatile bool _loadedLatencyBusy;
 
@@ -189,8 +220,8 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <summary>Raised as the deep test moves between stages, off the UI thread.</summary>
     public event Action<LoadedLaneProgress>? LatencyStageChanged;
 
-    /// <summary>Whether a deep test is running and can still be stopped.</summary>
-    public bool CanCancelLatencyRun => _loadedLatencyCancellation is { IsCancellationRequested: false };
+    /// <summary>Whether any latency run is in flight and can still be stopped.</summary>
+    public bool CanCancelLatencyRun => _latencyRunCancellation is { IsCancellationRequested: false };
 
     /// <summary>Last verification result against discord.com.</summary>
     public ProbeResult? LastProbe { get; private set; }
@@ -243,6 +274,26 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <summary>The most recent diagnostics pass, if one has run this session.</summary>
     public HotspotDiagnosticResult? LastHotspotDiagnostics { get; private set; }
 
+    /// <summary>Whether a check is running now, so the card does not show a stale line.</summary>
+    public bool IsHotspotBusy => _hotspotDiagnosticsCancellation is { IsCancellationRequested: false };
+
+    /// <summary>The reason the last check could not finish, when it could not.</summary>
+    public string? LastHotspotFailure { get; private set; }
+
+    /// <summary>
+    /// The whole Vodafone card as structured values, with no report text to parse.
+    /// </summary>
+    /// <remarks>
+    /// Built here rather than in the view model so the card and any other consumer see
+    /// the same state, and so a result belonging to a network we have since left cannot
+    /// be shown as if it described the one we are on.
+    /// </remarks>
+    public HotspotStatusView HotspotView => HotspotStatusView.From(
+        HotspotStatus,
+        IsHotspotBusy,
+        LastHotspotFailure,
+        HotspotLegacyMigration.HasResidue(Settings));
+
     public event Action? Changed;
 
     public event Action<string, string>? HostRewritten;
@@ -285,6 +336,18 @@ public sealed class ProtectionService : IAsyncDisposable
         await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Turns the mode on or off, running the full pass under the same gate as every
+    /// other latency operation.
+    /// </summary>
+    /// <remarks>
+    /// The gate matters as much here as anywhere. This path starts a paired benchmark
+    /// that writes adapter settings, and it used to take no gate at all - so a quick test
+    /// or a deep test started at the same moment measured a link whose driver settings
+    /// were being changed underneath it, and each run's snapshot could undo the other's.
+    /// Rapid on/off is the same story: the second call has to wait for the first to
+    /// finish putting the machine back.
+    /// </remarks>
     public async Task<LatencyOptimizationResult> SetLowLatencyModeAsync(
         bool enabled,
         CancellationToken cancellationToken = default)
@@ -293,45 +356,91 @@ public sealed class ProtectionService : IAsyncDisposable
         _store.Save(Settings);
         Changed?.Invoke();
 
-        if (enabled)
-        {
-            ApplyLatencyPreferences();
+        await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var run = BeginLatencyRun(cancellationToken);
 
-            if (Settings.Latency.TargetKind == LatencyTargetKind.Application)
+        try
+        {
+            if (enabled)
             {
-                await StartFlowObserverAsync(cancellationToken).ConfigureAwait(false);
+                ApplyLatencyPreferences();
+
+                if (Settings.Latency.TargetKind == LatencyTargetKind.Application)
+                {
+                    await StartFlowObserverAsync(run.Token).ConfigureAwait(false);
+                }
+
+                return PublishLatency(
+                    await _latencyOptimizer.StartAsync(run.Token).ConfigureAwait(false),
+                    run.Generation);
             }
 
-            return PublishLatency(await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false));
+            // Restoring runs on the caller's token only. A user who switches the mode off
+            // wants their original settings back, and abandoning that half way through
+            // leaves the adapter holding values nobody chose.
+            var stopped = await _latencyOptimizer.StopAndRestoreAsync(cancellationToken).ConfigureAwait(false);
+            await _loadedLatency.ClearOwnedPoliciesAsync(cancellationToken).ConfigureAwait(false);
+            await StopFlowObserverAsync().ConfigureAwait(false);
+            return PublishLatency(stopped, run.Generation);
+        }
+        finally
+        {
+            EndLatencyRun(run);
+            _latencyGate.Release();
+        }
+    }
+
+    /// <summary>Starts a cancellable, stamped latency run. The caller owns the gate.</summary>
+    private LatencyRun BeginLatencyRun(CancellationToken callerToken)
+    {
+        var source = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        _latencyRunCancellation = source;
+        var generation = Interlocked.Increment(ref _latencyRunGeneration);
+        Changed?.Invoke();
+        return new LatencyRun(source, generation);
+    }
+
+    private void EndLatencyRun(LatencyRun run)
+    {
+        if (ReferenceEquals(_latencyRunCancellation, run.Source))
+        {
+            _latencyRunCancellation = null;
         }
 
-        var stopped = await _latencyOptimizer.StopAndRestoreAsync(cancellationToken).ConfigureAwait(false);
-        await _loadedLatency.ClearOwnedPoliciesAsync(cancellationToken).ConfigureAwait(false);
-        await StopFlowObserverAsync().ConfigureAwait(false);
-        return PublishLatency(stopped);
+        run.Source.Dispose();
+        Changed?.Invoke();
+    }
+
+    /// <summary>One latency operation: its cancellation source and its stamp.</summary>
+    private readonly record struct LatencyRun(CancellationTokenSource Source, int Generation)
+    {
+        public CancellationToken Token => Source.Token;
     }
 
     /// <summary>The quick test: idle latency to the chosen target, changing nothing.</summary>
     public async Task<LatencyOptimizationResult> TestLatencyAsync(CancellationToken cancellationToken = default)
     {
         await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var run = BeginLatencyRun(cancellationToken);
+
         try
         {
             PublishLatency(Working(LatencyOptimizationStatus.QuickTesting, "Hızlı test çalışıyor…"));
 
             if (Settings.Latency.TargetKind == LatencyTargetKind.Application)
             {
-                await StartFlowObserverAsync(cancellationToken).ConfigureAwait(false);
+                await StartFlowObserverAsync(run.Token).ConfigureAwait(false);
             }
 
             var result = await _latencyOptimizer
-                .TestAsync(Settings.Latency.ToSpec(), cancellationToken)
+                .TestAsync(Settings.Latency.ToSpec(), run.Token)
                 .ConfigureAwait(false);
 
-            return PublishLatency(result);
+            return PublishLatency(result, run.Generation);
         }
         finally
         {
+            EndLatencyRun(run);
             _latencyGate.Release();
         }
     }
@@ -353,6 +462,8 @@ public sealed class ProtectionService : IAsyncDisposable
         // showing a stop button that does nothing.
         var run = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _loadedLatencyCancellation = run;
+        _latencyRunCancellation = run;
+        var generation = Interlocked.Increment(ref _latencyRunGeneration);
 
         try
         {
@@ -381,7 +492,7 @@ public sealed class ProtectionService : IAsyncDisposable
                 },
                 run.Token).ConfigureAwait(false);
 
-            return PublishLatency(result);
+            return PublishLatency(result, generation);
         }
         finally
         {
@@ -389,6 +500,12 @@ public sealed class ProtectionService : IAsyncDisposable
 
             _loadedLatencyBusy = false;
             _loadedLatencyCancellation = null;
+
+            if (ReferenceEquals(_latencyRunCancellation, run))
+            {
+                _latencyRunCancellation = null;
+            }
+
             run.Dispose();
             _latencyGate.Release();
             Changed?.Invoke();
@@ -396,12 +513,22 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>Stops a running deep test. The run itself puts everything back.</summary>
-    public void CancelLoadedLatencyTest()
+    public void CancelLoadedLatencyTest() => CancelLatencyRun();
+
+    /// <summary>
+    /// Stops whichever latency run is in flight, of any kind.
+    /// </summary>
+    /// <remarks>
+    /// Every latency path restores what it changed on cancellation, so this is safe from
+    /// any of them: the optimizer rolls its snapshot back and the loaded lane sweeps its
+    /// own QoS policies. Cancelling is a state the user chose, not a failure.
+    /// </remarks>
+    public void CancelLatencyRun()
     {
-        var run = _loadedLatencyCancellation;
+        var run = _latencyRunCancellation;
         if (run is { IsCancellationRequested: false })
         {
-            AppLog.Info("latency.loaded.cancelled: kullanıcı derin testi durdurdu.");
+            AppLog.Info("latency.cancelled: kullanıcı çalışan gecikme işlemini durdurdu.");
             run.Cancel();
         }
     }
@@ -500,16 +627,19 @@ public sealed class ProtectionService : IAsyncDisposable
     public async Task<LatencyOptimizationResult> RetestLatencyAsync(CancellationToken cancellationToken = default)
     {
         await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var run = BeginLatencyRun(cancellationToken);
+
         try
         {
             var result = await _latencyOptimizer
-                .RetestAsync(NetworkFingerprint.Capture(), cancellationToken)
+                .RetestAsync(NetworkFingerprint.Capture(), run.Token)
                 .ConfigureAwait(false);
 
-            return PublishLatency(result);
+            return PublishLatency(result, run.Generation);
         }
         finally
         {
+            EndLatencyRun(run);
             _latencyGate.Release();
         }
     }
@@ -519,9 +649,22 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(preferences);
 
+        var targetChanged = !string.Equals(
+            Settings.Latency.ToSpec().CacheKey,
+            preferences.ToSpec().CacheKey,
+            StringComparison.Ordinal);
+
         Settings.Latency = preferences;
         _store.Save(Settings);
         ApplyLatencyPreferences();
+
+        // A run already measuring the old target is now measuring the wrong thing, so its
+        // result is retired before it can be published under the new heading.
+        if (targetChanged)
+        {
+            Interlocked.Increment(ref _latencyRunGeneration);
+        }
+
         Changed?.Invoke();
     }
 
@@ -587,6 +730,26 @@ public sealed class ProtectionService : IAsyncDisposable
         _latencyResult = result;
         Changed?.Invoke();
         return result;
+    }
+
+    /// <summary>
+    /// Publishes a result only if the run that produced it is still the current one.
+    /// </summary>
+    /// <remarks>
+    /// A run started against one target and finishing after the user picked another must
+    /// not overwrite the card: the numbers would be real, and they would be filed under a
+    /// heading naming a target they say nothing about. The result is still returned to
+    /// the caller, which is what awaited it and can decide for itself.
+    /// </remarks>
+    private LatencyOptimizationResult PublishLatency(LatencyOptimizationResult result, int generation)
+    {
+        if (Volatile.Read(ref _latencyRunGeneration) != generation)
+        {
+            AppLog.Info("latency.stale: sonuç geldiğinde hedef değişmişti; ekrana yazılmadı.");
+            return result;
+        }
+
+        return PublishLatency(result);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -906,13 +1069,32 @@ public sealed class ProtectionService : IAsyncDisposable
             var result = await _hotspot.RunAsync(network, operation.Token).ConfigureAwait(false);
             operation.Token.ThrowIfCancellationRequested();
 
+            // The check took seconds, and the user may have moved networks inside them.
+            // A result is only ever shown against the network it was measured on.
             if (string.Equals(Network.Key, network.Key, StringComparison.Ordinal))
             {
                 LastHotspotDiagnostics = result;
+                LastHotspotFailure = null;
                 Changed?.Invoke();
             }
 
             return result;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Kept so the card can say the check did not finish, rather than silently
+            // continuing to show the previous network's numbers as if they were fresh.
+            if (string.Equals(Network.Key, network.Key, StringComparison.Ordinal))
+            {
+                LastHotspotFailure = ex.Message;
+                Changed?.Invoke();
+            }
+
+            throw;
         }
         finally
         {
@@ -997,6 +1179,41 @@ public sealed class ProtectionService : IAsyncDisposable
         Changed?.Invoke();
     }
 
+    /// <summary>
+    /// Remembers the network we are on now, without changing whether the mode is on.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="EnableVodafoneModeHere"/> because they are separate
+    /// intentions. Registering was only reachable by enabling, so a user already running
+    /// the mode who moved to a new network was told to switch it off and on again to
+    /// record the network they were sitting on - two state changes and a diagnostics
+    /// cancellation to achieve a list insertion.
+    /// </remarks>
+    /// <returns>False when there is no network to remember, or it is already known.</returns>
+    public bool RememberCurrentVodafoneNetwork()
+    {
+        var network = NetworkFingerprint.Capture();
+        if (!network.IsOnline)
+        {
+            throw new InvalidOperationException("Şu anda bir ağa bağlı değilsiniz.");
+        }
+
+        Network = network;
+        if (Settings.VodafoneNetworkRegistered(network.Key))
+        {
+            return false;
+        }
+
+        Settings.RememberVodafoneNetwork(
+            network.Key,
+            network.DisplayName,
+            network.AdapterName ?? string.Empty);
+
+        _store.Save(Settings);
+        Changed?.Invoke();
+        return true;
+    }
+
     /// <summary>Forgets one safe per-network registration.</summary>
     public void ForgetVodafoneNetwork(string key)
     {
@@ -1043,6 +1260,7 @@ public sealed class ProtectionService : IAsyncDisposable
         // A different network means the previous diagnostics describe a link that is no
         // longer under us, so the panel goes back to "not run here yet".
         LastHotspotDiagnostics = null;
+        LastHotspotFailure = null;
         Changed?.Invoke();
 
         var token = _lifetime?.Token ?? CancellationToken.None;

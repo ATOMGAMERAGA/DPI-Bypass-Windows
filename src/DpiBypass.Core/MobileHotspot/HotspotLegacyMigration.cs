@@ -91,6 +91,24 @@ public static class HotspotLegacyMigration
     /// </summary>
     /// <param name="state">The legacy fields as loaded, mutated in place.</param>
     /// <param name="now">Timestamp for the migration marker.</param>
+    /// <summary>
+    /// Whether an older build actually left anything behind on this machine.
+    /// </summary>
+    /// <remarks>
+    /// A pure read, so the card can offer the cleanup only when there is something to
+    /// clean rather than showing every user on a clean install a button about a
+    /// sub-feature they never had.
+    /// </remarks>
+    public static bool HasResidue(IHotspotLegacyState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        return state.LegacyTtlFixEnabled
+            || state.LegacyTtlValue is not null
+            || state.LegacyDropIpv6 is not null
+            || state.LegacyNetworks.Count > 0;
+    }
+
     public static HotspotMigrationResult Apply(IHotspotLegacyState state, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(state);

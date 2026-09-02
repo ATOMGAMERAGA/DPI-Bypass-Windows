@@ -139,9 +139,23 @@ Arayüzdeki **Kapsam** sekmesinde dört seçenek var:
 
 ## Vodafone Sınırsız Modu
 
-**DNS ve ayarlar → Vodafone Sınırsız Modu** kartı yeniden ağ bazlı durum,
-tercihler, tanılama ve kurtarma araçlarını birlikte sunar. Mod Vodafone mobil
+**DNS ve ayarlar → Vodafone Sınırsız Modu** kartı ağ bazlı durum, tercihler,
+tanılama ve kurtarma araçlarını birlikte sunar. Mod Vodafone mobil
 bağlantılarını ve telefon paylaşımını **kalıcı ağ ayarı değiştirmeden** inceler:
+
+Kartı açtığınızda bağlı olduğunuz ağı, modun bu ağdaki durumunu ve tek bir
+**"Bağlantıyı kontrol et"** düğmesini görürsünüz. Sonuç ham rapor metni olarak
+değil, internet erişimi, DNS, bağlantı kalitesi ve plan bilgisi kartları olarak
+gösterilir; IPv4/IPv6, MTU, bağdaştırıcı, VPN ve tam rapor "Teknik ayrıntılar"
+altındadır. **"Desteklenmiyor", "kullanılmıyor", "ölçülemedi" ve "hata" ayrı
+durumlardır** — örneğin çoğu mobil bağlantıda IPv6'nın bulunmaması bir arıza
+değildir ve kırmızı gösterilmez.
+
+**"Bu ağı kaydet"** düğmesi bulunduğunuz ağı listeye ekler; bunun için modu
+kapatıp yeniden açmanız gerekmez. "Bu ağda kullan" ile "Kayıtlı ağlarda otomatik
+kontrol" ayrı şeylerdir ve kartta açıklanır. Modu kapatmak kayıtlı ağları
+silmez; bir ağı listeden çıkarmak ayrı bir işlemdir. Ağ değiştiğinizde önceki
+ağın sonucu gösterilmez.
 
 Tanılama kalıcı ağ ayarı veya trafik sınıflandırma kuralı değiştirmez; ölçüm için
 sıradan ICMP, DNS ve bağlantı denetimi paketleri gönderir.
@@ -197,6 +211,28 @@ ikisini birbirine karıştırmaz:
 2. **Yük altındaki gecikme:** siz bir indirme veya gönderim başlattığınızda RTT'ye
    ne olduğunu ölçer, ve isterseniz giden toplu trafiği Windows QoS ile
    sınırlayıp bunun gerçekten işe yarayıp yaramadığını ölçer.
+
+### Kartı kullanmak
+
+Kart tek bir ana düğmeyle çalışır ve düğmenin adı sonuca göre değişir:
+**"Bağlantımı analiz et"** ile başlarsınız, sonra sırayla **"Uygun ayarları
+dene"**, **"Yük altında test et"**, **"Yeniden ölç"** veya **"Ayarları geri al"**
+önerilir. Altında dört kısa kart durur — boştaki ping, yük altındaki ping, ping
+dalgalanması ve paket kaybı — ve **ölçülmemiş bir alan boş kalır, sıfır
+yazılmaz.** Bunları tek bir durum cümlesi ve tek bir öneri izler.
+
+Çalışan her ölçüm — modu açmak, hızlı ölçüm, yük altında test — **"İptal et"**
+ile durdurulabilir; durdurulan çalışma makineyi bulduğu hâle geri getirir.
+Geçersiz bir hedef yazdığınızda hata alanın hemen altında görünür ve ölçüm
+düğmeleri kapanır, böylece ekranda yeni hedef dururken eski hedefe ölçüm
+yapılmaz.
+
+Hangi yolun denendiği ve hangisinin denenmediği kartta ayrı ayrı yazılır:
+"Bağlantı ölçümü", "Ağ kartı ayarları", "Yük altında ölçüm" ve "Gönderim
+sınırı". Örneğin makinede değiştirilebilecek bir NIC ayarı yoksa bu tek satır
+"uygun değil" der; ölçüm ve yük testi kullanılabilir kalır. Teknik seçenekler,
+profil yönetimi, uç nokta seçimi, Traffic Guard ayarları ve tam rapor **"Ölçüm
+ayrıntıları ve gelişmiş seçenekler"** başlığı altındadır.
 
 Hangi ayarların neden denendiği, hangilerinin bilerek dışarıda bırakıldığı ve her
 biri hangi resmî belgeye dayandığı **[LATENCY-RESEARCH.md](LATENCY-RESEARCH.md)**
@@ -286,7 +322,7 @@ gösteriyorsa değişiklikler kalıcı olur; aksi hâlde hepsi geri alınır.
 ### Yük altındaki gecikme
 
 Ev bağlantılarında en büyük ms kazancı genelde boştaki ping'den değil,
-**bir şey gönderirken oluşan kuyruklanmadan** gelir. "Yük altında derin test"
+**bir şey gönderirken oluşan kuyruklanmadan** gelir. "Yük altında test et"
 şunu yapar:
 
 1. boştaki RTT'yi ölçer;
@@ -297,7 +333,10 @@ Ev bağlantılarında en büyük ms kazancı genelde boştaki ping'den değil,
 5. gönderim ve indirme kuyruklanmasını **ayrı ayrı** raporlar.
 
 **Uygulama hiçbir veri göndermez veya indirmez.** Yük sizin başlattığınız
-trafiktir; gelmezse cevap "ölçülmedi" olur, tahmin değil.
+trafiktir; gelmezse cevap "ölçülmedi" olur, tahmin değil. Aynı şekilde, boştaki
+ölçüm için hattın gerçekten boşalması gerekir: bir aktarım sürerken test
+başlatırsanız çalışma "ölçüm tamamlanmadı" der ve aktarımları durdurup yeniden
+denemenizi ister. Bu bir "kazanç yok" sonucu değildir.
 
 "Yüklü" tek bir durum değildir. Kapasite, aktarımınız hızlanıp **plato yaptığında**
 öğrenilir (tek bir pencereden değil), yön başına ayrı saklanır, ve üç ayrı durum
@@ -442,9 +481,18 @@ silinir.
 tekrarında yeniden kanıtlanır; bir eleme ise yalnız sessizce bir adayı ölçüm
 dışı bırakır. Bu yüzden elemeler **3 gün** sonra, kabuller **30 gün** sonra
 geçersizdir — ve bir eleme yalnız ölçüldüğü koşullar hâlâ geçerliyken sayılır:
-hedef, güç kaynağı, erişim noktası, sinyal seviyesi veya "yük altında ölçüldü mü"
-değişirse aday yeniden ölçülür. Arayüzdeki **"Zorla yeniden ölç"** düğmesi ve
-`latency retest` komutu önbelleği tamamen atlar.
+hedef, güç kaynağı, erişim noktası, sinyal seviyesi, "yük altında ölçüldü mü" veya
+bağdaştırıcı yeniden başlatma izniniz değişirse aday yeniden ölçülür.
+Ayrıntılar bölümündeki **"Zorla yeniden ölç"** düğmesi ve `latency retest`
+komutu önbelleği tamamen atlar.
+
+**Yalnız gerçekten ölçülmüş bir sonuç eleme sayılır.** Hiç denenemeyen bir
+aday — yeniden başlatma izni verilmediği için atlanan, sürücünün desteklemediği,
+süre sınırına takılan, siz durdurduğunuz veya ağ değiştiği için yarım kalan —
+"faydasız" olarak kaydedilmez ve sonraki çalışmada atlanmaz. Özellikle:
+**yeniden başlatma iznini sonradan verdiğinizde, o izin yüzünden atlanmış
+ayarlar ilk fırsatta ölçülür.** Bu ayrımı yapmayan sürümlerin bıraktığı kayıtlar
+ölçüm yöntemi sürümüyle geçersiz sayılır; bu tek bir yeniden ölçüme mal olur.
 
 Dosyada adres, SSID, BSSID veya tam işlem yolu tutulmaz; ağ, erişim noktası ve
 hedef kısa hash'lerle temsil edilir ve hiçbir yere gönderilmez.

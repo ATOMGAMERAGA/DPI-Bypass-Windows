@@ -78,8 +78,15 @@ public sealed record LatencyDelta
 
     public required double JitterMs { get; init; }
 
-    /// <summary>Percentage points of packet loss removed. Negative means loss was added.</summary>
-    public required double LossPercent { get; init; }
+    /// <summary>
+    /// Percentage points of packet loss removed, or null when it was not measured.
+    /// </summary>
+    /// <remarks>
+    /// Null whenever either half of the comparison came from an instrument that does not
+    /// count packets. Treating that as zero would let a loss guard pass on evidence that
+    /// does not exist.
+    /// </remarks>
+    public double? LossPercent { get; init; }
 
     public static readonly LatencyDelta Zero = new()
     {
@@ -101,7 +108,11 @@ public sealed record LatencyDelta
             P95Ms = before.P95RttMs - after.P95RttMs,
             P99Ms = before.P99RttMs - after.P99RttMs,
             JitterMs = before.JitterMs - after.JitterMs,
-            LossPercent = before.PacketLossPercent - after.PacketLossPercent,
+            LossPercent = (before.PacketLossPercent, after.PacketLossPercent) switch
+            {
+                ({ } from, { } to) => from - to,
+                _ => null,
+            },
         };
     }
 
@@ -129,7 +140,9 @@ public sealed record LatencyDelta
             P95Ms = deltas.Sum(delta => delta.P95Ms),
             P99Ms = deltas.Sum(delta => delta.P99Ms),
             JitterMs = deltas.Sum(delta => delta.JitterMs),
-            LossPercent = deltas.Sum(delta => delta.LossPercent),
+            LossPercent = deltas.All(delta => delta.LossPercent is null)
+                ? null
+                : deltas.Sum(delta => delta.LossPercent ?? 0),
         };
     }
 
@@ -148,7 +161,13 @@ public sealed record LatencyDelta
             P95Ms = LatencyStatistics.Mean(deltas.Select(delta => delta.P95Ms)),
             P99Ms = LatencyStatistics.Mean(deltas.Select(delta => delta.P99Ms)),
             JitterMs = LatencyStatistics.Mean(deltas.Select(delta => delta.JitterMs)),
-            LossPercent = LatencyStatistics.Mean(deltas.Select(delta => delta.LossPercent)),
+
+            // Averaged only across the pairs that actually measured loss; a run where
+            // nothing did reports that it does not know rather than reporting zero.
+            LossPercent = deltas.Any(delta => delta.LossPercent is not null)
+                ? LatencyStatistics.Mean(deltas.Where(delta => delta.LossPercent is not null)
+                    .Select(delta => delta.LossPercent!.Value))
+                : null,
         };
     }
 }
@@ -163,6 +182,103 @@ public enum LatencyVerdictOutcome
 
     /// <summary>Something is there but the noise is as big as it is. Measure again.</summary>
     Inconclusive,
+
+    /// <summary>
+    /// Nothing was measured at all, so there is no performance answer either way.
+    /// </summary>
+    /// <remarks>
+    /// Added because the previous two-value split forced every obstacle into
+    /// <see cref="Rejected"/>: a candidate that needed a restart the user had not
+    /// consented to came out of the runner looking exactly like one that had been
+    /// benchmarked and found useless, and the profile cache then skipped it on the next
+    /// run - including the run where consent had just been given. A candidate that was
+    /// never applied cannot have been found wanting.
+    /// </remarks>
+    NotMeasured,
+}
+
+/// <summary>
+/// Why a candidate ended where it did, in terms a cache and a user can both act on.
+/// </summary>
+/// <remarks>
+/// The single question this exists to answer is whether the outcome is evidence about
+/// performance. Only <see cref="MeasuredNoGain"/> and <see cref="MeasuredRegression"/>
+/// are: they come from a completed, valid, paired experiment. Everything else is a
+/// temporary obstacle, and caching one of those as "already tried" is how a fixable
+/// machine stays unfixed.
+/// </remarks>
+public enum LatencyOutcomeCause
+{
+    /// <summary>A completed experiment accepted the change.</summary>
+    Confirmed = 0,
+
+    /// <summary>Measured, complete, and the gain was not there.</summary>
+    MeasuredNoGain = 1,
+
+    /// <summary>Measured, complete, and the change made something worse.</summary>
+    MeasuredRegression = 2,
+
+    /// <summary>Needs an adapter restart the user has not agreed to. Never applied.</summary>
+    AwaitingPermission = 3,
+
+    /// <summary>The driver or OS does not support the value. Never applied.</summary>
+    Unsupported = 4,
+
+    /// <summary>Written, but the machine was never running with it, so nothing was measured.</summary>
+    NotApplied = 5,
+
+    /// <summary>Applied and measured, but the cycles never produced a usable comparison.</summary>
+    InsufficientData = 6,
+
+    /// <summary>The run ran out of its wall-clock budget before deciding.</summary>
+    BudgetExhausted = 7,
+
+    /// <summary>The user stopped the run.</summary>
+    Cancelled = 8,
+
+    /// <summary>The route, adapter or access point moved underneath the experiment.</summary>
+    EnvironmentChanged = 9,
+
+    /// <summary>The link stopped carrying traffic while the change was on.</summary>
+    ConnectivityLost = 10,
+}
+
+/// <summary>Which causes are a statement about performance, and so may be remembered.</summary>
+public static class LatencyOutcomeCauses
+{
+    /// <summary>
+    /// Whether a completed experiment stands behind this cause.
+    /// </summary>
+    /// <remarks>
+    /// The gate for the profile cache and for anything that says "already tried". A
+    /// regression is evidence, a driver refusal is not, and a run that was cancelled is
+    /// not evidence of anything at all.
+    /// </remarks>
+    public static bool IsPerformanceEvidence(this LatencyOutcomeCause cause)
+        => cause is LatencyOutcomeCause.MeasuredNoGain or LatencyOutcomeCause.MeasuredRegression;
+
+    /// <summary>Whether the candidate was never actually running on the machine.</summary>
+    public static bool WasNeverApplied(this LatencyOutcomeCause cause)
+        => cause is LatencyOutcomeCause.AwaitingPermission
+            or LatencyOutcomeCause.Unsupported
+            or LatencyOutcomeCause.NotApplied;
+
+    /// <summary>A short phrase for the card, distinct per cause.</summary>
+    public static string Describe(this LatencyOutcomeCause cause) => cause switch
+    {
+        LatencyOutcomeCause.Confirmed => "ölçüldü ve kazanç doğrulandı",
+        LatencyOutcomeCause.MeasuredNoGain => "ölçüldü, belirgin bir fark çıkmadı",
+        LatencyOutcomeCause.MeasuredRegression => "ölçüldü, sonucu kötüleştirdi",
+        LatencyOutcomeCause.AwaitingPermission => "izin verilmediği için denenmedi",
+        LatencyOutcomeCause.Unsupported => "bu donanım/sürücü desteklemiyor",
+        LatencyOutcomeCause.NotApplied => "uygulanamadığı için ölçülemedi",
+        LatencyOutcomeCause.InsufficientData => "yeterli ölçüm toplanamadı",
+        LatencyOutcomeCause.BudgetExhausted => "süre sınırı nedeniyle ölçülemedi",
+        LatencyOutcomeCause.Cancelled => "ölçüm durduruldu",
+        LatencyOutcomeCause.EnvironmentChanged => "ölçüm sırasında ağ koşulları değişti",
+        LatencyOutcomeCause.ConnectivityLost => "uygulandığında bağlantı koptu",
+        _ => "sonuç belirlenemedi",
+    };
 }
 
 /// <summary>What the paired benchmark concluded about one candidate.</summary>
@@ -177,6 +293,16 @@ public sealed record LatencyVerdict
     public required string Reason { get; init; }
 
     public required int Cycles { get; init; }
+
+    /// <summary>
+    /// Why this verdict came out as it did, separately from what it decided.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Outcome"/> answers "keep it or not"; this answers "on what evidence".
+    /// Only a cause that <see cref="LatencyOutcomeCauses.IsPerformanceEvidence"/> accepts
+    /// may be written to the profile cache as a reason to skip the candidate next time.
+    /// </remarks>
+    public LatencyOutcomeCause Cause { get; init; } = LatencyOutcomeCause.MeasuredNoGain;
 
     public LatencyDelta Delta { get; init; } = LatencyDelta.Zero;
 
@@ -198,6 +324,9 @@ public sealed record LatencyVerdict
     public string InterventionId { get; init; } = string.Empty;
 
     public bool Accepted => Outcome == LatencyVerdictOutcome.Accepted;
+
+    /// <summary>Whether a completed experiment produced this, so a cache may act on it.</summary>
+    public bool IsMeasured => Cause.IsPerformanceEvidence() || Outcome == LatencyVerdictOutcome.Accepted;
 }
 
 /// <summary>How strict one evaluation should be.</summary>
@@ -327,7 +456,15 @@ public static class LatencyComparison
         var minimumCycles = options.MinimumCycles;
         var maximumCycles = options.MaximumCycles;
 
-        LatencyVerdict Verdict(LatencyVerdictOutcome outcome, string reason, LatencyDelta? delta = null, double noise = 0) => new()
+        // The cause travels with every verdict this evaluator produces, because "we
+        // measured it and it did nothing" and "we could not get a usable pair" reach the
+        // same Rejected outcome and must not be remembered the same way.
+        LatencyVerdict Verdict(
+            LatencyVerdictOutcome outcome,
+            string reason,
+            LatencyDelta? delta = null,
+            double noise = 0,
+            LatencyOutcomeCause cause = LatencyOutcomeCause.MeasuredNoGain) => new()
         {
             Outcome = outcome,
             PropertyName = candidate.PropertyName,
@@ -335,27 +472,39 @@ public static class LatencyComparison
             InterventionId = candidate.Descriptor.Id,
             Reason = reason,
             Cycles = pairs.Count,
+            Cause = cause,
             Delta = delta ?? LatencyDelta.Zero,
             MetricNoiseMs = noise,
         };
 
         if (pairs.Count == 0)
         {
-            return Verdict(LatencyVerdictOutcome.Inconclusive, "henüz ölçüm yok");
+            return Verdict(
+                LatencyVerdictOutcome.Inconclusive,
+                "henüz ölçüm yok",
+                cause: LatencyOutcomeCause.InsufficientData);
         }
 
         // Any cycle where the candidate could not be reached at all is fatal; a setting
         // that sometimes takes the link down is not a latency improvement.
         if (pairs.Any(pair => !pair.Candidate.HasRemoteConnectivity))
         {
-            return Verdict(LatencyVerdictOutcome.Rejected, "aday uygulandığında uzak uç yanıt vermedi");
+            return Verdict(
+                LatencyVerdictOutcome.Rejected,
+                "aday uygulandığında uzak uç yanıt vermedi",
+                cause: LatencyOutcomeCause.MeasuredRegression);
         }
 
         if (pairs.Any(pair =>
             !HasValidStatistics(pair.Baseline)
             || !HasValidStatistics(pair.Candidate)))
         {
-            return Verdict(LatencyVerdictOutcome.Rejected, "ölçüm geçerli gecikme istatistikleri üretmedi");
+            // A malformed measurement is not a fact about the setting; it is a fact about
+            // the measurement, so it never becomes a cached "already tried".
+            return Verdict(
+                LatencyVerdictOutcome.NotMeasured,
+                "ölçüm geçerli gecikme istatistikleri üretmedi",
+                cause: LatencyOutcomeCause.InsufficientData);
         }
 
         var directlyComparable = pairs.Where(pair => pair.IsComparable).ToArray();
@@ -370,15 +519,17 @@ public static class LatencyComparison
         if (usable.Length == 0)
         {
             return Verdict(
-                pairs.Count >= maximumCycles ? LatencyVerdictOutcome.Rejected : LatencyVerdictOutcome.Inconclusive,
-                "karşılaştırılabilir ölçüm çifti elde edilemedi");
+                pairs.Count >= maximumCycles ? LatencyVerdictOutcome.NotMeasured : LatencyVerdictOutcome.Inconclusive,
+                "karşılaştırılabilir ölçüm çifti elde edilemedi",
+                cause: LatencyOutcomeCause.InsufficientData);
         }
 
         if (usingUnknownLoad && pairs.Count < maximumCycles)
         {
             return Verdict(
                 LatencyVerdictOutcome.Inconclusive,
-                "yük sayaçları okunamadı; ek ölçüm gerekiyor");
+                "yük sayaçları okunamadı; ek ölçüm gerekiyor",
+                cause: LatencyOutcomeCause.InsufficientData);
         }
 
         // Every usable cycle having run the same way round means anything drifting over
@@ -389,8 +540,9 @@ public static class LatencyComparison
             && usable.DistinctBy(pair => pair.Order).Count() == 1)
         {
             return Verdict(
-                pairs.Count >= maximumCycles ? LatencyVerdictOutcome.Rejected : LatencyVerdictOutcome.Inconclusive,
-                "turların tümü aynı sırada ölçüldü; sıra dengelenmeden karar verilmez");
+                pairs.Count >= maximumCycles ? LatencyVerdictOutcome.NotMeasured : LatencyVerdictOutcome.Inconclusive,
+                "turların tümü aynı sırada ölçüldü; sıra dengelenmeden karar verilmez",
+                cause: LatencyOutcomeCause.InsufficientData);
         }
 
         var deltas = usable.Select(pair => pair.Delta).ToArray();
@@ -403,16 +555,19 @@ public static class LatencyComparison
                     ? LatencyVerdictOutcome.Rejected
                     : LatencyVerdictOutcome.Inconclusive,
             reason,
-            mean);
+            mean,
+            cause: LatencyOutcomeCause.MeasuredRegression);
 
         // --- regressions, checked before any gain is considered ---------------------
 
         // One probe of a batch may go missing on any link. Two in even one candidate
         // window is an intermittent reliability regression, not something gains in
         // other cycles should be allowed to average away.
+        // Only pairs whose two halves both counted packets can carry a loss regression.
         var lossRegressions = usable
-            .Where(pair => -pair.Delta.LossPercent > Math.Max(1.0, pair.Candidate.LossQuantumPercent))
-            .Select(pair => -pair.Delta.LossPercent)
+            .Where(pair => pair.Delta.LossPercent is { } loss
+                && -loss > Math.Max(1.0, pair.Candidate.LossQuantumPercent ?? 0))
+            .Select(pair => -pair.Delta.LossPercent!.Value)
             .ToArray();
         if (lossRegressions.Length > 0)
         {
@@ -543,7 +698,10 @@ public static class LatencyComparison
             options.Seed);
         var pValue = LatencyStatistics.PairedSignFlipPValue(winningDeltas, seed: options.Seed);
 
-        LatencyVerdict Enriched(LatencyVerdictOutcome outcome, string reason) => Verdict(outcome, reason, mean, noise) with
+        LatencyVerdict Enriched(
+            LatencyVerdictOutcome outcome,
+            string reason,
+            LatencyOutcomeCause cause = LatencyOutcomeCause.MeasuredNoGain) => Verdict(outcome, reason, mean, noise, cause) with
         {
             WinningMetric = winner.Name,
             ConfidenceLowerMs = lower,
@@ -565,7 +723,8 @@ public static class LatencyComparison
         return Enriched(
             LatencyVerdictOutcome.Accepted,
             $"{winner.Name} {winner.Value:F1} ms iyileşti · {usable.Length} turun {improvedCycles} tanesinde tekrarlandı"
-                + (options.RequireConfidenceInterval ? $" · %{options.ConfidenceLevel * 100:F0} aralık {lower:F1}…{upper:F1} ms" : string.Empty));
+                + (options.RequireConfidenceInterval ? $" · %{options.ConfidenceLevel * 100:F0} aralık {lower:F1}…{upper:F1} ms" : string.Empty),
+            LatencyOutcomeCause.Confirmed);
     }
 
     /// <summary>
@@ -618,7 +777,7 @@ public static class LatencyComparison
 
         var delta = LatencyDelta.Between(before, after);
 
-        if (-delta.LossPercent > Math.Max(1.0, after.LossQuantumPercent))
+        if (delta.LossPercent is { } loss && -loss > Math.Max(1.0, after.LossQuantumPercent ?? 0))
         {
             return false;
         }
@@ -688,18 +847,37 @@ public static class LatencyComparison
 
     private static double Limit(double baseline, double floor, double share) => Math.Max(floor, baseline * share);
 
+    /// <summary>
+    /// Whether a measurement is internally consistent enough to be compared at all.
+    /// </summary>
+    /// <remarks>
+    /// The attempt and loss checks apply only to an active probe. A passive observation
+    /// sends nothing, so it records no attempts and no loss, and demanding them of it
+    /// would throw away every reading the TCP stack gave us.
+    /// </remarks>
     private static bool HasValidStatistics(LatencyMeasurement measurement) =>
-        measurement.RemoteAttempts > 0
-        && measurement.RemoteReplies > 0
-        && measurement.RemoteReplies <= measurement.RemoteAttempts
+        measurement.RemoteReplies > 0
+        && HasValidCounts(measurement)
         && IsValidMetric(measurement.MedianRttMs)
         && IsValidMetric(measurement.P95RttMs)
         && IsValidMetric(measurement.P99RttMs)
         && measurement.P95RttMs >= measurement.MedianRttMs
         && measurement.P99RttMs >= measurement.P95RttMs
-        && IsValidMetric(measurement.JitterMs)
-        && double.IsFinite(measurement.PacketLossPercent)
-        && measurement.PacketLossPercent is >= 0 and <= 100;
+        && IsValidMetric(measurement.JitterMs);
+
+    private static bool HasValidCounts(LatencyMeasurement measurement)
+    {
+        if (measurement.Source == LatencySampleSource.PassiveObservation)
+        {
+            return measurement.PacketLossPercent is null;
+        }
+
+        return measurement.RemoteAttempts > 0
+            && measurement.RemoteReplies <= measurement.RemoteAttempts
+            && measurement.PacketLossPercent is { } loss
+            && double.IsFinite(loss)
+            && loss is >= 0 and <= 100;
+    }
 
     private static bool IsValidMetric(double value) => double.IsFinite(value) && value >= 0;
 
@@ -736,7 +914,10 @@ public static class LatencyComparison
             P95RttMs = LatencyStatistics.Mean(pairs.Select(pair => pair.Baseline.P95RttMs)),
             P99RttMs = LatencyStatistics.Mean(pairs.Select(pair => pair.Baseline.P99RttMs)),
             JitterMs = LatencyStatistics.Mean(pairs.Select(pair => pair.Baseline.JitterMs)),
-            PacketLossPercent = LatencyStatistics.Mean(pairs.Select(pair => pair.Baseline.PacketLossPercent)),
+            PacketLossPercent = pairs.Any(pair => pair.Baseline.PacketLossPercent is not null)
+                ? LatencyStatistics.Mean(pairs.Where(pair => pair.Baseline.PacketLossPercent is not null)
+                    .Select(pair => pair.Baseline.PacketLossPercent!.Value))
+                : null,
         };
     }
 }

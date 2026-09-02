@@ -97,6 +97,18 @@ public static class TrafficGuardCapPlanner
         _ => [0.92, 0.80, 0.68],
     };
 
+    /// <summary>
+    /// The longest ladder any mode defines, so a trial budget cannot silently truncate it.
+    /// </summary>
+    /// <remarks>
+    /// The budget used to be a literal two against a ladder of three, and
+    /// <c>Take(MaximumTrials)</c> meant the last share was dead code in normal operation:
+    /// on a link that needed a real cap, the one cap that would have worked was never
+    /// applied. Reading the length from the ladder keeps the two in step.
+    /// </remarks>
+    public static int MaximumShares { get; } = Enum.GetValues<TrafficGuardMode>()
+        .Max(mode => SharesFor(mode).Count);
+
     /// <summary>Queueing has to fall by at least this for a cap to qualify.</summary>
     public const double MinimumQueueingReductionMs = 10;
 
@@ -269,7 +281,14 @@ public static class TrafficGuardCapPlanner
             return false;
         }
 
-        var added = after.PacketLossPercent - before.PacketLossPercent;
-        return added > Math.Max(1.0, after.LossQuantumPercent);
+        // A cap can only be blamed for loss both windows actually counted. When either
+        // instrument does not measure loss there is no comparison to make, and inventing
+        // one would reject a working cap on evidence that was never collected.
+        if (before.PacketLossPercent is not { } lossBefore || after.PacketLossPercent is not { } lossAfter)
+        {
+            return false;
+        }
+
+        return lossAfter - lossBefore > Math.Max(1.0, after.LossQuantumPercent ?? 0);
     }
 }

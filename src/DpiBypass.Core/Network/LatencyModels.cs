@@ -113,6 +113,27 @@ public enum LatencyRestoreOutcome
     Failed,
 }
 
+/// <summary>
+/// Which instrument produced a series, because it decides what can be derived from it.
+/// </summary>
+/// <remarks>
+/// The distinction exists because packet loss is only meaningful for one of them. An
+/// active probe sends a known number of requests and counts what came back, so the
+/// difference is loss. A passive observation sends nothing: it reads what the TCP stack
+/// has already measured on a connection somebody else owns, and the number of times this
+/// application happened to poll that counter has no relationship to the number of packets
+/// the connection sent. Deriving loss from polls produced a figure that grew with how
+/// often the poll ran.
+/// </remarks>
+public enum LatencySampleSource
+{
+    /// <summary>Requests this application sent, and the replies it counted.</summary>
+    ActiveProbe = 0,
+
+    /// <summary>Readings of a counter the operating system maintains. Nothing was sent.</summary>
+    PassiveObservation = 1,
+}
+
 /// <summary>A statistically useful latency sample; every number comes from real I/O.</summary>
 public sealed record LatencyMeasurement
 {
@@ -122,9 +143,21 @@ public sealed record LatencyMeasurement
 
     public required string Protocol { get; init; }
 
+    /// <summary>
+    /// Requests sent for the remote series, or zero for a passive observation.
+    /// </summary>
+    /// <remarks>
+    /// Only ever the count of things this application actually put on the wire. A passive
+    /// series leaves it at zero rather than reporting how many times it read a counter,
+    /// because those polls are not attempts and subtracting replies from them is not loss.
+    /// </remarks>
     public int RemoteAttempts { get; init; }
 
+    /// <summary>Replies counted, or observations collected for a passive series.</summary>
     public int RemoteReplies { get; init; }
+
+    /// <summary>Which instrument produced the remote series.</summary>
+    public LatencySampleSource Source { get; init; } = LatencySampleSource.ActiveProbe;
 
     public int GatewayAttempts { get; init; }
 
@@ -146,7 +179,16 @@ public sealed record LatencyMeasurement
     /// <summary>Mean absolute difference between consecutive probes (delay variation).</summary>
     public double JitterMs { get; init; }
 
-    public double PacketLossPercent { get; init; }
+    /// <summary>
+    /// Loss over the remote series, or null when this instrument cannot measure it.
+    /// </summary>
+    /// <remarks>
+    /// Null and zero are different answers and the difference matters to a user: zero is
+    /// "no probe was lost", null is "nothing here counts packets". A passive observation
+    /// is always null. Anything downstream that renders this has to say "ölçülmedi"
+    /// rather than "%0".
+    /// </remarks>
+    public double? PacketLossPercent { get; init; }
 
     public double? GatewayMedianRttMs { get; init; }
 
@@ -167,12 +209,19 @@ public sealed record LatencyMeasurement
     /// </remarks>
     public double ClockResolutionMs { get; init; } = 1.0;
 
+    /// <summary>Whether loss is a number this measurement can report at all.</summary>
+    public bool LossMeasured => PacketLossPercent is not null;
+
     public bool HasRemoteConnectivity => RemoteReplies > 0;
 
     public bool HasAnyConnectivity => HasRemoteConnectivity || GatewayReplies > 0;
 
-    /// <summary>How much one lost probe moves <see cref="PacketLossPercent"/>.</summary>
-    public double LossQuantumPercent => LatencyStatistics.OneProbeWorth(RemoteAttempts);
+    /// <summary>
+    /// How much one lost probe moves <see cref="PacketLossPercent"/>, when loss is measured.
+    /// </summary>
+    public double? LossQuantumPercent => LossMeasured
+        ? LatencyStatistics.OneProbeWorth(RemoteAttempts)
+        : null;
 
     internal static LatencyMeasurement Create(
         string endpoint,
@@ -183,7 +232,8 @@ public sealed record LatencyMeasurement
         int gatewayAttempts,
         NetworkLoadSample? load = null,
         DateTimeOffset? measuredAt = null,
-        double clockResolutionMs = 1.0)
+        double clockResolutionMs = 1.0,
+        LatencySampleSource source = LatencySampleSource.ActiveProbe)
     {
         // Sorted for the order statistics; the delay variation needs the samples in the
         // order they arrived, so it is computed from the original list.
@@ -195,8 +245,11 @@ public sealed record LatencyMeasurement
             MeasuredAt = measuredAt ?? DateTimeOffset.UtcNow,
             RemoteEndpoint = endpoint,
             Protocol = protocol,
-            RemoteAttempts = remoteAttempts,
+            // A passive series records no attempts at all: what it collected are readings,
+            // and calling them attempts is what turned polling frequency into packet loss.
+            RemoteAttempts = source == LatencySampleSource.PassiveObservation ? 0 : remoteAttempts,
             RemoteReplies = ordered.Length,
+            Source = source,
             GatewayAttempts = gatewayAttempts,
             GatewayReplies = orderedGateway.Length,
             MinimumRttMs = ordered.Length == 0 ? 0 : ordered[0],
@@ -204,7 +257,9 @@ public sealed record LatencyMeasurement
             P95RttMs = LatencyStatistics.PercentileOfSorted(ordered, 0.95),
             P99RttMs = LatencyStatistics.PercentileOfSorted(ordered, 0.99),
             JitterMs = LatencyStatistics.DelayVariation(remoteSamples),
-            PacketLossPercent = LatencyStatistics.PacketLossPercent(remoteAttempts, ordered.Length),
+            PacketLossPercent = source == LatencySampleSource.PassiveObservation
+                ? null
+                : LatencyStatistics.PacketLossPercent(remoteAttempts, ordered.Length),
             GatewayMedianRttMs = orderedGateway.Length == 0
                 ? null
                 : LatencyStatistics.PercentileOfSorted(orderedGateway, 0.50),
@@ -677,6 +732,68 @@ public sealed record LatencyOptimizationSnapshot
     public bool IsEmpty => Settings.Count == 0 && Resources.Count == 0;
 }
 
+/// <summary>The separate ways this feature can reduce a delay.</summary>
+/// <remarks>
+/// Named individually because they succeed and fail independently, and because a user
+/// whose adapter offers no candidates has not run out of options - the target
+/// measurement and the loaded-latency lane are still there. Reporting "unsupported" for
+/// the whole feature because one lane found nothing is what made the mode look broken on
+/// machines where it had simply not been asked to do the thing that would have helped.
+/// </remarks>
+public enum LatencyLane
+{
+    /// <summary>Measuring the chosen target and splitting the path.</summary>
+    TargetMeasurement = 0,
+
+    /// <summary>Paired A/B benchmarking of reversible adapter properties.</summary>
+    AdapterSettings = 1,
+
+    /// <summary>Round trip measured while the link is genuinely busy.</summary>
+    LoadedLatency = 2,
+
+    /// <summary>Pacing this machine's own bulk sending with a QoS policy.</summary>
+    TrafficGuard = 3,
+}
+
+/// <summary>How far one lane got.</summary>
+public enum LatencyLaneState
+{
+    /// <summary>Ran and produced a result.</summary>
+    Completed = 0,
+
+    /// <summary>Has not been run yet, and running it is the sensible next step.</summary>
+    Available = 1,
+
+    /// <summary>Nothing here can run on this machine, for a stated reason.</summary>
+    NotApplicable = 2,
+
+    /// <summary>Could run, but something the user controls is in the way.</summary>
+    Blocked = 3,
+
+    /// <summary>Started and did not finish.</summary>
+    Incomplete = 4,
+}
+
+/// <summary>One line of "what was tried, and what was not", for the card.</summary>
+public sealed record LatencyLaneReport
+{
+    public required LatencyLane Lane { get; init; }
+
+    public required LatencyLaneState State { get; init; }
+
+    /// <summary>A short, specific sentence. Never a generic failure message.</summary>
+    public required string Detail { get; init; }
+
+    public string Title => Lane switch
+    {
+        LatencyLane.TargetMeasurement => "Bağlantı ölçümü",
+        LatencyLane.AdapterSettings => "Ağ kartı ayarları",
+        LatencyLane.LoadedLatency => "Yük altında ölçüm",
+        LatencyLane.TrafficGuard => "Gönderim sınırı",
+        _ => "Bilinmeyen",
+    };
+}
+
 public sealed record LatencyOptimizationResult
 {
     public required LatencyOptimizationStatus Status { get; init; }
@@ -687,8 +804,24 @@ public sealed record LatencyOptimizationResult
 
     public string NetworkKey { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The idle baseline: the round trip with the link quiet, before any change.
+    /// </summary>
+    /// <remarks>
+    /// Idle throughout. A measurement taken while the link was busy never goes here, and
+    /// <see cref="IdleBefore"/> enforces that rather than trusting the caller.
+    /// </remarks>
     public LatencyMeasurement? Before { get; init; }
 
+    /// <summary>
+    /// The idle measurement taken with the final settings in place, when one exists.
+    /// </summary>
+    /// <remarks>
+    /// Null when the run changed nothing, and null on the loaded lane, which measures no
+    /// idle "after" at all. An earlier build put the loaded window here, which the status
+    /// view then rendered as the idle ping - so a card could report the 140 ms measured
+    /// mid-upload as the user's idle round trip.
+    /// </remarks>
     public LatencyMeasurement? After { get; init; }
 
     /// <summary>What was measured, exactly, so "improvement" can never be ambiguous.</summary>
@@ -705,11 +838,34 @@ public sealed record LatencyOptimizationResult
 
     public LatencyMeasurement? DownloadLoaded { get; init; }
 
+    /// <summary>The loaded window measured again after a change was applied, when one was.</summary>
+    /// <remarks>
+    /// The Traffic Guard is the only thing that currently produces one: it measures the
+    /// link under load, applies a cap, and measures it under load again. Keeping it apart
+    /// from <see cref="After"/> is what lets the card show "idle before/after" and "loaded
+    /// before/after" as two comparisons rather than one confused pair.
+    /// </remarks>
+    public LatencyMeasurement? UploadLoadedAfter { get; init; }
+
+    /// <summary>What the run tried, and what it did not, with a reason for each.</summary>
+    public IReadOnlyList<LatencyLaneReport> Lanes { get; init; } = [];
+
     /// <summary>What the Traffic Guard is doing, when it has run.</summary>
     public TrafficGuardState? TrafficGuard { get; init; }
 
     /// <summary>Anything the user should know that is not a number.</summary>
     public IReadOnlyList<string> Notices { get; init; } = [];
+
+    /// <summary>
+    /// Set when something could not be put back and the machine is not as it was found.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from an ordinary failure, which leaves nothing behind. This is the one
+    /// state that needs the user to run a targeted recovery, so it is carried as a flag
+    /// rather than inferred from a status that also covers failures that rolled back
+    /// cleanly.
+    /// </remarks>
+    public bool RestoreFailed { get; init; }
 
     public IReadOnlyList<string> AppliedChanges { get; init; } = [];
 
@@ -728,8 +884,35 @@ public sealed record LatencyOptimizationResult
     /// <summary>Other endpoints discovery found, so the user can measure a different one.</summary>
     public IReadOnlyList<GameEndpointCandidate> Candidates { get; init; } = [];
 
-    /// <summary>The observed original-to-final improvement, present only when verified.</summary>
+    /// <summary>
+    /// The gain the independent confirmation experiment measured, in its own paired cycles.
+    /// </summary>
+    /// <remarks>
+    /// This is the only number allowed to be called a verified gain, because it is the
+    /// only one where the two halves were measured alternately, minutes apart in both
+    /// directions, under checked conditions. An earlier build filled this by subtracting
+    /// the run's final reading from a baseline taken at the start, which credits every
+    /// drift in between - a link quietening down as the user stops typing - to the
+    /// setting that happened to be applied.
+    /// </remarks>
     public LatencyDelta? VerifiedImprovement { get; init; }
+
+    /// <summary>
+    /// The plain first-to-last difference across the run, which is not a causal claim.
+    /// </summary>
+    /// <remarks>
+    /// Offered because it answers a question users genuinely ask - "is my ping different
+    /// from when this started" - and kept separate because nothing establishes that the
+    /// change is why. Anything rendering it has to say so.
+    /// </remarks>
+    public LatencyDelta? BaselineComparison { get; init; }
+
+    /// <summary>Which metric the confirmation actually improved, when one did.</summary>
+    /// <remarks>
+    /// Set from the confirmation verdict rather than re-derived, so a run that improved
+    /// only the delay variation says exactly that instead of implying a median gain.
+    /// </remarks>
+    public string? ImprovedMetric { get; init; }
 
     public bool HasVerifiedGain => Status == LatencyOptimizationStatus.Active
         && Before is not null
