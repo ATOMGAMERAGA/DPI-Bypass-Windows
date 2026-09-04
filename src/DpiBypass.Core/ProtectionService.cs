@@ -42,6 +42,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly TargetMatcher _matcher = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Lock _hotspotDiagnosticsGate = new();
+    private readonly Lock _networkWatchGate = new();
     private readonly IMobileHotspotDiagnostics _hotspot;
     private readonly LatencyOptimizer _latencyOptimizer;
     private readonly LoadedLatencyLane _loadedLatency;
@@ -264,7 +265,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public HotspotStatus HotspotStatus => new(
         VodafoneModeEnabled: Settings.VodafoneModeEnabled,
         DiagnosticsEnabled: Settings.HotspotDiagnostics,
-        RegisteredHere: Settings.VodafoneNetworkRegistered(Network.Key),
+        RegisteredHere: Settings.VodafoneNetworkRegistered(Network),
         RegisteredNetworks: Settings.VodafoneModeNetworks.Count,
         NetworkName: Network.DisplayName,
         AdapterName: Network.AdapterName ?? "-",
@@ -334,6 +335,129 @@ public sealed class ProtectionService : IAsyncDisposable
 
         ApplyLatencyPreferences();
         await _latencyOptimizer.StartAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts watching which network we are on, whether or not the engine is running.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This used to be built inside <see cref="StartAsync"/> and torn down with the
+    /// engine, and that is the whole of why Vodafone Sınırsız Modu looked dead. With
+    /// protection stopped nothing knew which network the machine was on -
+    /// <see cref="Network"/> was the empty fingerprint from the field initialiser - so
+    /// the card compared the user's remembered networks against a blank key, decided
+    /// none of them matched, and reported the network they were sitting on as
+    /// unregistered. Nothing ran by itself, and the only way to make the card say
+    /// anything true was to press the buttons by hand.
+    /// </para>
+    /// <para>
+    /// Idempotent, so the engine's own start can call it without caring whether the
+    /// application already did.
+    /// </para>
+    /// </remarks>
+    public void StartNetworkWatch()
+    {
+        lock (_networkWatchGate)
+        {
+            if (_monitor is not null)
+            {
+                return;
+            }
+
+            var monitor = new NetworkMonitor(log: AppLog.InfoSink);
+            monitor.Changed += OnNetworkChanged;
+
+            try
+            {
+                monitor.Start();
+            }
+            catch (Exception ex)
+            {
+                monitor.Changed -= OnNetworkChanged;
+                monitor.Dispose();
+                AppLog.Error("Ağ izleyici başlatılamadı", ex);
+                return;
+            }
+
+            _monitor = monitor;
+            AdoptNetwork(monitor.Current);
+        }
+
+        // Outside the lock: the card has been showing an empty network name until now,
+        // and this is the notification that fills it in.
+        Changed?.Invoke();
+    }
+
+    /// <summary>Ends the lifetime network watch. Safe to call more than once.</summary>
+    private void StopNetworkWatch()
+    {
+        NetworkMonitor? monitor;
+        lock (_networkWatchGate)
+        {
+            monitor = _monitor;
+            _monitor = null;
+        }
+
+        if (monitor is null)
+        {
+            return;
+        }
+
+        monitor.Changed -= OnNetworkChanged;
+        monitor.Dispose();
+    }
+
+    /// <summary>
+    /// Records the network we are on and reconciles the Vodafone registration with it.
+    /// </summary>
+    /// <remarks>
+    /// A phone hotspot is handed a fresh access point MAC on every session, so the
+    /// fingerprint key of "the network the user registered" changes underneath us.
+    /// Recognising it by name and then writing the current identity back is what keeps
+    /// the saved list pointing at the connection actually in front of the user, instead
+    /// of at one expired session of it.
+    /// </remarks>
+    private void AdoptNetwork(NetworkFingerprint network)
+    {
+        Network = network;
+
+        if (Settings.VodafoneModeNetworks.Count == 0
+            || !network.IsOnline
+            || !Settings.RefreshVodafoneNetworkIdentity(network))
+        {
+            return;
+        }
+
+        _store.Save(Settings);
+        AppLog.Info($"vodafone: '{network.DisplayName}' kayıtlı ağ olarak tanındı.");
+    }
+
+    /// <summary>
+    /// Runs the safe checks once for a launch that starts on a remembered network.
+    /// </summary>
+    /// <remarks>
+    /// Without this the card only ever filled in after a network transition, so the
+    /// common case - the machine boots already connected to the hotspot - showed
+    /// "henüz kontrol edilmedi" until the user pressed the button. Nothing here changes
+    /// any network state; it is the same read-only pass the button runs.
+    /// </remarks>
+    public async Task RunStartupHotspotCheckAsync(CancellationToken cancellationToken = default)
+    {
+        StartNetworkWatch();
+
+        var network = Network;
+        if (!ShouldRunHotspotDiagnostics(Settings, network)
+            || !Settings.VodafoneModeEnabled
+            || !network.IsOnline
+            || LastHotspotDiagnostics is not null
+            || IsHotspotBusy)
+        {
+            return;
+        }
+
+        var operation = CreateHotspotDiagnosticsCancellation(cancellationToken);
+        await RunHotspotDiagnosticsOnTransitionAsync(network, operation).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -789,8 +913,14 @@ public sealed class ProtectionService : IAsyncDisposable
                 _dnsConfigurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
                 _tester = new ConnectivityTester(_resolver);
 
+                // Each of these steps is seconds of work, and until the state said what
+                // it was doing they were all one motionless "Başlatılıyor…" - which is
+                // the difference between a slow start and an application that looks
+                // wedged. The state stays Starting throughout; only the detail moves.
+                SetState(ProtectionState.Starting, "Ad çözümleme ayarlanıyor…");
                 await ConfigureDnsAsync(lifetime.Token).ConfigureAwait(false);
 
+                SetState(ProtectionState.Starting, "Ağ sürücüsü açılıyor…");
                 _portMap = new ProcessPortMap(AppLog.InfoSink);
                 if (!_portMap.TryStart())
                 {
@@ -822,10 +952,11 @@ public sealed class ProtectionService : IAsyncDisposable
                     _dnsProxy.NameResolved += name => _discovery?.Observe(name, token);
                 }
 
-                _monitor = new NetworkMonitor(log: AppLog.InfoSink);
-                _monitor.Changed += OnNetworkChanged;
-                _monitor.Start();
-                Network = _monitor.Current;
+                SetState(ProtectionState.Starting, "Ağ izleniyor…");
+
+                // The watch belongs to the service, not to the engine, so it is started
+                // rather than rebuilt: it is already running whenever the app is.
+                StartNetworkWatch();
             }).ConfigureAwait(false);
 
             SetState(ProtectionState.Running, "Koruma etkin");
@@ -1151,10 +1282,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         Network = network;
-        Settings.RememberVodafoneNetwork(
-            network.Key,
-            network.DisplayName,
-            network.AdapterName ?? string.Empty);
+        Settings.RememberVodafoneNetwork(network);
         Settings.VodafoneModeEnabled = true;
         Settings.HotspotDiagnostics = true;
         _store.Save(Settings);
@@ -1199,15 +1327,20 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         Network = network;
-        if (Settings.VodafoneNetworkRegistered(network.Key))
+        if (Settings.VodafoneNetworkRegistered(network))
         {
+            // Already known, but the session identity may have moved on. Writing it back
+            // keeps the entry describing this connection rather than an expired one.
+            if (Settings.RefreshVodafoneNetworkIdentity(network))
+            {
+                _store.Save(Settings);
+                Changed?.Invoke();
+            }
+
             return false;
         }
 
-        Settings.RememberVodafoneNetwork(
-            network.Key,
-            network.DisplayName,
-            network.AdapterName ?? string.Empty);
+        Settings.RememberVodafoneNetwork(network);
 
         _store.Save(Settings);
         Changed?.Invoke();
@@ -1253,9 +1386,18 @@ public sealed class ProtectionService : IAsyncDisposable
         return migration;
     }
 
-    private void OnNetworkChanged(NetworkFingerprint fingerprint)
+    /// <summary>
+    /// Everything that happens when the machine moves to a different network.
+    /// </summary>
+    /// <remarks>
+    /// Internal rather than private so the transition can be driven in a test: the real
+    /// entry point is a Windows notification, and the behaviour that matters here - the
+    /// hotspot checks still running with the engine stopped - cannot be reached any
+    /// other way off Windows.
+    /// </remarks>
+    internal void OnNetworkChanged(NetworkFingerprint fingerprint)
     {
-        Network = fingerprint;
+        AdoptNetwork(fingerprint);
 
         // A different network means the previous diagnostics describe a link that is no
         // longer under us, so the panel goes back to "not run here yet".
@@ -1263,15 +1405,15 @@ public sealed class ProtectionService : IAsyncDisposable
         LastHotspotFailure = null;
         Changed?.Invoke();
 
-        var token = _lifetime?.Token ?? CancellationToken.None;
-        if (token.IsCancellationRequested)
-        {
-            return;
-        }
-
+        // The checks come first and are not gated on the engine's lifetime. They are a
+        // description of the connection, not part of protecting it, and tying them to
+        // the engine token meant that with protection stopped - which is when somebody
+        // is most likely to be looking at why their hotspot is not working - moving
+        // networks did nothing at all. CreateHotspotDiagnosticsCancellation still links
+        // the engine's token whenever there is a running engine to shut them down with.
         if (ShouldRunHotspotDiagnostics(Settings, fingerprint))
         {
-            var diagnostics = CreateHotspotDiagnosticsCancellation(token);
+            var diagnostics = CreateHotspotDiagnosticsCancellation(CancellationToken.None);
             // Always enter the delegate so its finally block disposes the linked source,
             // even if shutdown cancels it between creation and queueing.
             _ = Task.Run(() => RunHotspotDiagnosticsOnTransitionAsync(fingerprint, diagnostics));
@@ -1279,6 +1421,13 @@ public sealed class ProtectionService : IAsyncDisposable
         else
         {
             CancelHotspotDiagnostics();
+        }
+
+        var token = _lifetime?.Token ?? CancellationToken.None;
+        if (token.IsCancellationRequested)
+        {
+            // No engine to re-tune. Everything above has already run.
+            return;
         }
 
         // Re-tuning happens off the event thread so the OS notification returns at once.
@@ -1302,7 +1451,7 @@ public sealed class ProtectionService : IAsyncDisposable
         => settings.HotspotDiagnostics
             && (!settings.VodafoneModeEnabled
                 || settings.VodafoneModeNetworks.Count == 0
-                || settings.VodafoneNetworkRegistered(fingerprint.Key));
+                || settings.VodafoneNetworkRegistered(fingerprint));
 
     /// <summary>
     /// Runs the checks after a transition, off the notification thread.
@@ -1605,13 +1754,6 @@ public sealed class ProtectionService : IAsyncDisposable
             _engine = null;
         }
 
-        if (_monitor is not null)
-        {
-            _monitor.Changed -= OnNetworkChanged;
-            _monitor.Dispose();
-            _monitor = null;
-        }
-
         _portMap?.Dispose();
         _portMap = null;
 
@@ -1802,6 +1944,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         CancelHotspotDiagnostics();
+        StopNetworkWatch();
 
         try
         {

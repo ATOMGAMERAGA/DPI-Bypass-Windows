@@ -520,7 +520,8 @@
                                           IsChecked="{Binding AutoTuneOnNetworkChange, Mode=TwoWay}" />
 
                                 <TextBlock Text="Operatör" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,4" />
-                                <ComboBox ItemsSource="{Binding IspOptions}"
+                                <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                          ItemsSource="{Binding IspOptions}"
                                           SelectedItem="{Binding SelectedIsp, Mode=TwoWay}"
                                           MinWidth="320"
                                           MinHeight="34"
@@ -538,7 +539,8 @@
                                            Style="{StaticResource InfoTileValueStyle}"
                                            Margin="0,0,0,12" />
 
-                                <ComboBox ItemsSource="{Binding StrategyOptions}"
+                                <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                          ItemsSource="{Binding StrategyOptions}"
                                           SelectedItem="{Binding SelectedStrategy, Mode=TwoWay}"
                                           MinWidth="380"
                                           MinHeight="34"
@@ -597,7 +599,8 @@
                         <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Alan adı çözümleme" Style="{StaticResource SectionTitleStyle}" />
-                                <ComboBox ItemsSource="{Binding DnsOptions}"
+                                <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                          ItemsSource="{Binding DnsOptions}"
                                           SelectedItem="{Binding SelectedDns, Mode=TwoWay}"
                                           MinWidth="380"
                                           MinHeight="34"
@@ -649,7 +652,8 @@
                                 <TextBlock Style="{StaticResource CaptionStyle}"
                                            Margin="0,0,0,10"
                                            Text="Seçili yöntem belirli aralıklarla yeniden sınanır. Operatör kural değiştirdiğinde yeni bir yöntem kendiliğinden aranır." />
-                                <ComboBox ItemsSource="{Binding RecheckOptions}"
+                                <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                          ItemsSource="{Binding RecheckOptions}"
                                           SelectedItem="{Binding SelectedRecheck, Mode=TwoWay}"
                                           MinWidth="260"
                                           MinHeight="34"
@@ -705,7 +709,8 @@
                                 <TextBlock Text="Ne ölçülsün?"
                                            Style="{StaticResource FieldLabelStyle}"
                                            Margin="0,16,0,4" />
-                                <ComboBox ItemsSource="{Binding LatencyTargetOptions}"
+                                <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                          ItemsSource="{Binding LatencyTargetOptions}"
                                           SelectedItem="{Binding SelectedLatencyTarget, Mode=TwoWay}"
                                           MinWidth="260"
                                           MinHeight="34"
@@ -738,7 +743,8 @@
                                         <ColumnDefinition Width="*" MaxWidth="420" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <ComboBox Grid.Column="0"
+                                    <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                              Grid.Column="0"
                                               MinHeight="34"
                                               VerticalContentAlignment="Center"
                                               AutomationProperties.Name="Ölçülecek uygulama"
@@ -944,7 +950,8 @@
                                             <TextBlock Text="Bulunan uç noktalar (ölçülecek olanı seçin)"
                                                        Style="{StaticResource FieldLabelStyle}"
                                                        Margin="0,0,0,4" />
-                                            <ComboBox MinHeight="34"
+                                            <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                                      MinHeight="34"
                                                       MaxWidth="420"
                                                       HorizontalAlignment="Left"
                                                       VerticalContentAlignment="Center"
@@ -1012,6 +1019,7 @@
                                         <Border Style="{StaticResource StatusPanelStyle}">
                                             <StackPanel>
                                                 <ScrollViewer MaxHeight="220"
+                                                              infra:NestedScrolling.BubbleWheel="True"
                                                               HorizontalScrollBarVisibility="Auto"
                                                               VerticalScrollBarVisibility="Auto">
                                                     <TextBlock Text="{Binding LatencyResultSummary}"
@@ -1061,7 +1069,8 @@
                                         <TextBlock Text="Tercih"
                                                    Style="{StaticResource FieldLabelStyle}"
                                                    Margin="0,12,0,4" />
-                                        <ComboBox MinHeight="34"
+                                        <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                                  MinHeight="34"
                                                   MaxWidth="320"
                                                   HorizontalAlignment="Left"
                                                   VerticalContentAlignment="Center"
@@ -1075,7 +1084,8 @@
                                         <TextBlock Text="Sınırlanacak uygulama — oyun değil, toplu aktarım yapan program"
                                                    Style="{StaticResource FieldLabelStyle}"
                                                    Margin="0,12,0,4" />
-                                        <ComboBox MinHeight="34"
+                                        <ComboBox infra:NestedScrolling.IgnoreWheel="True"
+                                                  MinHeight="34"
                                                   MaxWidth="420"
                                                   HorizontalAlignment="Left"
                                                   IsEditable="True"
@@ -1349,6 +1359,7 @@
                                         <Border Style="{StaticResource MonoPanelStyle}"
                                                 Visibility="{Binding HotspotReport, Converter={StaticResource EmptyToCollapsedConverter}}">
                                             <ScrollViewer MaxHeight="200"
+                                                          infra:NestedScrolling.BubbleWheel="True"
                                                           HorizontalScrollBarVisibility="Auto"
                                                           VerticalScrollBarVisibility="Auto">
                                                 <TextBlock Text="{Binding HotspotReport}"

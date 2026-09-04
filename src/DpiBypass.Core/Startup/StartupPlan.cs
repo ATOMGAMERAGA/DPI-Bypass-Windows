@@ -33,6 +33,17 @@ public sealed record StartupPlan(StartupVisibility Visibility, string Reason)
     /// <summary>The logon task and the Run key entry both pass this.</summary>
     public const string MinimisedSwitch = "--minimized";
 
+    /// <summary>
+    /// Marks a launch Windows made at logon rather than one a person made.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="MinimisedSwitch"/> because the two answer different
+    /// questions and the app used to have to guess one from the other. "Windows started
+    /// this" decides whether the Startup Apps switch applies to this launch; "start in
+    /// the tray" is the user's own preference and is passed only when it is set.
+    /// </remarks>
+    public const string AutoStartSwitch = "--autostart";
+
     /// <summary>Forces the window up even for a launch that would otherwise hide.</summary>
     public const string ShowSwitch = "--show";
 
@@ -43,6 +54,10 @@ public sealed record StartupPlan(StartupVisibility Visibility, string Reason)
 
     public static bool WantsWindow(IReadOnlyList<string>? arguments)
         => HasSwitch(arguments, ShowSwitch);
+
+    /// <summary>Whether this launch came from the logon task rather than from a person.</summary>
+    public static bool StartedByWindows(IReadOnlyList<string>? arguments)
+        => HasSwitch(arguments, AutoStartSwitch);
 
     /// <param name="arguments">The command line this launch was given.</param>
     /// <param name="startMinimisedSetting">The user's "start in the tray" preference.</param>
@@ -65,8 +80,12 @@ public sealed record StartupPlan(StartupVisibility Visibility, string Reason)
 
         if (!WantsMinimised(arguments))
         {
-            // Someone double-clicked something. That is a request to see the app.
-            return new StartupPlan(StartupVisibility.ShowWindow, "elle başlatıldı");
+            // Either someone double-clicked something - a request to see the app - or
+            // the logon task started it with "start in the tray" switched off, which
+            // asks for the same thing.
+            return new StartupPlan(
+                StartupVisibility.ShowWindow,
+                StartedByWindows(arguments) ? "\"tepside başla\" kapalı" : "elle başlatıldı");
         }
 
         if (!startMinimisedSetting)

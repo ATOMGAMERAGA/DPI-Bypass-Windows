@@ -37,20 +37,6 @@ public partial class MainWindow : Window
         ThemeMode = ThemeMode.System;
 #pragma warning restore WPF0001
 
-        if (!SystemParameters.ClientAreaAnimation)
-        {
-            // The page entrance is decorative; the system-wide animation switch wins.
-            try
-            {
-                ((Style)Application.Current.Resources["PageSurfaceStyle"]).Triggers.Clear();
-            }
-            catch (Exception ex)
-            {
-                // Losing this only keeps a 180ms fade; say so and carry on.
-                AppLog.Error("Sayfa geçiş animasyonu kapatılamadı", ex);
-            }
-        }
-
         if (_theme is not null)
         {
             _theme.ThemeChanged += OnThemeChanged;

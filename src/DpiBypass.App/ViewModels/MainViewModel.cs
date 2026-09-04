@@ -130,6 +130,7 @@ public sealed class MainViewModel : ObservableObject
     private string _statusSeverity = "off";
     private bool _isRunning;
     private bool _isBusy;
+    private ProtectionState _protectionState = ProtectionState.Stopped;
     private string _networkName = "-";
     private string _ispSummary = "-";
     private string _strategySummary = "-";
@@ -311,7 +312,11 @@ public sealed class MainViewModel : ObservableObject
         _selectedGuardMode = GuardModeOptions.FirstOrDefault(option => option.Mode == latency.GuardMode)
             ?? GuardModeOptions[0];
 
-        ToggleCommand = new AsyncRelayCommand(ToggleAsync);
+        // Gated on the service rather than only on this command: protection also starts
+        // and stops from the launch path, the tray menu and the control channel, and a
+        // button that offers to start something already starting does nothing when it is
+        // pressed.
+        ToggleCommand = new AsyncRelayCommand(ToggleAsync, () => !_isBusy && !IsTransitioning);
         TestCommand = new AsyncRelayCommand(TestAsync);
         RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !IsTuning);
         TestAllCommand = new AsyncRelayCommand(TestAllAsync);
@@ -511,7 +516,44 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (Set(ref _isBusy, value))
+            {
+                ToggleCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the service is doing, so the primary button can say so.
+    /// </summary>
+    /// <remarks>
+    /// The button used to read only "is it running", which is two states short. A start
+    /// takes seconds - the driver, the resolvers, the adapters - and during all of it the
+    /// button offered to start protection that was already starting. Pressing it did
+    /// nothing, because the service refuses a second start, so the one control on every
+    /// page looked broken exactly while the app was working hardest.
+    /// </remarks>
+    public ProtectionState ProtectionState
+    {
+        get => _protectionState;
+        private set
+        {
+            if (Set(ref _protectionState, value))
+            {
+                Raise(nameof(ToggleCaption));
+                Raise(nameof(IsTransitioning));
+                ToggleCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>Whether protection is on its way in or out, and cannot be told otherwise.</summary>
+    public bool IsTransitioning => _protectionState is ProtectionState.Starting or ProtectionState.Stopping;
 
     /// <summary>A strategy sweep is measuring on the network; the retune action is out.</summary>
     public bool IsTuning
@@ -526,7 +568,12 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public string ToggleCaption => _isRunning ? "Korumayı durdur" : "Korumayı başlat";
+    public string ToggleCaption => _protectionState switch
+    {
+        ProtectionState.Starting => "Başlatılıyor…",
+        ProtectionState.Stopping => "Durduruluyor…",
+        _ => _isRunning ? "Korumayı durdur" : "Korumayı başlat",
+    };
 
     public string NetworkName { get => _networkName; private set => Set(ref _networkName, value); }
 
@@ -2125,20 +2172,54 @@ public sealed class MainViewModel : ObservableObject
         RefreshVodafoneNetworks();
     }
 
+    /// <summary>
+    /// Rebuilds the saved-network list, and only when it has actually changed.
+    /// </summary>
+    /// <remarks>
+    /// The rebuild is conditional because this runs on every service notification, and
+    /// the service notifies often - counters, state transitions, a learned domain. An
+    /// unconditional clear-and-refill emptied the selection several times a second, so
+    /// "select a network and press forget" was a race the user could not reliably win:
+    /// the row was deselected out from under the pointer and the button greyed itself
+    /// out again. Comparing first means the list only moves when its contents differ.
+    /// </remarks>
     private void RefreshVodafoneNetworks()
     {
-        VodafoneNetworks.Clear();
-        foreach (var network in _service.Settings.VodafoneModeNetworks)
+        var current = _service.Network;
+        var match = _service.Settings.MatchVodafoneNetwork(current);
+
+        var entries = _service.Settings.VodafoneModeNetworks
+            .Select(network =>
+            {
+                var name = string.IsNullOrWhiteSpace(network.DisplayName) ? network.Key : network.DisplayName;
+                var adapter = string.IsNullOrWhiteSpace(network.AdapterName)
+                    ? string.Empty
+                    : $"  ({network.AdapterName})";
+
+                // "Current" is the matcher's answer, not a key comparison: a phone
+                // hotspot arrives under a new key every session, and the row the user
+                // is sitting on has to be marked as such.
+                return new VodafoneNetworkEntry(
+                    network.Key,
+                    name + adapter,
+                    match is not null && ReferenceEquals(match, network));
+            })
+            .ToList();
+
+        if (!entries.SequenceEqual(VodafoneNetworks))
         {
-            var name = string.IsNullOrWhiteSpace(network.DisplayName) ? network.Key : network.DisplayName;
-            var adapter = string.IsNullOrWhiteSpace(network.AdapterName) ? string.Empty : $"  ({network.AdapterName})";
-            VodafoneNetworks.Add(new VodafoneNetworkEntry(
-                network.Key,
-                name + adapter,
-                string.Equals(network.Key, _service.Network.Key, StringComparison.Ordinal)));
+            var selected = _selectedVodafoneNetwork?.Key;
+
+            VodafoneNetworks.Clear();
+            foreach (var entry in entries)
+            {
+                VodafoneNetworks.Add(entry);
+            }
+
+            SelectedVodafoneNetwork = VodafoneNetworks.FirstOrDefault(
+                entry => entry.Key == selected);
         }
 
-        SelectedVodafoneNetwork = null;
         Raise(nameof(HasVodafoneNetworks));
         RefreshVodafoneModeStatus();
     }
@@ -2293,6 +2374,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         IsRunning = _service.State is ProtectionState.Running or ProtectionState.Degraded;
+        ProtectionState = _service.State;
 
         StatusHeadline = _service.State switch
         {
@@ -2518,7 +2600,19 @@ public sealed class MainViewModel : ObservableObject
     {
         try
         {
-            var enabled = await Task.Run(() => _autoStart.IsEnabledAsync()).ConfigureAwait(true);
+            // A registration the user has asked for is repaired rather than merely
+            // reported. Between two runs a task can be deleted, a Run value cleaned
+            // away, or a task written by an older build found to have no trigger of its
+            // own - and the old behaviour was to read that as "the user turned it off"
+            // and untick the checkbox, which is how autostart went missing and stayed
+            // missing. A switch genuinely turned off in Windows is still respected:
+            // EnsureRegisteredAsync leaves that case alone.
+            var wanted = _service.Settings.StartWithWindows;
+            var status = await Task.Run(() => wanted
+                ? _autoStart.EnsureRegisteredAsync(_service.Settings.StartMinimised)
+                : _autoStart.InspectAsync()).ConfigureAwait(true);
+
+            var enabled = status.IsEnabled;
 
             // Windows Settings owns its Startup Apps switch too. If the user changes
             // it there, that decision must flow back into our checkbox instead of the

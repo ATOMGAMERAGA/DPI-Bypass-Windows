@@ -157,6 +157,20 @@ kontrol" ayrı şeylerdir ve kartta açıklanır. Modu kapatmak kayıtlı ağlar
 silmez; bir ağı listeden çıkarmak ayrı bir işlemdir. Ağ değiştiğinizde önceki
 ağın sonucu gösterilmez.
 
+**Kayıtlı ağınız kendiliğinden tanınır.** Kart, kayıtlı bir ağdayken başlığında
+**"Aktif · \<ağ adı\>"** yazar ve kontrol elle başlatılmayı beklemez:
+
+- Ağ kimliği artık **motordan bağımsız** izlenir. Önceden hangi ağda olduğumuz
+  yalnızca koruma çalışırken biliniyordu, bu yüzden koruma kapalıyken kart —
+  kullanıcının az önce kaydettiği ağda bile — "kayıtlı değil" diyordu.
+- Eşleşme yalnız ağ parmak izine bakmaz, **ağ adına da bakar**. Parmak izi erişim
+  noktasının MAC adresini içerir ve telefon paylaşımı her açılışta yeni bir
+  rastgele MAC dağıtır (Android ve iOS'ta varsayılan), yani dün kaydedilen ağ
+  bugün tanınmayan bir anahtarla geliyordu. Ad eşleştiğinde kayıt bu oturumun
+  kimliğiyle güncellenir; liste tek satır kalır.
+- Uygulama açıldığında zaten kayıtlı bir ağdaysanız kontrol **bir kez
+  kendiliğinden** çalışır (yalnızca "Kayıtlı ağlarda otomatik kontrol" açıkken).
+
 Tanılama kalıcı ağ ayarı veya trafik sınıflandırma kuralı değiştirmez; ölçüm için
 sıradan ICMP, DNS ve bağlantı denetimi paketleri gönderir.
 
@@ -614,10 +628,27 @@ gösterilir.
 
 Kurulumda uygulama Windows'un **Başlangıç Uygulamaları** listesine eklenir. Bu
 kayıt, **yükseltilmiş** çalışan `DpiBypass-Autostart` görevini tetikler; böylece
-her açılışta yönetici onayı sorulmaz ve Windows Ayarları'ndaki anahtar gerçekten
-açılışı denetler. Görev kaydedilemezse uygulama doğrudan `Run` anahtarına düşer —
-o durumda onay istenir. İstemiyorsanız Windows Başlangıç Uygulamaları'ndan veya
-**DNS ve ayarlar** sekmesinden kapatabilirsiniz.
+her açılışta yönetici onayı sorulmaz. Görev kaydedilemezse uygulama doğrudan
+`Run` anahtarına düşer — o durumda onay istenir. İstemiyorsanız Windows Başlangıç
+Uygulamaları'ndan veya **DNS ve ayarlar** sekmesinden kapatabilirsiniz.
+
+**Görev artık kendi oturum açma tetikleyicisine sahiptir.** Önceden tek başlatma
+yolu `Run` kaydıydı: o kayıt herhangi bir sebeple kaybolduğunda (temizlik aracı,
+profilin yeniden oluşturulması, kurulumun başka bir yönetici hesabıyla
+yükseltilmesi) uygulama bir daha hiç açılmıyordu ve bunu söyleyen hiçbir şey
+yoktu. Şimdi görev oturum açıldıktan 10 saniye sonra kendiliğinden çalışır;
+`Run` kaydı yine yazılır, çünkü Windows Ayarları'ndaki anahtarı o gösterir. İki
+yol da aynı görevi çalıştırdığı için ikinci kopya oluşmaz.
+
+**Windows Ayarları'ndaki anahtar hâlâ belirleyicidir.** Oturum açma tetikleyicisi
+uygulamayı `--autostart` ile başlatır; bu şekilde başlayan bir kopya, Windows
+kaydı "kapalı" olarak işaretlemişse hiçbir şey yapmadan çıkar. Elle açılan bir
+kopya bundan etkilenmez.
+
+Ayar açıkken kayıt eksik ya da eski biçimdeyse (tetikleyicisi olmayan bir görev,
+silinmiş bir görev) uygulama **her açılışta onu yeniden kurar**. Anahtarı Windows
+Ayarları'ndan kapattıysanız bu onarım çalışmaz; o karar sizindir ve olduğu gibi
+kalır.
 
 ## Ayarlar
 
@@ -725,12 +756,16 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | `Kurulum 1 kodu ile sonlandı` | Inno Setup'ın "kurulum başlatılamadı" kodudur: kurulum betiği daha ilk adımda durmuştur. v1.0.0.47'de kurulum betiği, sihirbaz klasörü seçmeden önce `{app}` sabitini genişlettiği için hiçbir makinede kurulamıyordu; sonraki sürümlerde giderildi, tek satırlık komutu yeniden çalıştırmak yeter. Yine görürseniz komutun yazdırdığı `%TEMP%\dpibypass-setup-*.log` dosyasının son satırlarını bildirin |
 | Pencere açılıyor ama içi boş / saydam görünüyor | Windows'ta *Ayarlar → Kişiselleştirme → Renkler → Saydamlık efektleri* kapalıysa ya da donanım hızlandırma yoksa uygulama düz renkli arka plana kendiliğinden geçer — pencere zaten açıkken de denetlenir. Geçmediyse günlükteki "Pencere arka planı" satırını bildirin |
 | Pencere geç geliyor / bir süre boş duruyor | Çalışan kopya meşgulse elle açılan kısayol artık onu kapatmak yerine bekliyor, ve motor günlükleri arayüzü kilitlemeyecek şekilde toplu işleniyor. Sorun sürüyorsa günlükteki "Çalışan kopya meşgul" satırına bakın |
+| Windows açılışında uygulama hiç başlamıyor | Başlatmanın tamamı tek bir `Run` kaydına bağlıydı; o kayıt silindiğinde açılışta hiçbir şey olmuyordu. Görev artık kendi oturum açma tetikleyicisiyle çalışır ve ayar açıkken eksik kayıt her açılışta yeniden kurulur. Sürümü güncelleyip **DNS ve ayarlar** sekmesinden "Windows ile başlat"ı bir kez kapatıp açın; günlükte "Autostart registration is incomplete" satırı onarımın yapıldığını söyler. Windows Ayarları → Uygulamalar → Başlangıç'ta anahtar kapalıysa uygulama bilerek başlamaz |
+| Durum uzun süre "Başlatılıyor…" kalıyor | Her ağ bağdaştırıcısının DNS değişikliği ayrı bir `powershell.exe` idi; birkaç bağdaştırıcısı olan makinede bu tek başına bir dakikaya yaklaşıyordu. Artık hepsi tek çağrıda uygulanır ve durum satırı hangi adımda olduğunu yazar ("Ad çözümleme ayarlanıyor…", "Ağ sürücüsü açılıyor…"). Yine uzun sürüyorsa o günün günlüğündeki `DNS set to` satırının zaman damgasını bildirin |
+| Fare tekerleği sayfayı kaydırmıyor / açılır liste kendiliğinden değişiyor | Liste veya açılır kutu üzerindeyken tekerlek sayfaya ulaşmıyordu, açılır kutular ise tekerleği seçim değiştirmek için kullanıyordu. Artık liste sonuna geldiğinde tekerlek sayfaya devredilir ve açılır kutu, listesi açık değilken tekerleğe hiç dokunmaz |
 | "Başka bir kullanıcı oturumunda çalışıyor" | Koruma bilgisayar başına tek kopyadır. Diğer Windows oturumunda açık olan kopyayı kapatın |
 | "Yönetici hakları gerekiyor" | Uygulamayı yönetici olarak çalıştırın; sürücü aksi hâlde açılamaz |
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
 | Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
 | DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
 | Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Vodafone Sınırsız Modu** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor ölçülen parçalanmasız sınırı söyler; yalnızca belirti varsa bu sınıra yakın bir MTU denenip yeniden doğrulanmalıdır |
+| Vodafone Sınırsız Modu kayıtlı ağımı tanımıyor | İki sebebi vardı ve ikisi de giderildi: ağ kimliği yalnız koruma çalışırken okunuyordu, ve eşleştirme erişim noktasının MAC adresini içeren parmak izine bakıyordu — telefon paylaşımı her açılışta yeni bir rastgele MAC dağıttığı için kayıt tanınmıyordu. Artık ağ adı da eşleştirilir, kayıt bu oturumun kimliğiyle güncellenir ve kart kayıtlı ağda "Aktif · \<ağ adı\>" der. Hâlâ tanımıyorsa **"Bu ağı kaydet"** ile bir kez kaydedin |
 | "Vodafone sınırsız modu" nereye gitti | **DNS ve ayarlar** içindeki özgün adıyla geri yüklendi. Ağ kayıtları ve tanılama korunur; yalnız hotspot muhasebesini gizlemeye yönelik TTL/IPv6 alt özelliği geri getirilmemiştir |
 | Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 

@@ -253,18 +253,79 @@ public sealed record AppSettings : IHotspotLegacyState
     public bool VodafoneNetworkRegistered(string key)
         => !string.IsNullOrEmpty(key) && VodafoneModeNetworks.Any(network => network.Key == key);
 
+    /// <summary>Whether the network we are on now is one of the remembered ones.</summary>
+    public bool VodafoneNetworkRegistered(NetworkFingerprint network)
+        => MatchVodafoneNetwork(network) is not null;
+
+    /// <summary>
+    /// Finds the remembered entry for a network, by identity first and by name second.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The exact key is the right answer whenever it is available, and it is the only
+    /// thing this used to look at. That made the feature unusable for the connection it
+    /// was written for: <see cref="NetworkFingerprint.Key"/> hashes the access point's
+    /// MAC address, and a phone hotspot gets a fresh randomised one every time it is
+    /// turned off and on, so the user's own saved network came back as an unknown one on
+    /// the next connection - "kayıtlı değil" against the very network they had just
+    /// registered, with no automatic check and nothing to do but register it again.
+    /// </para>
+    /// <para>
+    /// So a wireless network also matches on its name. Two different links can share an
+    /// SSID, which is why identity still wins when it matches, but the failure that
+    /// costs the user something is the one above: a name match runs read-only checks on
+    /// a network that is almost certainly theirs, while a missed match makes the whole
+    /// feature look broken.
+    /// </para>
+    /// </remarks>
+    public VodafoneModeNetwork? MatchVodafoneNetwork(NetworkFingerprint? network)
+    {
+        if (network is null)
+        {
+            return null;
+        }
+
+        var key = network.Key;
+        var exact = VodafoneModeNetworks.FirstOrDefault(entry => entry.Key == key);
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        var ssid = network.Ssid;
+        if (string.IsNullOrWhiteSpace(ssid))
+        {
+            return null;
+        }
+
+        return VodafoneModeNetworks.FirstOrDefault(entry =>
+            NameMatches(entry.Ssid, ssid) || NameMatches(entry.DisplayName, ssid));
+    }
+
+    private static bool NameMatches(string? remembered, string ssid)
+        => !string.IsNullOrWhiteSpace(remembered)
+            && string.Equals(remembered.Trim(), ssid.Trim(), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Remembers a Vodafone-mode network without tying it to packet rewriting.</summary>
-    public void RememberVodafoneNetwork(string key, string displayName, string adapterName)
+    public void RememberVodafoneNetwork(string key, string displayName, string adapterName, string? ssid = null)
     {
         if (string.IsNullOrWhiteSpace(key))
         {
             return;
         }
 
-        VodafoneModeNetworks.RemoveAll(network => network.Key == key);
+        var name = ssid ?? string.Empty;
+
+        // Re-registering the same network - a new session of the same hotspot, or the
+        // user pressing "save this network" again - replaces the entry rather than
+        // filling the list with one row per access point MAC.
+        VodafoneModeNetworks.RemoveAll(network => network.Key == key
+            || (name.Length > 0 && (NameMatches(network.Ssid, name) || NameMatches(network.DisplayName, name))));
+
         VodafoneModeNetworks.Add(new VodafoneModeNetwork
         {
             Key = key,
+            Ssid = name,
             DisplayName = displayName,
             AdapterName = adapterName,
         });
@@ -274,6 +335,59 @@ public sealed record AppSettings : IHotspotLegacyState
         {
             VodafoneModeNetworks.RemoveAt(0);
         }
+    }
+
+    /// <summary>Remembers the network we are on now, keeping its name for later matching.</summary>
+    public void RememberVodafoneNetwork(NetworkFingerprint network)
+    {
+        ArgumentNullException.ThrowIfNull(network);
+
+        RememberVodafoneNetwork(
+            network.Key,
+            network.DisplayName,
+            network.AdapterName ?? string.Empty,
+            network.Ssid);
+    }
+
+    /// <summary>
+    /// Points a remembered entry at the identity the network has right now.
+    /// </summary>
+    /// <remarks>
+    /// Called when a network was recognised by name rather than by key, which is the
+    /// normal case for a phone hotspot. Refreshing the stored key keeps every later
+    /// lookup on the fast, exact path and keeps the saved-network list describing the
+    /// connection the user is actually on.
+    /// </remarks>
+    /// <returns>True when something was written and the file is now behind.</returns>
+    public bool RefreshVodafoneNetworkIdentity(NetworkFingerprint network)
+    {
+        var match = MatchVodafoneNetwork(network);
+        if (match is null)
+        {
+            return false;
+        }
+
+        var adapter = network.AdapterName ?? string.Empty;
+        var ssid = network.Ssid ?? string.Empty;
+
+        if (match.Key == network.Key
+            && match.AdapterName == adapter
+            && match.DisplayName == network.DisplayName
+            && match.Ssid == ssid)
+        {
+            return false;
+        }
+
+        var index = VodafoneModeNetworks.IndexOf(match);
+        VodafoneModeNetworks[index] = match with
+        {
+            Key = network.Key,
+            Ssid = ssid,
+            DisplayName = network.DisplayName,
+            AdapterName = adapter,
+        };
+
+        return true;
     }
 
     public bool ForgetVodafoneNetwork(string key)
@@ -470,6 +584,7 @@ public sealed class ConfigStore
                 .Where(network => network is not null && !string.IsNullOrWhiteSpace(network.Key))
                 .Select(network => network with
                 {
+                    Ssid = network.Ssid ?? string.Empty,
                     DisplayName = network.DisplayName ?? string.Empty,
                     AdapterName = network.AdapterName ?? string.Empty,
                 })];

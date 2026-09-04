@@ -16,9 +16,72 @@ namespace DpiBypass.Core.Startup;
 /// without a prompt. If task registration is refused we fall back to launching the app
 /// from the Run key, which still works - it just prompts.
 /// </remarks>
+/// <summary>
+/// What the two halves of the autostart registration currently say.
+/// </summary>
+/// <param name="TaskRegistered">The elevated logon task exists.</param>
+/// <param name="TaskEnabled">Task Scheduler is willing to run it.</param>
+/// <param name="TaskStartsAtLogon">It carries a logon trigger of its own.</param>
+/// <param name="RunEntryPresent">There is an entry under Startup Apps.</param>
+/// <param name="RunEntryIsTaskBridge">That entry starts the task rather than the app.</param>
+/// <param name="TurnedOffInWindows">Windows records the entry as switched off.</param>
+/// <param name="Uncertain">Task Scheduler could not be asked at all.</param>
+public readonly record struct AutoStartStatus(
+    bool TaskRegistered,
+    bool TaskEnabled,
+    bool TaskStartsAtLogon,
+    bool RunEntryPresent,
+    bool RunEntryIsTaskBridge,
+    bool TurnedOffInWindows,
+    bool Uncertain)
+{
+    /// <summary>The task fires at logon by itself, with nothing else involved.</summary>
+    public bool TaskStartsByItself => TaskRegistered && TaskEnabled && TaskStartsAtLogon;
+
+    /// <summary>
+    /// Whether the Startup Apps entry alone would start something.
+    /// </summary>
+    /// <remarks>
+    /// A bridge entry only starts the app through the task, so it is worth nothing when
+    /// the task is definitely gone. An entry written by an older build points straight
+    /// at the executable and stands on its own.
+    /// </remarks>
+    public bool RunEntryStartsSomething => RunEntryPresent
+        && !TurnedOffInWindows
+        && (!RunEntryIsTaskBridge || Uncertain || (TaskRegistered && TaskEnabled));
+
+    /// <summary>Whether a logon actually brings the application up.</summary>
+    public bool IsEnabled => !TurnedOffInWindows && (TaskStartsByItself || RunEntryStartsSomething);
+
+    /// <summary>
+    /// Whether the registration is incomplete in a way this build can put back.
+    /// </summary>
+    /// <remarks>
+    /// Repair is deliberately not attempted when Windows has switched the entry off -
+    /// that is the user's decision and re-registering would overrule it - nor when Task
+    /// Scheduler could not be asked, because silence is not evidence of damage.
+    /// </remarks>
+    public bool NeedsRepair => !TurnedOffInWindows
+        && !Uncertain
+        && (!TaskStartsByItself || !RunEntryPresent);
+}
+
 public sealed class AutoStartManager
 {
     public const string TaskName = "DpiBypass-Autostart";
+
+    /// <summary>
+    /// Marks a launch that Windows started at logon rather than a person did.
+    /// </summary>
+    /// <remarks>
+    /// The task's own trigger is what makes autostart survive a missing Run entry, and
+    /// this switch is what keeps the Windows Startup Apps switch meaningful in spite of
+    /// it: a launch carrying it stands down when Windows records the entry as disabled.
+    /// Without the pair, the two halves of the registration disagree - either the app
+    /// never starts because one registry value went missing, or it keeps starting after
+    /// the user has switched it off in Settings.
+    /// </remarks>
+    public const string AutoStartSwitch = StartupPlan.AutoStartSwitch;
 
     /// <summary>Names used before the app was renamed, cleaned up whenever we touch autostart.</summary>
     private const string LegacyTaskName = "AtomDpiBypass-Autostart";
@@ -40,13 +103,31 @@ public sealed class AutoStartManager
     }
 
     public async Task<bool> IsEnabledAsync(CancellationToken cancellationToken = default)
+        => (await InspectAsync(cancellationToken).ConfigureAwait(false)).IsEnabled;
+
+    /// <summary>
+    /// Reads both halves of the registration and says what a logon would actually do.
+    /// </summary>
+    /// <remarks>
+    /// One call rather than a boolean, because "is autostart on" and "is autostart
+    /// intact" are different questions and answering only the first is what left users
+    /// with no launch at logon. A registration missing its task, or carrying a task an
+    /// older build wrote without a trigger, reported itself as simply "off" - so the
+    /// settings checkbox turned itself off to match, and the app never started with
+    /// Windows again until somebody noticed and ticked it by hand.
+    /// </remarks>
+    public async Task<AutoStartStatus> InspectAsync(CancellationToken cancellationToken = default)
     {
         ProcessResult? query = null;
 
         try
         {
             query = await ProcessRunner
-                .RunAsync("schtasks.exe", ["/Query", "/TN", TaskName], TimeSpan.FromSeconds(20), cancellationToken)
+                .RunAsync(
+                    "schtasks.exe",
+                    ["/Query", "/TN", TaskName, "/XML", "ONE"],
+                    TimeSpan.FromSeconds(20),
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -57,24 +138,100 @@ public sealed class AutoStartManager
             _log?.Invoke($"Autostart state could not be read: {ex.Message}");
         }
 
-        var runCommand = ReadEnabledRunCommand();
-        if (runCommand is null)
+        var (runCommand, approved) = ReadRunEntry();
+
+        return DescribeStatus(
+            taskXml: query is { Success: true } success ? success.StandardOutput : null,
+            taskQueryRan: query is not null,
+            taskQuerySucceeded: query is { Success: true },
+            runCommand: runCommand,
+            runEntryApproved: approved);
+    }
+
+    /// <summary>
+    /// Turns what the two registrations say into one verdict, with no I/O of its own.
+    /// </summary>
+    internal static AutoStartStatus DescribeStatus(
+        string? taskXml,
+        bool taskQueryRan,
+        bool taskQuerySucceeded,
+        string? runCommand,
+        bool runEntryApproved)
+    {
+        var registered = taskQuerySucceeded && !string.IsNullOrWhiteSpace(taskXml);
+
+        return new AutoStartStatus(
+            TaskRegistered: registered,
+            TaskEnabled: registered && TaskXmlSaysEnabled(taskXml!),
+            TaskStartsAtLogon: registered && TaskXmlHasLogonTrigger(taskXml!),
+            RunEntryPresent: !string.IsNullOrWhiteSpace(runCommand),
+            RunEntryIsTaskBridge: runCommand is not null && IsTaskBridge(runCommand),
+            TurnedOffInWindows: !string.IsNullOrWhiteSpace(runCommand) && !runEntryApproved,
+
+            // A query that would not run at all is not evidence that anything is
+            // missing, and repairing on that basis would rewrite a healthy
+            // registration every launch.
+            Uncertain: !taskQueryRan);
+    }
+
+    /// <summary>
+    /// Whether Windows has switched this app off under Settings &gt; Apps &gt; Startup.
+    /// </summary>
+    /// <remarks>
+    /// Registry only, so a launch can ask it before it has done anything else. The task
+    /// fires at logon on its own now, and this is what still lets the Windows switch
+    /// stop it: a launch that carries <see cref="AutoStartSwitch"/> and finds a disabled
+    /// entry here has been told not to run.
+    /// </remarks>
+    public static bool IsTurnedOffInWindows()
+    {
+        var (command, approved) = ReadRunEntry();
+        return command is not null && !approved;
+    }
+
+    private static bool TaskXmlSaysEnabled(string xml)
+    {
+        // Only the settings flag matters here; the element name is not localised, so
+        // this reads the same on every Windows display language.
+        var disabled = xml.Replace(" ", string.Empty).Replace("\t", string.Empty);
+        return !disabled.Contains("<Enabled>false</Enabled>", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TaskXmlHasLogonTrigger(string xml)
+        => xml.Contains("<LogonTrigger", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Puts back whatever is missing from a registration the user has asked for.
+    /// </summary>
+    /// <remarks>
+    /// Called on every launch that has "start with Windows" switched on, because the
+    /// two registrations are outside this application's control between runs: a task
+    /// can be deleted, a Run value can be cleaned away, and a task written by an older
+    /// build has no trigger of its own. Doing nothing about that is what turned a
+    /// missing registry value into an app that never came up with Windows again and
+    /// then quietly unticked its own checkbox. It is a no-op when nothing is missing,
+    /// and it never overrides a switch the user turned off in Windows.
+    /// </remarks>
+    public async Task<AutoStartStatus> EnsureRegisteredAsync(
+        bool startMinimised,
+        CancellationToken cancellationToken = default)
+    {
+        var status = await InspectAsync(cancellationToken).ConfigureAwait(false);
+        if (!status.NeedsRepair)
         {
-            return false;
+            return status;
         }
 
-        // The current entry only asks Task Scheduler to run the elevated task, so a
-        // definitively missing task means it cannot start anything. A direct Run-key
-        // fallback (and the entry written by older versions) remains self-sufficient.
-        if (IsTaskBridge(runCommand))
+        _log?.Invoke(status.TaskRegistered
+            ? "Autostart task is missing its logon trigger; registering it again."
+            : "Autostart registration is incomplete; registering it again.");
+
+        if (!await EnableAsync(startMinimised, cancellationToken).ConfigureAwait(false))
         {
-            // A query exception is uncertainty rather than proof that the task is
-            // missing. Preserve the visible Windows switch in that case and try again
-            // on the next launch.
-            return query is null || query.Value.Success;
+            return status;
         }
 
-        return true;
+        return await InspectAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> EnableAsync(bool startMinimised, CancellationToken cancellationToken = default)
@@ -184,13 +341,20 @@ public sealed class AutoStartManager
         string? sid,
         string? userName)
     {
-        // The same constant the launch path parses, so the two can never drift apart
-        // and leave a logon task whose switch nothing recognises.
-        var arguments = startMinimised ? StartupPlan.MinimisedSwitch : string.Empty;
+        // The same constants the launch path parses, so the two can never drift apart
+        // and leave a logon task whose switches nothing recognises.
+        var arguments = startMinimised
+            ? $"{AutoStartSwitch} {StartupPlan.MinimisedSwitch}"
+            : AutoStartSwitch;
         // Prefer the SID: it survives the account being renamed.
-        var principalIdentity = string.IsNullOrEmpty(sid)
-            ? $"      <UserId>{Escape(userName ?? string.Empty)}</UserId>"
-            : $"      <UserId>{Escape(sid)}</UserId>";
+        var identity = Escape(string.IsNullOrEmpty(sid) ? userName ?? string.Empty : sid);
+        var principalIdentity = $"      <UserId>{identity}</UserId>";
+
+        // Scoping the trigger to the same account keeps the task off other users'
+        // logons, where its window would appear on a desktop nobody asked it to.
+        var triggerIdentity = identity.Length == 0
+            ? string.Empty
+            : $"      <UserId>{identity}</UserId>";
 
         return $"""
             <?xml version="1.0" encoding="UTF-16"?>
@@ -200,7 +364,26 @@ public sealed class AutoStartManager
                 <Description>{Escape(AppPaths.ProductName)} - DPI engellerini aşan koruma servisini oturum açıldığında başlatır.</Description>
                 <URI>\{TaskName}</URI>
               </RegistrationInfo>
-              <Triggers />
+              <Triggers>
+                <!--
+                  The task starts itself at logon rather than waiting to be started.
+                  It used to have no trigger at all, so the whole of autostart hung on
+                  one HKCU Run value calling schtasks: lose that value - a cleanup tool,
+                  a profile rebuilt, a registration written under a different elevated
+                  account - and the app simply never came up with Windows again, with
+                  nothing on screen to say so. The Run entry is still written, because
+                  it is what puts the app in Settings > Apps > Startup and gives the
+                  user a switch; a launch from this trigger checks that switch and
+                  stands down when it is off. The short delay lets the network stack
+                  and the shell settle first, and IgnoreNew below means the two paths
+                  can never produce two copies.
+                -->
+                <LogonTrigger>
+                  <Enabled>true</Enabled>
+            {triggerIdentity}
+                  <Delay>PT10S</Delay>
+                </LogonTrigger>
+              </Triggers>
               <Principals>
                 <Principal id="Author">
             {principalIdentity}
@@ -291,23 +474,30 @@ public sealed class AutoStartManager
            && command.Contains("/Run", StringComparison.OrdinalIgnoreCase)
            && command.Contains(TaskName, StringComparison.OrdinalIgnoreCase);
 
-    private static string? ReadEnabledRunCommand()
+    /// <summary>
+    /// The Startup Apps entry this app owns, and whether Windows still allows it.
+    /// </summary>
+    /// <remarks>
+    /// Presence and approval are returned separately because they mean different
+    /// things. A missing entry is a registration to repair; a present entry that
+    /// Windows has switched off is a decision to respect, and repairing it would
+    /// silently overrule the user in Settings.
+    /// </remarks>
+    private static (string? Command, bool Approved) ReadRunEntry()
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
             if (key is null)
             {
-                return null;
+                return (null, true);
             }
 
             foreach (var name in new[] { RunValueName, PreviousRunValueName, LegacyRunValueName })
             {
-                if (key.GetValue(name) is string command
-                    && !string.IsNullOrWhiteSpace(command)
-                    && IsStartupApproved(name))
+                if (key.GetValue(name) is string command && !string.IsNullOrWhiteSpace(command))
                 {
-                    return command;
+                    return (command, IsStartupApproved(name));
                 }
             }
         }
@@ -317,7 +507,7 @@ public sealed class AutoStartManager
             // concerned; the settings checkbox will stay conservative.
         }
 
-        return null;
+        return (null, true);
     }
 
     private static void RemoveRunKey()
