@@ -344,19 +344,38 @@ public sealed record HotspotStatusView
         _ => "Belirlenemedi",
     };
 
-    private static string DescribeHeadline(HotspotStatus status, HotspotRunState run, string? failure) =>
-        (status.VodafoneModeEnabled, run) switch
+    /// <summary>
+    /// The one line the card leads with, and the one word the user is looking for.
+    /// </summary>
+    /// <remarks>
+    /// "Aktif" is reserved for the state the feature exists to reach: the mode is on and
+    /// this is one of the networks the user registered. It used to be unreachable in
+    /// practice - the card only ever read "Açık · … kayıtlı değil", because the network
+    /// identity it compared against was never filled in unless the engine was running -
+    /// so the mode looked as though it had done nothing until every button on the card
+    /// had been pressed by hand.
+    /// </remarks>
+    private static string DescribeHeadline(HotspotStatus status, HotspotRunState run, string? failure)
+    {
+        if (!status.VodafoneModeEnabled)
         {
-            (false, _) => "Kapalı",
-            (true, HotspotRunState.Running) => $"Açık · {status.NetworkName} kontrol ediliyor",
-            (true, HotspotRunState.Failed) => $"Açık · kontrol tamamlanamadı ({failure})",
-            (true, HotspotRunState.NotRun) when status.RegisteredHere =>
-                $"Açık · {status.NetworkName} kayıtlı · henüz kontrol edilmedi",
-            (true, HotspotRunState.NotRun) => $"Açık · {status.NetworkName} kayıtlı değil",
-            _ => status.RegisteredHere
-                ? $"Açık · {status.NetworkName} kayıtlı"
-                : $"Açık · {status.NetworkName} kayıtlı değil",
+            return "Kapalı";
+        }
+
+        var name = string.IsNullOrWhiteSpace(status.NetworkName) ? "bilinmeyen ağ" : status.NetworkName;
+        var lead = status.RegisteredHere
+            ? $"Aktif · {name}"
+            : $"Açık · {name} kayıtlı değil";
+
+        return run switch
+        {
+            HotspotRunState.Running => $"{lead} · kontrol ediliyor…",
+            HotspotRunState.Failed => $"{lead} · kontrol tamamlanamadı ({failure})",
+            HotspotRunState.Completed => $"{lead} · kontrol tamamlandı",
+            _ when status.RegisteredHere => $"{lead} · henüz kontrol edilmedi",
+            _ => lead,
         };
+    }
 
     private static string DescribeSeverity(
         HotspotStatus status,
@@ -369,6 +388,10 @@ public sealed record HotspotStatusView
         (_, HotspotRunState.Completed, { HasInternet: false }) => "warn",
         (_, HotspotRunState.Completed, { DnsWorks: false }) => "warn",
         (_, HotspotRunState.Completed, _) => "ok",
+
+        // On, and sitting on a network the user registered: the mode is doing its job
+        // even before the first check has produced numbers.
+        (true, HotspotRunState.NotRun, _) when status.RegisteredHere => "ok",
         _ => "info",
     };
 
@@ -395,7 +418,11 @@ public sealed record HotspotStatusView
 
         if (run == HotspotRunState.NotRun)
         {
-            return "Telefonunuzun paylaşımına bağlıyken \"Bağlantıyı kontrol et\" düğmesine basın.";
+            return status.RegisteredHere
+                ? "Bu ağ kayıtlı; kontrol kendiliğinden çalışır. Hemen sonuç görmek için "
+                    + "\"Bağlantıyı kontrol et\" düğmesini kullanabilirsiniz."
+                : "Telefonunuzun paylaşımına bağlıyken \"Bu ağı kaydet\" deyin ya da "
+                    + "\"Bağlantıyı kontrol et\" düğmesine basın.";
         }
 
         // The diagnostics writes its own remediation when the readings call for one; it

@@ -31,6 +31,20 @@ public sealed record VodafoneModeNetwork
 {
     public required string Key { get; init; }
 
+    /// <summary>
+    /// The wireless name the network was remembered under, when it had one.
+    /// </summary>
+    /// <remarks>
+    /// Stored separately from <see cref="Key"/> because the key is not stable for the
+    /// networks this feature is about. A fingerprint mixes in the access point's MAC,
+    /// and a phone sharing its connection hands out a new one every time the hotspot is
+    /// switched off and on - Android and iOS both randomise it - so a network the user
+    /// registered yesterday arrives today under a key nothing has ever seen. Matching on
+    /// the name as well is what makes "my saved network" mean the network the user saved
+    /// rather than one particular session of it.
+    /// </remarks>
+    public string Ssid { get; init; } = string.Empty;
+
     public string DisplayName { get; init; } = string.Empty;
 
     public string AdapterName { get; init; } = string.Empty;

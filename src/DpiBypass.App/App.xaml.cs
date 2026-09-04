@@ -256,6 +256,18 @@ public partial class App : Application
 
         _selfTest = StartupPlan.HasSwitch(e.Args, SelfTestSwitch);
 
+        // The logon task now fires on its own trigger rather than waiting to be started
+        // by the Run key, which is what makes autostart survive a registry entry going
+        // missing. The Windows Startup Apps switch has to keep working in spite of that,
+        // so a launch Windows made stands down when Windows has recorded it as off. A
+        // launch a person made is never affected.
+        if (StartupPlan.StartedByWindows(e.Args) && AutoStartManager.IsTurnedOffInWindows())
+        {
+            AppLog.Info("Otomatik başlatma Windows'ta kapatılmış; bu açılış atlanıyor.");
+            Shutdown();
+            return;
+        }
+
         _instance = SingleInstance.Acquire();
         StartupTrace.Mark($"tek örnek kilidi alındı · birincil={_instance.IsPrimary}");
 
@@ -327,6 +339,7 @@ public partial class App : Application
         // problem: the Fluent theme underneath it still renders every control.
         StartupTrace.Mark("tema başlatılıyor");
         TryApplyTheme();
+        ApplyMotionPreference();
         StartupTrace.Mark($"tema hazır · koyu={_theme?.IsDark}");
 
         StartupTrace.Mark("bildirim alanı simgesi başlatılıyor");
@@ -445,6 +458,11 @@ public partial class App : Application
         // to whether the DPI engine is enabled.
         Guarded("Ping düşürme", () => _ = StartIndependentFeaturesAsync());
 
+        // Which network we are on is not the engine's business either, and treating it
+        // as though it were is what left Vodafone Sınırsız Modu reporting the user's own
+        // saved hotspot as an unknown network until protection happened to be running.
+        Guarded("Ağ takibi", () => _ = StartNetworkAwarenessAsync());
+
         if (_service!.Settings.StartEngineOnLaunch)
         {
             Guarded("Koruma", () => _ = StartEngineAsync());
@@ -502,6 +520,39 @@ public partial class App : Application
             // The window is built with whatever survived. Its own null check covers a
             // manager that never got as far as being constructed.
             AppLog.Error("Renk paleti uygulanamadı", ex);
+        }
+    }
+
+    /// <summary>
+    /// Honours "turn off animations in Windows" before any page style is resolved.
+    /// </summary>
+    /// <remarks>
+    /// A swap rather than an edit, and it has to happen here. The window used to clear
+    /// the entrance trigger from the style after <c>InitializeComponent</c>, which could
+    /// not work twice over: a style is sealed the first time it is applied, so mutating
+    /// its trigger collection throws, and the pages had already resolved the style by
+    /// then anyway. Replacing the resource before the window is built means every page
+    /// simply picks up the version without the animation.
+    /// </remarks>
+    private void ApplyMotionPreference()
+    {
+        try
+        {
+            if (SystemParameters.ClientAreaAnimation)
+            {
+                return;
+            }
+
+            if (Resources["PageSurfaceStaticStyle"] is Style still)
+            {
+                Resources["PageSurfaceStyle"] = still;
+                AppLog.Info("Sistem animasyonları kapalı; sayfa geçiş animasyonu kullanılmıyor.");
+            }
+        }
+        catch (Exception ex)
+        {
+            // A 180ms fade is not worth a failed start.
+            AppLog.Error("Sayfa geçiş animasyonu tercihi uygulanamadı", ex);
         }
     }
 
@@ -1229,6 +1280,28 @@ public partial class App : Application
         {
             AppLog.Error("Koruma otomatik başlatılamadı", ex);
             _tray?.Notify(AppPaths.ProductName, ex.Message, warning: true);
+        }
+    }
+
+    /// <summary>
+    /// Starts watching the network, and runs the safe hotspot checks once if we came
+    /// up already sitting on a registered one.
+    /// </summary>
+    private async Task StartNetworkAwarenessAsync()
+    {
+        var service = _service;
+        if (service is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Run(() => service.RunStartupHotspotCheckAsync()).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Ağ durumu okunamadı", ex);
         }
     }
 

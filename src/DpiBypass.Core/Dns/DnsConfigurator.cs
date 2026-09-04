@@ -1,4 +1,6 @@
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Text;
 using System.Text.Json;
 using DpiBypass.Core.Interop;
 
@@ -111,21 +113,24 @@ public sealed class DnsConfigurator
             ? (loopbackHasIPv6 ? ["::1"] : PublicV6)
             : PublicV6;
 
-        var applied = 0;
+        var writes = new List<DnsWrite>(adapters.Count * 2);
+        var v4Writes = new List<int>(adapters.Count);
+
         foreach (var adapter in adapters)
         {
-            if (await SetServersAsync(adapter.InterfaceIndexV4, v4, cancellationToken).ConfigureAwait(false))
-            {
-                applied++;
-            }
+            v4Writes.Add(writes.Count);
+            writes.Add(new DnsWrite(adapter.InterfaceIndexV4, v4));
 
             if (adapter.InterfaceIndexV6 > 0)
             {
-                await SetServersAsync(adapter.InterfaceIndexV6, v6, cancellationToken).ConfigureAwait(false);
+                writes.Add(new DnsWrite(adapter.InterfaceIndexV6, v6));
             }
         }
 
-        await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+        // One PowerShell process for the whole machine, cache flush included, rather
+        // than one per adapter and family. See ApplyWritesAsync.
+        var outcome = await ApplyWritesAsync(writes, flushCache: true, cancellationToken).ConfigureAwait(false);
+        var applied = v4Writes.Count(index => outcome[index]);
 
         if (applied == 0)
         {
@@ -178,6 +183,12 @@ public sealed class DnsConfigurator
         var present = CurrentInterfaceIndexes();
         var unrepaired = 0;
 
+        // Built first and run as one batch, for the same reason the apply path is one
+        // batch: a per-adapter PowerShell process is most of a minute on a machine with
+        // several adapters, and this one runs while the user is waiting to shut down.
+        var writes = new List<DnsWrite>(snapshot.Count * 3);
+        var perAdapter = new List<(AdapterDnsSnapshot Adapter, List<int> Ordinals, bool Repairable)>();
+
         foreach (var adapter in snapshot)
         {
             // Hardware that is not here cannot be repaired and does not need to be: an
@@ -199,37 +210,69 @@ public sealed class DnsConfigurator
             // The interface index is per adapter rather than per family and
             // -ResetServerAddresses takes no family, so a reset clears both families at
             // once. Every reset therefore has to happen before the explicit servers go
-            // back on, otherwise the v6 reset undoes the v4 servers just restored.
-            var restored = true;
+            // back on, otherwise the v6 reset undoes the v4 servers just restored. The
+            // batch preserves this order because it is the order they are queued in.
+            var ordinals = new List<int>(3);
+            var repairable = true;
+
             if (adapter.OriginalV4.Length == 0 || adapter.OriginalV6.Length == 0)
             {
                 var resetIndex = adapter.InterfaceIndexV4 > 0
                     ? adapter.InterfaceIndexV4
                     : adapter.InterfaceIndexV6;
-                restored &= resetIndex > 0
-                    && await ResetServersAsync(resetIndex, cancellationToken).ConfigureAwait(false);
+
+                if (resetIndex > 0)
+                {
+                    ordinals.Add(writes.Count);
+                    writes.Add(new DnsWrite(resetIndex, null));
+                }
+                else
+                {
+                    repairable = false;
+                }
             }
 
             if (adapter.OriginalV4.Length > 0)
             {
-                restored &= adapter.InterfaceIndexV4 > 0
-                    && await SetServersAsync(adapter.InterfaceIndexV4, adapter.OriginalV4, cancellationToken).ConfigureAwait(false);
+                if (adapter.InterfaceIndexV4 > 0)
+                {
+                    ordinals.Add(writes.Count);
+                    writes.Add(new DnsWrite(adapter.InterfaceIndexV4, adapter.OriginalV4));
+                }
+                else
+                {
+                    repairable = false;
+                }
             }
 
             if (adapter.OriginalV6.Length > 0)
             {
-                restored &= adapter.InterfaceIndexV6 > 0
-                    && await SetServersAsync(adapter.InterfaceIndexV6, adapter.OriginalV6, cancellationToken).ConfigureAwait(false);
+                if (adapter.InterfaceIndexV6 > 0)
+                {
+                    ordinals.Add(writes.Count);
+                    writes.Add(new DnsWrite(adapter.InterfaceIndexV6, adapter.OriginalV6));
+                }
+                else
+                {
+                    repairable = false;
+                }
             }
 
-            if (!restored)
-            {
-                remaining.Add(adapter);
-                unrepaired++;
-            }
+            perAdapter.Add((adapter, ordinals, repairable));
         }
 
-        await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+        var outcome = await ApplyWritesAsync(writes, flushCache: true, cancellationToken).ConfigureAwait(false);
+
+        foreach (var (adapter, ordinals, repairable) in perAdapter)
+        {
+            if (repairable && ordinals.TrueForAll(ordinal => outcome[ordinal]))
+            {
+                continue;
+            }
+
+            remaining.Add(adapter);
+            unrepaired++;
+        }
 
         if (remaining.Count > 0)
         {
@@ -516,20 +559,128 @@ public sealed class DnsConfigurator
         return rows;
     }
 
-    private static async Task<bool> SetServersAsync(int interfaceIndex, string[] servers, CancellationToken cancellationToken)
+    /// <summary>
+    /// One adapter change: the servers to set, or nothing at all to clear them.
+    /// </summary>
+    /// <param name="InterfaceIndex">The kernel index the cmdlet is scoped to.</param>
+    /// <param name="Servers">The addresses to install, or null for a reset.</param>
+    internal readonly record struct DnsWrite(int InterfaceIndex, string[]? Servers)
     {
-        var list = string.Join(',', servers.Select(s => $"'{s}'"));
-        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ServerAddresses ({list}) -ErrorAction Stop";
-        var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
-        return result.Success;
+        public bool IsReset => Servers is null;
     }
 
-    private static async Task<bool> ResetServersAsync(int interfaceIndex, CancellationToken cancellationToken)
+    /// <summary>
+    /// Applies every adapter change in one PowerShell process, then flushes the cache.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the difference between protection starting in about a second and the
+    /// application sitting on "Başlatılıyor…" for the best part of a minute. Each of
+    /// these writes used to be its own <c>powershell.exe</c>, and so did the cache
+    /// flush - so a machine with Wi-Fi, Ethernet and a couple of virtual adapters paid
+    /// for seven or eight cold PowerShell starts, back to back, in front of the user,
+    /// before anything was protected. The cmdlet calls themselves are milliseconds; the
+    /// process launches and the DnsClient module load were the whole of the wait.
+    /// </para>
+    /// <para>
+    /// Results come back one line per operation, in the order they were sent, so a
+    /// single adapter refusing is still reported as that adapter refusing rather than
+    /// collapsing the batch into one pass/fail.
+    /// </para>
+    /// </remarks>
+    /// <returns>One flag per write, in the order given.</returns>
+    internal static async Task<bool[]> ApplyWritesAsync(
+        IReadOnlyList<DnsWrite> writes,
+        bool flushCache,
+        CancellationToken cancellationToken)
     {
-        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ResetServerAddresses -ErrorAction Stop";
-        var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
-        return result.Success;
+        var outcome = new bool[writes.Count];
+
+        if (writes.Count == 0)
+        {
+            if (flushCache)
+            {
+                await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return outcome;
+        }
+
+        var result = await ProcessRunner
+            .PowerShellAsync(BuildWriteScript(writes, flushCache), WriteBudget(writes.Count), cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (var line in result.StandardOutput.Split('\n'))
+        {
+            // "dns <ordinal> <0|1>", printed by the script for every operation it ran.
+            var parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 3
+                && parts[0].Equals("dns", StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(parts[1], out var ordinal)
+                && ordinal >= 0
+                && ordinal < outcome.Length)
+            {
+                outcome[ordinal] = parts[2] == "1";
+            }
+        }
+
+        return outcome;
     }
+
+    /// <summary>
+    /// A budget that grows with the batch, because one refusal must not eat the rest.
+    /// </summary>
+    /// <remarks>
+    /// The fixed part covers the process start and the DnsClient module load, which is
+    /// most of the time a healthy batch spends. The per-write part is generous because
+    /// an adapter that is mid-reconnect can make one cmdlet block for seconds.
+    /// </remarks>
+    private static TimeSpan WriteBudget(int writes)
+        => TimeSpan.FromSeconds(Math.Clamp(20 + (4 * writes), 20, 120));
+
+    internal static string BuildWriteScript(IReadOnlyList<DnsWrite> writes, bool flushCache)
+    {
+        var script = new StringBuilder();
+
+        for (var i = 0; i < writes.Count; i++)
+        {
+            var write = writes[i];
+
+            // Both interpolations are machine values, never user text: an integer the
+            // kernel handed us, and addresses that have been through IPAddress.Parse.
+            var command = write.IsReset
+                ? $"Set-DnsClientServerAddress -InterfaceIndex {write.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop"
+                : $"Set-DnsClientServerAddress -InterfaceIndex {write.InterfaceIndex} "
+                    + $"-ServerAddresses ({FormatServers(write.Servers!)}) -ErrorAction Stop";
+
+            script.Append("try { ")
+                .Append(command)
+                .Append("; Write-Output 'dns ").Append(i).Append(" 1' } catch { Write-Output 'dns ")
+                .Append(i)
+                .Append(" 0' }; ");
+        }
+
+        if (flushCache)
+        {
+            script.Append("Clear-DnsClientCache -ErrorAction SilentlyContinue; ");
+        }
+
+        return script.ToString();
+    }
+
+    /// <summary>
+    /// Renders addresses for the cmdlet, dropping anything that is not an IP literal.
+    /// </summary>
+    /// <remarks>
+    /// The values come from a snapshot file on disk, so they are only as trustworthy as
+    /// that file. Parsing each one before it reaches a PowerShell command line means a
+    /// hand-edited or corrupted snapshot can cost a restore, which it always could, but
+    /// can never become script.
+    /// </remarks>
+    private static string FormatServers(IEnumerable<string> servers)
+        => string.Join(',', servers
+            .Where(server => IPAddress.TryParse(server, out _))
+            .Select(server => $"'{server}'"));
 
     public static Task FlushCacheAsync(CancellationToken cancellationToken = default)
         => ProcessRunner.PowerShellAsync("Clear-DnsClientCache -ErrorAction SilentlyContinue", TimeSpan.FromSeconds(15), cancellationToken);

@@ -45,7 +45,11 @@ public sealed class AsyncRelayCommand : ICommand
 
     public async void Execute(object? parameter)
     {
-        if (_running)
+        // CanExecute is checked here as well as by the button, because not every caller
+        // is a button: the notification area menu invokes these directly, and "start
+        // protection" from the tray while a start is already under way is the same
+        // no-op that made the toolbar button look broken.
+        if (_running || !CanExecute(parameter))
         {
             return;
         }

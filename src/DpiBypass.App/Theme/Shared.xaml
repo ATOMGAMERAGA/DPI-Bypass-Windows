@@ -1,5 +1,6 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:infra="clr-namespace:DpiBypass.App.Infrastructure">
 
     <!--
       Design system for the main window. Everything visual key belongs here or to
@@ -282,6 +283,16 @@
                                 Background="Transparent"
                                 SnapsToDevicePixels="True">
                             <!--
+                              The rail scrolls. Its items are a fixed list in a fixed
+                              width column, so on a short window - or at a large text
+                              scale - the last ones used to be clipped with no way to
+                              reach them: the pages they lead to simply stopped
+                              existing. The scrollbar only appears when it is needed.
+                            -->
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          Focusable="False">
+                            <!--
                               StackPanel, not TabPanel. With TabStripPlacement=Left,
                               TabPanel arranges each item into DesiredSize *minus its
                               margin* and then advances by the same amount, while
@@ -302,6 +313,7 @@
                                         UseLayoutRounding="True"
                                         SnapsToDevicePixels="True"
                                         KeyboardNavigation.DirectionalNavigation="Cycle" />
+                            </ScrollViewer>
                         </Border>
                         <Border Grid.Column="1"
                                 Width="1"
@@ -500,6 +512,9 @@
         <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
         <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
         <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
+
+        <!-- Every one of these lists sits inside a page that scrolls. See NestedScrolling. -->
+        <Setter Property="infra:NestedScrolling.BubbleWheel" Value="True" />
     </Style>
 
     <Style x:Key="MonospaceListStyle" TargetType="ListBox" BasedOn="{StaticResource PlainListStyle}">
@@ -518,6 +533,7 @@
         <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
         <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Standard" />
         <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
+        <Setter Property="infra:NestedScrolling.BubbleWheel" Value="True" />
     </Style>
 
     <Style x:Key="ChoiceCardStyle" TargetType="ListBoxItem">
@@ -810,27 +826,41 @@
 
     <!-- ======== Page transitions ======== -->
 
-    <!-- Page entrance: a short fade with a small rise. Purely directional; the
-         window turns it off when Windows reports that client area animation is
-         disabled (MainWindow removes the triggers on start-up). -->
-    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer">
+    <!-- Everything a page surface is, minus the entrance. App.ApplyMotionPreference
+         swaps this in wholesale when Windows reports that client area animation is
+         switched off, which is why it exists as its own style rather than as a
+         trigger somebody edits at runtime: a Style is sealed the moment it is first
+         applied, so the collection cannot be changed afterwards. -->
+    <Style x:Key="PageSurfaceStaticStyle" TargetType="ScrollViewer">
         <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
         <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
         <Setter Property="Padding" Value="0,0,6,0" />
         <Setter Property="Opacity" Value="1" />
-        <Setter Property="RenderTransform">
-            <Setter.Value>
-                <TranslateTransform Y="0" />
-            </Setter.Value>
-        </Setter>
+
+        <!-- Physical scrolling. Item-based scrolling moves a page surface one whole
+             card per wheel notch, which reads as the page jumping rather than
+             scrolling, and leaves the last card unreachable when it is taller than
+             the viewport. -->
+        <Setter Property="CanContentScroll" Value="False" />
+        <Setter Property="PanningMode" Value="VerticalOnly" />
+    </Style>
+
+    <!--
+      Page entrance: a short fade. Deliberately only the opacity, which is a property
+      of the element itself. The rise this used to have animated a TranslateTransform
+      declared in this setter block, and a Freezable in a Style setter is frozen and
+      shared by every element the style touches - so the animation threw "cannot
+      animate on an immutable object instance" on every page load, was swallowed by
+      the dispatcher's handler, and left an error in the log for a 180ms flourish that
+      never once ran.
+    -->
+    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer" BasedOn="{StaticResource PageSurfaceStaticStyle}">
         <Style.Triggers>
             <EventTrigger RoutedEvent="Loaded">
                 <BeginStoryboard>
                     <Storyboard>
                         <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                         From="0.82" To="1" Duration="0:0:0.18" />
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(TranslateTransform.Y)"
-                                         From="6" To="0" Duration="0:0:0.18">
+                                         From="0.82" To="1" Duration="0:0:0.18">
                             <DoubleAnimation.EasingFunction>
                                 <CubicEase EasingMode="EaseOut" />
                             </DoubleAnimation.EasingFunction>
