@@ -43,7 +43,13 @@ public partial class MainWindow : Window
             _theme.PersonalisationChanged += OnPersonalisationChanged;
         }
 
-        ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged += OnLogLinesChanged;
+        ((INotifyCollectionChanged)_viewModel.VisibleLogLines).CollectionChanged += OnLogLinesChanged;
+
+        // Hidden in the notification area, the only thing the counter timer produces is
+        // formatted text nobody can see. Protection and the network watch are untouched -
+        // this covers presentation and nothing else - and coming back re-reads at once so
+        // the window is current the moment it is on screen.
+        IsVisibleChanged += OnWindowVisibilityChanged;
 
         Loaded += OnWindowLoaded;
         Readiness = WindowReadiness.Created;
@@ -377,7 +383,8 @@ public partial class MainWindow : Window
 
         Loaded -= OnWindowLoaded;
         CompositionTarget.Rendering -= OnComposition;
-        ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged -= OnLogLinesChanged;
+        ((INotifyCollectionChanged)_viewModel.VisibleLogLines).CollectionChanged -= OnLogLinesChanged;
+        IsVisibleChanged -= OnWindowVisibilityChanged;
     }
 
     private void OnThemeChanged(bool isDark)
@@ -419,6 +426,9 @@ public partial class MainWindow : Window
     /// user's own action, and the next batch then follows again.
     /// </para>
     /// </remarks>
+    private void OnWindowVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
+        => _viewModel.SetPresentationActive(e.NewValue is true);
+
     private void OnLogLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (e.Action != NotifyCollectionChangedAction.Add || _scrollPending)

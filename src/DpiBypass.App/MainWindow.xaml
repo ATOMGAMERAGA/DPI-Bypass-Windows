@@ -167,6 +167,43 @@
                             </Grid>
                         </Border>
 
+                        <!-- Applied, but not written down. The setting is doing what the
+                             user asked for this session; the file on disk is not, and the
+                             app used to say nothing at all about the difference. The icon
+                             carries the meaning as well as the colour. -->
+                        <Border Style="{StaticResource NoticeCardStyle}"
+                                Margin="0,0,0,12"
+                                AutomationProperties.Name="Ayar kaydetme uyarısı"
+                                Visibility="{Binding SettingsSaveFailed, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Path Grid.Column="0"
+                                      Data="{StaticResource IconWarningGeometry}"
+                                      Width="18"
+                                      Height="18"
+                                      Stretch="Uniform"
+                                      Margin="0,0,12,0"
+                                      VerticalAlignment="Center"
+                                      Fill="{DynamicResource AppWarningBrush}" />
+                                <TextBlock Grid.Column="1"
+                                           Style="{StaticResource NoticeTextStyle}"
+                                           VerticalAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           Text="{Binding SettingsSaveWarning, Mode=OneWay}" />
+                                <Button Grid.Column="2"
+                                        Content="Yeniden kaydet"
+                                        MinWidth="130"
+                                        Margin="12,0,0,0"
+                                        VerticalAlignment="Center"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"
+                                        Command="{Binding RetrySaveCommand}" />
+                            </Grid>
+                        </Border>
+
                         <!-- What the engine is working with. Equal columns use the
                              whole card width instead of leaving a dead strip on the
                              right at the window's normal size. -->
@@ -1412,7 +1449,9 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0">
                             <TextBlock Text="Günlük" Style="{StaticResource PageTitleStyle}" />
-                            <TextBlock Text="Son 500 satır. Görünümü temizlemek dosyadaki kayıtları silmez." Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding LogSummary, Mode=OneWay}"
+                                       Style="{StaticResource CaptionStyle}"
+                                       TextWrapping="Wrap" />
                         </StackPanel>
                         <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
                             <Button Content="Kopyala"
@@ -1432,13 +1471,59 @@
                         </WrapPanel>
                     </Grid>
 
-                    <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="6">
-                        <ListBox x:Name="LogList"
-                                 Style="{StaticResource MonospaceListStyle}"
-                                 ItemContainerStyle="{StaticResource DomainRowStyle}"
-                                 ItemsSource="{Binding LogLines}"
-                                 ScrollViewer.HorizontalScrollBarVisibility="Auto" />
-                    </Border>
+                    <Grid Grid.Row="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Level and search narrow the same list the copy button copies,
+                             so what is on screen and what reaches the clipboard agree. -->
+                        <Grid Grid.Row="0" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Grid.Column="0"
+                                       Text="Düzey"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,0"
+                                       Style="{StaticResource CaptionStyle}" />
+                            <ComboBox Grid.Column="1"
+                                      infra:NestedScrolling.IgnoreWheel="True"
+                                      x:Name="LogLevelFilter"
+                                      MinWidth="160"
+                                      Margin="0,0,16,0"
+                                      AutomationProperties.Name="Günlük düzeyi süzgeci"
+                                      ItemsSource="{Binding LogLevelOptions}"
+                                      DisplayMemberPath="Label"
+                                      SelectedItem="{Binding SelectedLogLevel, Mode=TwoWay}" />
+
+                            <TextBlock Grid.Column="2"
+                                       Text="Ara"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,0"
+                                       Style="{StaticResource CaptionStyle}" />
+                            <TextBox Grid.Column="3"
+                                     x:Name="LogSearchBox"
+                                     MinWidth="180"
+                                     AutomationProperties.Name="Günlükte ara"
+                                     AutomationProperties.HelpText="Görünen satırları metne göre süzer"
+                                     Text="{Binding LogSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, Delay=200}" />
+                        </Grid>
+
+                        <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="6">
+                            <ListBox x:Name="LogList"
+                                     Style="{StaticResource MonospaceListStyle}"
+                                     ItemContainerStyle="{StaticResource DomainRowStyle}"
+                                     ItemsSource="{Binding VisibleLogLines}"
+                                     AutomationProperties.Name="Günlük satırları"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+                        </Border>
+                    </Grid>
                 </Grid>
             </TabItem>
         </TabControl>

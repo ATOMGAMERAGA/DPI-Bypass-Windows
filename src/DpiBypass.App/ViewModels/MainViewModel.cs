@@ -7,6 +7,7 @@ using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.Core;
 using DpiBypass.Core.Apps;
+using DpiBypass.Core.Config;
 using DpiBypass.Core.Diagnostics;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
@@ -99,6 +100,16 @@ public sealed record TrafficGuardModeOption(TrafficGuardMode Mode, string Displa
     public override string ToString() => Display;
 }
 
+/// <summary>One entry in the log page's level filter.</summary>
+/// <remarks>
+/// <c>Minimum</c> is the lowest level the entry lets through, so "Uyarı ve üstü" keeps
+/// warnings and errors. Debug as the minimum means everything, which is the default.
+/// </remarks>
+public sealed record LogLevelOption(string Label, LogLevel Minimum)
+{
+    public override string ToString() => Label;
+}
+
 public sealed record RecheckOption(int Seconds, string Display)
 {
     public override string ToString() => Display;
@@ -120,10 +131,38 @@ public sealed class MainViewModel : ObservableObject
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _refreshTimer;
 
+    /// <summary>
+    /// How many queued lines the UI will hold before it starts dropping the oldest.
+    /// </summary>
+    /// <remarks>
+    /// The queue was unbounded, so a burst the dispatcher could not keep up with grew
+    /// without limit while the window was busy - and the log page only ever shows the last
+    /// <see cref="LogCapacity"/> lines anyway, so everything past a few multiples of that
+    /// was memory being held to be thrown away on arrival. The file has all of it.
+    /// </remarks>
+    private const int PendingLogCapacity = LogCapacity * 4;
+
+    /// <summary>
+    /// How many queued lines one dispatcher pass may hand to the UI.
+    /// </summary>
+    /// <remarks>
+    /// A dispatcher operation that drains an unbounded queue is a dispatcher operation of
+    /// unbounded length, which is the one thing a WPF UI thread must never contain: layout,
+    /// input and rendering all wait behind it. A pass takes a budget and re-queues itself
+    /// for the rest, so a flood costs many short operations rather than one long one.
+    /// </remarks>
+    private const int LogDrainBudget = 200;
+
     /// <summary>Lines waiting to be handed to the UI thread, oldest first.</summary>
     private readonly ConcurrentQueue<string> _pendingLogLines = new();
 
+    /// <summary>Hosts the engine rewrote, waiting to be handed to the UI thread.</summary>
+    private readonly ConcurrentQueue<string> _pendingHosts = new();
+
     private int _logDrainQueued;
+    private int _pendingLogCount;
+    private long _droppedLogLines;
+    private int _hostDrainQueued;
 
     private string _statusHeadline = "Koruma kapalı";
     private string _statusDetail = "Başlatmak için düğmeye dokunun.";
@@ -350,9 +389,11 @@ public sealed class MainViewModel : ObservableObject
             ForgetSelectedVodafoneNetwork,
             () => _selectedVodafoneNetwork is not null);
         ClearDomainFilterCommand = new RelayCommand(() => DomainFilter = string.Empty, () => HasFilter);
+        RetrySaveCommand = new RelayCommand(RetrySettingsSave, () => SettingsSaveFailed);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
 
+        _service.SaveStatusChanged += OnSaveStatusChanged;
         _service.Changed += OnServiceChanged;
         _service.LatencyStageChanged += OnLatencyStageChanged;
         _service.HostRewritten += OnHostRewritten;
@@ -367,10 +408,10 @@ public sealed class MainViewModel : ObservableObject
 
         foreach (var entry in AppLog.Snapshot())
         {
-            LogLines.Add(entry.ToString());
+            AppendLogLine(entry.ToString());
         }
 
-        _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
+        _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = VisibleRefreshInterval };
         _refreshTimer.Tick += (_, _) => RefreshCounters();
         _refreshTimer.Start();
 
@@ -391,7 +432,80 @@ public sealed class MainViewModel : ObservableObject
 
     public ObservableCollection<RecheckOption> RecheckOptions { get; }
 
+    /// <summary>Every line the page is holding, before the level filter and the search.</summary>
     public ObservableCollection<string> LogLines { get; } = [];
+
+    private readonly ObservableCollection<string> _visibleLogLines = [];
+
+    /// <summary>What the log list actually shows: the lines that pass the filter.</summary>
+    public ObservableCollection<string> VisibleLogLines => _visibleLogLines;
+
+    /// <summary>The levels the log page can be narrowed to.</summary>
+    public ObservableCollection<LogLevelOption> LogLevelOptions { get; } =
+    [
+        new("Hepsi", LogLevel.Debug),
+        new("Bilgi ve üstü", LogLevel.Info),
+        new("Uyarı ve üstü", LogLevel.Warning),
+        new("Yalnızca hatalar", LogLevel.Error),
+    ];
+
+    private LogLevelOption _selectedLogLevel = new("Hepsi", LogLevel.Debug);
+
+    public LogLevelOption SelectedLogLevel
+    {
+        get => _selectedLogLevel;
+        set
+        {
+            if (value is null || !Set(ref _selectedLogLevel, value))
+            {
+                return;
+            }
+
+            RefreshLogFilter(rebuild: true);
+        }
+    }
+
+    private string _logSearch = string.Empty;
+
+    /// <summary>Free text the log list is narrowed by, matched case-insensitively.</summary>
+    public string LogSearch
+    {
+        get => _logSearch;
+        set
+        {
+            if (!Set(ref _logSearch, value ?? string.Empty))
+            {
+                return;
+            }
+
+            RefreshLogFilter(rebuild: true);
+        }
+    }
+
+    /// <summary>
+    /// What the page says under its title: how much is shown, and what is not.
+    /// </summary>
+    /// <remarks>
+    /// The dropped count is the honest half. Under a flood the UI queue drops its oldest
+    /// lines rather than growing without limit, and a page that quietly showed fewer lines
+    /// than were logged would be misleading in exactly the situation somebody is reading it.
+    /// </remarks>
+    public string LogSummary
+    {
+        get
+        {
+            var shown = _visibleLogLines.Count == LogLines.Count
+                ? $"{LogLines.Count} satır"
+                : $"{_visibleLogLines.Count} / {LogLines.Count} satır";
+
+            var dropped = Interlocked.Read(ref _droppedLogLines);
+            var missed = dropped == 0
+                ? string.Empty
+                : $" · yoğunluk nedeniyle {dropped:N0} satır ekrana alınamadı (dosyada var)";
+
+            return $"{shown}{missed}. Görünümü temizlemek dosyadaki kayıtları silmez.";
+        }
+    }
 
     public ObservableCollection<string> ProtectedHosts { get; } = [];
 
@@ -476,6 +590,9 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand RememberVodafoneNetworkCommand { get; }
 
     public RelayCommand ClearDomainFilterCommand { get; }
+
+    /// <summary>Re-attempts a settings write the app already told the user about.</summary>
+    public RelayCommand RetrySaveCommand { get; }
 
     public RelayCommand CopyLogCommand { get; }
 
@@ -2432,6 +2549,71 @@ public sealed class MainViewModel : ObservableObject
         StateChanged?.Invoke();
     }
 
+    /// <summary>
+    /// Surfaces a settings write that did not land, and clears the banner when one does.
+    /// </summary>
+    /// <remarks>
+    /// The service only raises this when the answer changes, so a disk that stays full
+    /// produces one banner rather than a new one on every timer tick.
+    /// </remarks>
+    private void OnSaveStatusChanged(ConfigSaveResult? failure)
+    {
+        if (!_dispatcher.CheckAccess())
+        {
+            _dispatcher.BeginInvoke(() => OnSaveStatusChanged(failure));
+            return;
+        }
+
+        SettingsSaveWarning = failure?.Describe() ?? string.Empty;
+        SettingsSaveFailed = failure is not null;
+    }
+
+    private string _settingsSaveWarning = string.Empty;
+
+    /// <summary>Why the last settings write did not land, or empty when it did.</summary>
+    public string SettingsSaveWarning
+    {
+        get => _settingsSaveWarning;
+        private set => Set(ref _settingsSaveWarning, value);
+    }
+
+    private bool _settingsSaveFailed;
+
+    /// <summary>Whether the "applied but not saved" banner and its retry button are shown.</summary>
+    public bool SettingsSaveFailed
+    {
+        get => _settingsSaveFailed;
+        private set
+        {
+            if (Set(ref _settingsSaveFailed, value))
+            {
+                RetrySaveCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Writes the settings again, on the user's request.
+    /// </summary>
+    /// <remarks>
+    /// The point of the banner: "kaydedilemedi" with no way to act on it is a notification,
+    /// not a recovery. Once the user has closed whatever held the file - or freed some
+    /// space - one button puts their settings on disk without them having to set each one
+    /// again.
+    /// </remarks>
+    private void RetrySettingsSave()
+    {
+        if (_service.RetrySave())
+        {
+            SettingsSaveWarning = string.Empty;
+            SettingsSaveFailed = false;
+            return;
+        }
+
+        SettingsSaveWarning = _service.LastSaveFailure?.Describe()
+            ?? "Ayarlar hâlâ kaydedilemiyor.";
+    }
+
     private void OnDomainLearned(string domain)
     {
         if (!_dispatcher.CheckAccess())
@@ -2446,6 +2628,34 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public event Action? StateChanged;
+
+    /// <summary>How often the counters are re-read while the window is on screen.</summary>
+    private static readonly TimeSpan VisibleRefreshInterval = TimeSpan.FromSeconds(2);
+
+    /// <summary>How often they are re-read while the window is in the notification area.</summary>
+    private static readonly TimeSpan HiddenRefreshInterval = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Tells the view model whether anybody is looking at it.
+    /// </summary>
+    /// <remarks>
+    /// Only the presentation counters slow down: formatting packet totals and a DNS
+    /// summary for a window in the notification area is work whose entire output is
+    /// discarded. Protection, the network watch, the DNS proxy and everything the user
+    /// asked for run exactly as before - this timer draws nothing but text. Coming back
+    /// re-reads immediately, so the window is current the moment it is on screen rather
+    /// than up to one interval stale.
+    /// </remarks>
+    public void SetPresentationActive(bool active)
+    {
+        _refreshTimer.Interval = active ? VisibleRefreshInterval : HiddenRefreshInterval;
+
+        if (active)
+        {
+            RefreshCounters();
+            OnServiceChanged();
+        }
+    }
 
     private void RefreshCounters()
     {
@@ -2466,24 +2676,76 @@ public sealed class MainViewModel : ObservableObject
         };
     }
 
+    /// <summary>
+    /// Records a host the engine rewrote, batching the way the log lines do.
+    /// </summary>
+    /// <remarks>
+    /// This is raised from the packet path, once per rewritten handshake, and it used to
+    /// post its own dispatcher operation every time. Opening a busy page is hundreds of
+    /// handshakes in a second or two, which is hundreds of operations queued ahead of
+    /// layout - the same starvation the log lines were already batched to avoid.
+    /// </remarks>
     private void OnHostRewritten(string host, string strategyId)
     {
-        if (!_dispatcher.CheckAccess())
-        {
-            _dispatcher.BeginInvoke(() => OnHostRewritten(host, strategyId));
-            return;
-        }
+        _pendingHosts.Enqueue($"{DateTime.Now:HH:mm:ss}  {host}");
 
-        var line = $"{DateTime.Now:HH:mm:ss}  {host}";
-        if (ProtectedHosts.Contains(line))
+        if (Interlocked.Exchange(ref _hostDrainQueued, 1) == 1)
         {
             return;
         }
 
-        ProtectedHosts.Insert(0, line);
+        try
+        {
+            _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainHosts));
+        }
+        catch (Exception)
+        {
+            Interlocked.Exchange(ref _hostDrainQueued, 0);
+        }
+    }
+
+    private void DrainHosts()
+    {
+        Interlocked.Exchange(ref _hostDrainQueued, 0);
+
+        var added = 0;
+        while (added < LogDrainBudget && _pendingHosts.TryDequeue(out var line))
+        {
+            added++;
+            if (ProtectedHosts.Contains(line))
+            {
+                continue;
+            }
+
+            ProtectedHosts.Insert(0, line);
+        }
+
         while (ProtectedHosts.Count > 100)
         {
             ProtectedHosts.RemoveAt(ProtectedHosts.Count - 1);
+        }
+
+        // Anything past the budget is picked up by the next pass rather than by this one.
+        if (!_pendingHosts.IsEmpty)
+        {
+            RequeueHostDrain();
+        }
+    }
+
+    private void RequeueHostDrain()
+    {
+        if (Interlocked.Exchange(ref _hostDrainQueued, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainHosts));
+        }
+        catch (Exception)
+        {
+            Interlocked.Exchange(ref _hostDrainQueued, 0);
         }
     }
 
@@ -2515,6 +2777,16 @@ public sealed class MainViewModel : ObservableObject
     {
         _pendingLogLines.Enqueue(entry.ToString());
 
+        // Bounded: the page shows the last few hundred lines, so holding thousands of
+        // older ones to drop them on arrival is memory spent to no effect. The file keeps
+        // everything, and the count of what the UI missed is shown with the log.
+        if (Interlocked.Increment(ref _pendingLogCount) > PendingLogCapacity
+            && _pendingLogLines.TryDequeue(out _))
+        {
+            Interlocked.Decrement(ref _pendingLogCount);
+            Interlocked.Increment(ref _droppedLogLines);
+        }
+
         // Already queued: the pending drain will pick this line up as well.
         if (Interlocked.Exchange(ref _logDrainQueued, 1) == 1)
         {
@@ -2539,14 +2811,37 @@ public sealed class MainViewModel : ObservableObject
         // rather than being left in the queue with nobody coming back for it.
         Interlocked.Exchange(ref _logDrainQueued, 0);
 
-        while (_pendingLogLines.TryDequeue(out var line))
+        var added = 0;
+        while (added < LogDrainBudget && _pendingLogLines.TryDequeue(out var line))
         {
-            LogLines.Add(line);
+            Interlocked.Decrement(ref _pendingLogCount);
+            added++;
+            AppendLogLine(line);
         }
 
         while (LogLines.Count > LogCapacity)
         {
             LogLines.RemoveAt(0);
+            if (_visibleLogLines.Count > 0)
+            {
+                _visibleLogLines.RemoveAt(0);
+            }
+        }
+
+        RefreshLogFilter(rebuild: false);
+
+        // Whatever did not fit in this pass gets its own, so the dispatcher gets a turn
+        // at input and rendering in between.
+        if (!_pendingLogLines.IsEmpty && Interlocked.Exchange(ref _logDrainQueued, 1) == 0)
+        {
+            try
+            {
+                _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainLogLines));
+            }
+            catch (Exception)
+            {
+                Interlocked.Exchange(ref _logDrainQueued, 0);
+            }
         }
     }
 
@@ -2654,12 +2949,25 @@ public sealed class MainViewModel : ObservableObject
     /// owned by another process, so a refusal is logged rather than thrown - the log
     /// file is untouched either way.
     /// </summary>
+    /// <summary>
+    /// Copies exactly what the list is showing, and says so.
+    /// </summary>
+    /// <remarks>
+    /// With a level filter and a search box in front of the list, "copy" has two possible
+    /// meanings and only one of them is what the user is looking at. It copies the visible
+    /// rows, and the log line it writes afterwards names the filter that was applied, so
+    /// nobody pastes a filtered extract into a bug report believing it is the whole log.
+    /// </remarks>
     private void CopyLogToClipboard()
     {
         try
         {
-            System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, LogLines));
-            AppLog.Info($"Günlük görünümündeki {LogLines.Count} satır panoya kopyalandı.");
+            System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, VisibleLogLines));
+            AppLog.Info(
+                $"Günlük görünümündeki {VisibleLogLines.Count} satır panoya kopyalandı "
+                + $"(süzgeç: {SelectedLogLevel.Label}"
+                + (string.IsNullOrWhiteSpace(_logSearch) ? string.Empty : $", arama: '{_logSearch.Trim()}'")
+                + ").");
         }
         catch (Exception ex)
         {
@@ -2675,12 +2983,92 @@ public sealed class MainViewModel : ObservableObject
     private void ClearLogView()
     {
         _pendingLogLines.Clear();
+        Interlocked.Exchange(ref _pendingLogCount, 0);
+        Interlocked.Exchange(ref _droppedLogLines, 0);
         LogLines.Clear();
+        _visibleLogLines.Clear();
+        Raise(nameof(LogSummary));
+    }
+
+    /// <summary>Adds one line to the backing list, and to the view when it passes the filter.</summary>
+    private void AppendLogLine(string line)
+    {
+        LogLines.Add(line);
+
+        if (Matches(line))
+        {
+            _visibleLogLines.Add(line);
+        }
+    }
+
+    /// <summary>
+    /// Whether a line survives the level filter and the search box.
+    /// </summary>
+    /// <remarks>
+    /// The level is read from the single letter the formatter puts in brackets, which is
+    /// the only structure a rendered line has. A line that does not carry one - a wrapped
+    /// stack trace, for instance - always passes the level filter, because hiding the
+    /// second half of an exception while showing its first line is worse than showing both.
+    /// </remarks>
+    private bool Matches(string line)
+    {
+        if (SelectedLogLevel.Minimum > LogLevel.Debug && LevelOf(line) is { } level && level < SelectedLogLevel.Minimum)
+        {
+            return false;
+        }
+
+        var search = _logSearch;
+        return string.IsNullOrWhiteSpace(search)
+            || line.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static LogLevel? LevelOf(string line)
+    {
+        var open = line.IndexOf('[');
+        if (open < 0 || open + 2 >= line.Length || line[open + 2] != ']')
+        {
+            return null;
+        }
+
+        return line[open + 1] switch
+        {
+            'D' => LogLevel.Debug,
+            'I' => LogLevel.Info,
+            'W' => LogLevel.Warning,
+            'E' => LogLevel.Error,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Brings the visible list back in step with the filter.
+    /// </summary>
+    /// <param name="rebuild">
+    /// True when the filter itself changed, which is the only case that needs the whole
+    /// list walked. A drain passes false: it has already appended the lines that matched,
+    /// and only the summary line needs refreshing.
+    /// </param>
+    private void RefreshLogFilter(bool rebuild)
+    {
+        if (rebuild)
+        {
+            _visibleLogLines.Clear();
+            foreach (var line in LogLines)
+            {
+                if (Matches(line))
+                {
+                    _visibleLogLines.Add(line);
+                }
+            }
+        }
+
+        Raise(nameof(LogSummary));
     }
 
     public void Detach()
     {
         _refreshTimer.Stop();
+        _service.SaveStatusChanged -= OnSaveStatusChanged;
         _service.Changed -= OnServiceChanged;
         _service.HostRewritten -= OnHostRewritten;
         _service.TuningProgress -= OnTuningProgress;

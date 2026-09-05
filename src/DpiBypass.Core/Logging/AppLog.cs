@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Text;
 
 namespace DpiBypass.Core.Logging;
 
@@ -20,19 +19,30 @@ public readonly record struct LogEntry(DateTimeOffset Timestamp, LogLevel Level,
 /// One log sink for the whole app: a bounded in-memory buffer the UI binds to, plus
 /// a daily file so a user can send us something useful after the fact.
 /// </summary>
+/// <remarks>
+/// Logging costs the calling thread an enqueue and nothing else. The file half is a
+/// <see cref="LogFileWriter"/> on its own thread; it used to be a synchronous append
+/// under a shared lock on every entry, which put whatever the disk was doing directly in
+/// front of the packet workers.
+/// </remarks>
 public static class AppLog
 {
     private const int BufferCapacity = 500;
 
     private static readonly ConcurrentQueue<LogEntry> Buffer = new();
-    private static readonly Lock FileGate = new();
-    private static string? _logDirectory;
-    private static string? _filePath;
-    private static DateOnly _fileDate;
+    private static readonly Lock WriterGate = new();
+
+    private static LogFileWriter? _file;
 
     public static event Action<LogEntry>? Written;
 
     public static LogLevel MinimumLevel { get; set; } = LogLevel.Info;
+
+    /// <summary>Entries the file writer could not keep up with, for the diagnostics report.</summary>
+    public static long DroppedFileEntries => _file?.Dropped ?? 0;
+
+    /// <summary>The log file being written to now, or null when logging is memory only.</summary>
+    public static string? CurrentFile => _file?.CurrentFile;
 
     public static IReadOnlyList<LogEntry> Snapshot() => [.. Buffer];
 
@@ -42,15 +52,29 @@ public static class AppLog
         {
             AppPaths.EnsureCreated();
 
-            lock (FileGate)
+            LogFileWriter writer;
+            lock (WriterGate)
             {
-                _logDirectory = AppPaths.LogDirectory;
-                ResolveFile(_logDirectory, DateTime.Now);
+                if (_file is not null)
+                {
+                    return;
+                }
+
+                writer = new LogFileWriter(AppPaths.LogDirectory);
+                _file = writer;
+            }
+
+            // Everything logged before the directory was known is in memory only, and on
+            // a launch that fails those lines are the whole explanation. They go to the
+            // file as soon as there is a file to put them in.
+            foreach (var early in Buffer)
+            {
+                writer.Enqueue(early);
             }
         }
         catch (Exception)
         {
-            _logDirectory = null; // memory-only logging is still better than crashing
+            _file = null; // memory-only logging is still better than crashing
         }
     }
 
@@ -84,89 +108,63 @@ public static class AppLog
             // Bounded on purpose - the UI shows a live tail, not the whole history.
         }
 
-        try
-        {
-            Written?.Invoke(entry);
-        }
-        catch (Exception)
-        {
-            // This runs on whichever thread logged - a WinDivert worker, the TTL fix,
-            // the IPC accept loop - and the UI subscriber marshals through a Dispatcher
-            // that throws once shutdown has begun. An unhandled exception there would
-            // take the process down, so a log call must never be able to hurt its caller.
-        }
-
-        AppendToFile(entry);
+        Publish(entry);
+        _file?.Enqueue(entry);
     }
 
-    private static void AppendToFile(LogEntry entry)
+    /// <summary>
+    /// Hands the entry to every subscriber, keeping one bad subscriber to itself.
+    /// </summary>
+    /// <remarks>
+    /// One try/catch around the whole multicast invocation meant the first subscriber to
+    /// throw silenced every subscriber registered after it - the UI's dispatcher throwing
+    /// once during shutdown could take a diagnostics sink down with it. Each subscriber is
+    /// now called on its own.
+    /// </remarks>
+    private static void Publish(LogEntry entry)
     {
-        var directory = _logDirectory;
-        if (directory is null)
+        var subscribers = Written;
+        if (subscribers is null)
         {
             return;
         }
 
-        try
+        foreach (var subscriber in subscribers.GetInvocationList())
         {
-            lock (FileGate)
+            try
             {
-                File.AppendAllText(
-                    ResolveFile(directory, entry.Timestamp.LocalDateTime),
-                    $"{entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{entry.Level}] {entry.Message}{Environment.NewLine}",
-                    Encoding.UTF8);
+                ((Action<LogEntry>)subscriber)(entry);
             }
-        }
-        catch (IOException)
-        {
-            // Disk problems must never take the engine down.
-        }
-        catch (UnauthorizedAccessException)
-        {
+            catch (Exception)
+            {
+                // This runs on whichever thread logged - a WinDivert worker, the TTL fix,
+                // the IPC accept loop - and the UI subscriber marshals through a Dispatcher
+                // that throws once shutdown has begun. An unhandled exception there would
+                // take the process down, so a log call must never be able to hurt its
+                // caller. Reporting it would be a log call from inside a log call.
+            }
         }
     }
 
     /// <summary>
-    /// The file for the day an entry belongs to. Caller must hold <see cref="FileGate"/>.
+    /// Writes everything queued and stops the file writer.
     /// </summary>
     /// <remarks>
-    /// Resolved per write rather than once at startup: an instance the logon task
-    /// started can stay up for weeks, and everything it logged would otherwise pile
-    /// into the file named after the day it happened to boot on.
+    /// Called on the way out so the last lines - the ones describing why the app is
+    /// closing - reach the disk. It cannot cover a process that is killed outright:
+    /// entries written in the moments before a hard termination are lost, and the log has
+    /// no way to promise otherwise.
     /// </remarks>
-    private static string ResolveFile(string directory, DateTime stamp)
+    public static void Shutdown()
     {
-        var day = DateOnly.FromDateTime(stamp);
-        var path = _filePath;
-
-        if (path is null || day != _fileDate)
+        LogFileWriter? writer;
+        lock (WriterGate)
         {
-            path = Path.Combine(directory, $"dpibypass-{day:yyyy-MM-dd}.log");
-            _filePath = path;
-            _fileDate = day;
-            PruneOldFiles();
+            writer = _file;
+            _file = null;
         }
 
-        return path;
-    }
-
-    private static void PruneOldFiles()
-    {
-        try
-        {
-            var cutoff = DateTime.Now.AddDays(-14);
-            foreach (var file in Directory.EnumerateFiles(AppPaths.LogDirectory, "dpibypass-*.log"))
-            {
-                if (File.GetLastWriteTime(file) < cutoff)
-                {
-                    File.Delete(file);
-                }
-            }
-        }
-        catch (Exception)
-        {
-            // Housekeeping only.
-        }
+        writer?.Dispose();
     }
 
     /// <summary>Convenience adapter for the components that take an <c>Action&lt;string&gt;</c> logger.</summary>
