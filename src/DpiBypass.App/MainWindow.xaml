@@ -649,6 +649,37 @@
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
                     <StackPanel>
+                        <!-- This page is long enough that the three sections people come
+                             here for - ping, the send-rate cap, Vodafone mode - are below
+                             the fold on a 1366x768 screen at 125%. These jump to them
+                             rather than adding another level of navigation to learn. They
+                             are buttons, so they are in the tab order and can be reached
+                             from the keyboard like everything else. -->
+                        <WrapPanel Margin="0,0,0,12" AutomationProperties.Name="Bölüme git">
+                            <TextBlock Text="Bölüme git:"
+                                       Style="{StaticResource CaptionStyle}"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,10,8" />
+                            <Button Content="Ping düşürme"
+                                    Margin="0,0,8,8"
+                                    MinWidth="130"
+                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                    Tag="{Binding ElementName=LatencySection}"
+                                    Click="OnJumpToSection" />
+                            <Button Content="Gönderim sınırı"
+                                    Margin="0,0,8,8"
+                                    MinWidth="140"
+                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                    Tag="{Binding ElementName=TrafficGuardSection}"
+                                    Click="OnJumpToSection" />
+                            <Button Content="Vodafone Sınırsız Modu"
+                                    Margin="0,0,8,8"
+                                    MinWidth="190"
+                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                    Tag="{Binding ElementName=VodafoneSection}"
+                                    Click="OnJumpToSection" />
+                        </WrapPanel>
+
                         <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Alan adı çözümleme" Style="{StaticResource SectionTitleStyle}" />
@@ -720,7 +751,7 @@
                              button, the numbers, one sentence about them, and only then
                              the technical surface. Everything a developer needs and a
                              user does not lives under "Ölçüm ayrıntıları". -->
-                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="LatencySection" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
                             <StackPanel>
 
                                 <!-- 1. Title, and the two states that are not the same
@@ -1161,7 +1192,8 @@
                                         <!-- Traffic Guard: the one intervention that moves
                                              loaded latency, and the one that costs upload
                                              speed. Both halves are stated. -->
-                                        <TextBlock Text="Gönderim sınırı (Traffic Guard)"
+                                        <TextBlock x:Name="TrafficGuardSection"
+                                                   Text="Gönderim sınırı (Traffic Guard)"
                                                    Style="{StaticResource SectionTitleStyle}"
                                                    Margin="0,16,0,6" />
                                         <TextBlock Style="{StaticResource CaptionStyle}"
@@ -1249,7 +1281,7 @@
                              Same shape: what network you are on, what the mode is doing
                              here, one button, then the findings as cards. The raw report
                              lives under "Teknik ayrıntılar" and is never parsed. -->
-                        <Border Style="{StaticResource CardStyle}">
+                        <Border x:Name="VodafoneSection" Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <Grid>
                                     <Grid.ColumnDefinitions>

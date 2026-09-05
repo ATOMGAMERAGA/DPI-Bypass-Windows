@@ -425,6 +425,9 @@ public sealed class MainViewModel : ObservableObject
         };
         _refreshTimer.Start();
 
+        // So the first frame shows the real answer rather than the field initialiser's.
+        RefreshVerification();
+
         // Both are discarded on purpose - nothing waits for them - so both have to be
         // answerable for themselves. A fault here used to disappear with the task and
         // leave the two summaries reading "Aranıyor…" for the life of the process.
@@ -1071,22 +1074,16 @@ public sealed class MainViewModel : ObservableObject
 
         // An in-place update rather than clear-and-refill: emptying an ObservableCollection
         // and putting the same rows back re-creates every container, which drops the
-        // selection and the scroll position for no visible change at all.
+        // selection and the scroll position for no visible change at all. Rows are records,
+        // so a step that has not moved compares equal and is left completely alone.
         if (LatencyFlow.Count == steps.Count)
         {
-            var identical = true;
             for (var i = 0; i < steps.Count; i++)
             {
                 if (LatencyFlow[i] != steps[i])
                 {
                     LatencyFlow[i] = steps[i];
-                    identical = false;
                 }
-            }
-
-            if (identical)
-            {
-                return;
             }
 
             return;
@@ -2827,7 +2824,7 @@ public sealed class MainViewModel : ObservableObject
 
     public event Action? StateChanged;
 
-    private string _verificationSummary = "Henüz doğrulanmadı.";
+    private string _verificationSummary = "Koruma kapalıyken doğrulama yapılmaz.";
 
     /// <summary>
     /// Whether the target site is actually reachable, as its own fact.
