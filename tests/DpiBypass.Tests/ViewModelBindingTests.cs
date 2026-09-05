@@ -65,7 +65,9 @@ public sealed partial class ViewModelBindingTests
     /// </summary>
     private static IEnumerable<string> BindingRoots(string xamlPath)
     {
-        var text = File.ReadAllText(xamlPath);
+        // Anything inside an item template belongs to the bound item, not to the view
+        // model, and is checked against the item's own type by the test below.
+        var text = WithoutItemTemplates(File.ReadAllText(xamlPath));
 
         foreach (Match match in BindingExpression().Matches(text))
         {
@@ -102,6 +104,189 @@ public sealed partial class ViewModelBindingTests
             yield return value.Split('.')[0].Trim();
         }
     }
+
+    /// <summary>
+    /// The markup with every <c>&lt;DataTemplate&gt;</c> body removed.
+    /// </summary>
+    /// <remarks>
+    /// A binding inside a template resolves against the item, so checking it against the
+    /// view model would either fail on a perfectly good template or - worse - pass
+    /// because the item's property happens to share a name with one of the view model's,
+    /// which is how "Title" and "Detail" slipped through. They are checked against the
+    /// item type instead.
+    /// </remarks>
+    private static string WithoutItemTemplates(string text) => DataTemplateBody().Replace(text, string.Empty);
+
+    /// <summary>
+    /// Every binding inside an item template names a member of the item type it is bound to.
+    /// </summary>
+    /// <remarks>
+    /// The item type is worked out from the collection the template's own items control is
+    /// bound to, so a template that names a property the item does not have is caught -
+    /// including one whose name happens to exist on the view model.
+    /// </remarks>
+    [Fact]
+    public void EveryBindingInsideAnItemTemplateNamesAMemberOfTheBoundItemType()
+    {
+        var document = XDocument.Load(RepoFiles.MainWindowXaml);
+        var checkedTemplates = 0;
+        var unresolved = new List<string>();
+
+        foreach (var template in document.Descendants().Where(element => element.Name.LocalName == "DataTemplate"))
+        {
+            // <ListBox ItemsSource="{Binding X}"><ListBox.ItemTemplate><DataTemplate>…
+            var holder = template.Parent;
+            var control = holder?.Name.LocalName.EndsWith(".ItemTemplate", StringComparison.Ordinal) == true
+                ? holder.Parent
+                : holder;
+
+            if (control?.Attribute("ItemsSource")?.Value is not { } itemsSource
+                || !itemsSource.Contains("Binding", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var collection = itemsSource
+                .Trim('{', '}')
+                .Replace("Binding", string.Empty, StringComparison.Ordinal)
+                .Split(',')[0]
+                .Replace("Path=", string.Empty, StringComparison.Ordinal)
+                .Trim();
+
+            if (ItemTypeOf(collection) is not { } itemType || MembersOf(itemType) is not { Count: > 0 } members)
+            {
+                continue;
+            }
+
+            checkedTemplates++;
+
+            foreach (Match match in BindingExpression().Matches(template.ToString()))
+            {
+                var body = match.Groups[1].Value;
+                if (body.Contains("RelativeSource", StringComparison.Ordinal)
+                    || body.Contains("ElementName", StringComparison.Ordinal)
+                    || body.Contains("Source=", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var root = body.Split(',')[0].Trim();
+                if (root.StartsWith("Path=", StringComparison.Ordinal))
+                {
+                    root = root["Path=".Length..].Trim();
+                }
+
+                root = root.Split('.')[0].Trim();
+                if (root.Length > 0 && !members.Contains(root))
+                {
+                    unresolved.Add($"{collection} ({itemType}): {root}");
+                }
+            }
+        }
+
+        Assert.True(checkedTemplates > 0, "no item template was resolved, so this test proves nothing");
+        Assert.Empty(unresolved);
+    }
+
+    /// <summary>Proves the item-template scan has teeth rather than matching everything.</summary>
+    [Fact]
+    public void AMisspeltBindingInsideAnItemTemplateWouldBeCaught()
+        => Assert.DoesNotContain("OrdinalTypo", MembersOf("LatencyFlowStep"));
+
+    /// <summary>The element type of an <c>ObservableCollection&lt;T&gt;</c> the view model exposes.</summary>
+    private static string? ItemTypeOf(string collectionName)
+    {
+        var text = File.ReadAllText(RepoFiles.MainViewModel);
+        var match = Regex.Match(
+            text,
+            @"public\s+(?:ObservableCollection|IReadOnlyList|List)<([\w\.]+)>\s+" + Regex.Escape(collectionName) + @"\b");
+
+        return match.Success ? match.Groups[1].Value.Split('.')[^1] : null;
+    }
+
+    /// <summary>
+    /// The public members of one type, wherever in the two projects it is declared.
+    /// </summary>
+    private static HashSet<string> MembersOf(string typeName)
+    {
+        var members = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var file in SourceFiles())
+        {
+            var text = File.ReadAllText(file);
+
+            // Positional records: the parameters are public properties.
+            foreach (Match match in Regex.Matches(
+                text,
+                @"record\s+(?:struct\s+)?" + Regex.Escape(typeName) + @"\s*\(([^)]*)\)"))
+            {
+                foreach (var parameter in match.Groups[1].Value.Split(','))
+                {
+                    var name = parameter.Trim().Split([' ', '='], StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1);
+                    if (name is { Length: > 0 })
+                    {
+                        members.Add(name);
+                    }
+                }
+            }
+
+            // Members declared in the body, which for a positional record is where the
+            // computed properties like StateLabel and Severity live.
+            var declaration = Regex.Match(
+                text,
+                @"(?:record|class)\s+(?:struct\s+)?" + Regex.Escape(typeName) + @"\b[^{;]*\{");
+
+            if (!declaration.Success)
+            {
+                continue;
+            }
+
+            var body = Body(text, declaration.Index + declaration.Length - 1);
+            foreach (Match match in PublicMember().Matches(body))
+            {
+                members.Add(match.Groups[1].Value);
+            }
+        }
+
+        return members;
+    }
+
+    /// <summary>The text between a type's opening brace and its matching close.</summary>
+    private static string Body(string text, int openBrace)
+    {
+        var depth = 0;
+        for (var i = openBrace; i < text.Length; i++)
+        {
+            if (text[i] == '{')
+            {
+                depth++;
+            }
+            else if (text[i] == '}' && --depth == 0)
+            {
+                return text[openBrace..i];
+            }
+        }
+
+        return text[openBrace..];
+    }
+
+    private static IEnumerable<string> SourceFiles()
+    {
+        yield return RepoFiles.MainViewModel;
+
+        foreach (var file in Directory.EnumerateFiles(RepoFiles.CoreProjectDirectory, "*.cs", SearchOption.AllDirectories))
+        {
+            if (!file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                && !file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                yield return file;
+            }
+        }
+    }
+
+    /// <summary>A whole <c>&lt;DataTemplate&gt;</c> element, body and all.</summary>
+    [GeneratedRegex(@"<DataTemplate\b.*?</DataTemplate>", RegexOptions.Singleline | RegexOptions.Compiled)]
+    private static partial Regex DataTemplateBody();
 
     /// <summary>
     /// Public members declared in the view model file: the view model itself plus the

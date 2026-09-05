@@ -7,6 +7,7 @@ using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.Core;
 using DpiBypass.Core.Apps;
+using DpiBypass.Core.Config;
 using DpiBypass.Core.Diagnostics;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
@@ -14,6 +15,7 @@ using DpiBypass.Core.Interop;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
+using DpiBypass.Core.Network.Latency;
 using DpiBypass.Core.Startup;
 
 namespace DpiBypass.App.ViewModels;
@@ -99,6 +101,16 @@ public sealed record TrafficGuardModeOption(TrafficGuardMode Mode, string Displa
     public override string ToString() => Display;
 }
 
+/// <summary>One entry in the log page's level filter.</summary>
+/// <remarks>
+/// <c>Minimum</c> is the lowest level the entry lets through, so "Uyarı ve üstü" keeps
+/// warnings and errors. Debug as the minimum means everything, which is the default.
+/// </remarks>
+public sealed record LogLevelOption(string Label, LogLevel Minimum)
+{
+    public override string ToString() => Label;
+}
+
 public sealed record RecheckOption(int Seconds, string Display)
 {
     public override string ToString() => Display;
@@ -120,10 +132,38 @@ public sealed class MainViewModel : ObservableObject
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _refreshTimer;
 
+    /// <summary>
+    /// How many queued lines the UI will hold before it starts dropping the oldest.
+    /// </summary>
+    /// <remarks>
+    /// The queue was unbounded, so a burst the dispatcher could not keep up with grew
+    /// without limit while the window was busy - and the log page only ever shows the last
+    /// <see cref="LogCapacity"/> lines anyway, so everything past a few multiples of that
+    /// was memory being held to be thrown away on arrival. The file has all of it.
+    /// </remarks>
+    private const int PendingLogCapacity = LogCapacity * 4;
+
+    /// <summary>
+    /// How many queued lines one dispatcher pass may hand to the UI.
+    /// </summary>
+    /// <remarks>
+    /// A dispatcher operation that drains an unbounded queue is a dispatcher operation of
+    /// unbounded length, which is the one thing a WPF UI thread must never contain: layout,
+    /// input and rendering all wait behind it. A pass takes a budget and re-queues itself
+    /// for the rest, so a flood costs many short operations rather than one long one.
+    /// </remarks>
+    private const int LogDrainBudget = 200;
+
     /// <summary>Lines waiting to be handed to the UI thread, oldest first.</summary>
     private readonly ConcurrentQueue<string> _pendingLogLines = new();
 
+    /// <summary>Hosts the engine rewrote, waiting to be handed to the UI thread.</summary>
+    private readonly ConcurrentQueue<string> _pendingHosts = new();
+
     private int _logDrainQueued;
+    private int _pendingLogCount;
+    private long _droppedLogLines;
+    private int _hostDrainQueued;
 
     private string _statusHeadline = "Koruma kapalı";
     private string _statusDetail = "Başlatmak için düğmeye dokunun.";
@@ -350,9 +390,12 @@ public sealed class MainViewModel : ObservableObject
             ForgetSelectedVodafoneNetwork,
             () => _selectedVodafoneNetwork is not null);
         ClearDomainFilterCommand = new RelayCommand(() => DomainFilter = string.Empty, () => HasFilter);
+        RetrySaveCommand = new RelayCommand(RetrySettingsSave, () => SettingsSaveFailed);
+        SaveDiagnosticReportCommand = new AsyncRelayCommand(SaveDiagnosticReportAsync);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
 
+        _service.SaveStatusChanged += OnSaveStatusChanged;
         _service.Changed += OnServiceChanged;
         _service.LatencyStageChanged += OnLatencyStageChanged;
         _service.HostRewritten += OnHostRewritten;
@@ -367,12 +410,23 @@ public sealed class MainViewModel : ObservableObject
 
         foreach (var entry in AppLog.Snapshot())
         {
-            LogLines.Add(entry.ToString());
+            AppendLogLine(entry.ToString());
         }
 
-        _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
-        _refreshTimer.Tick += (_, _) => RefreshCounters();
+        _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = VisibleRefreshInterval };
+        _refreshTimer.Tick += (_, _) =>
+        {
+            RefreshCounters();
+            UpdateLatencyElapsed();
+
+            // The wording is relative ("3 dk önce"), so it goes stale on its own even when
+            // nothing has changed.
+            RefreshVerification();
+        };
         _refreshTimer.Start();
+
+        // So the first frame shows the real answer rather than the field initialiser's.
+        RefreshVerification();
 
         // Both are discarded on purpose - nothing waits for them - so both have to be
         // answerable for themselves. A fault here used to disappear with the task and
@@ -391,7 +445,80 @@ public sealed class MainViewModel : ObservableObject
 
     public ObservableCollection<RecheckOption> RecheckOptions { get; }
 
+    /// <summary>Every line the page is holding, before the level filter and the search.</summary>
     public ObservableCollection<string> LogLines { get; } = [];
+
+    private readonly ObservableCollection<string> _visibleLogLines = [];
+
+    /// <summary>What the log list actually shows: the lines that pass the filter.</summary>
+    public ObservableCollection<string> VisibleLogLines => _visibleLogLines;
+
+    /// <summary>The levels the log page can be narrowed to.</summary>
+    public ObservableCollection<LogLevelOption> LogLevelOptions { get; } =
+    [
+        new("Hepsi", LogLevel.Debug),
+        new("Bilgi ve üstü", LogLevel.Info),
+        new("Uyarı ve üstü", LogLevel.Warning),
+        new("Yalnızca hatalar", LogLevel.Error),
+    ];
+
+    private LogLevelOption _selectedLogLevel = new("Hepsi", LogLevel.Debug);
+
+    public LogLevelOption SelectedLogLevel
+    {
+        get => _selectedLogLevel;
+        set
+        {
+            if (value is null || !Set(ref _selectedLogLevel, value))
+            {
+                return;
+            }
+
+            RefreshLogFilter(rebuild: true);
+        }
+    }
+
+    private string _logSearch = string.Empty;
+
+    /// <summary>Free text the log list is narrowed by, matched case-insensitively.</summary>
+    public string LogSearch
+    {
+        get => _logSearch;
+        set
+        {
+            if (!Set(ref _logSearch, value ?? string.Empty))
+            {
+                return;
+            }
+
+            RefreshLogFilter(rebuild: true);
+        }
+    }
+
+    /// <summary>
+    /// What the page says under its title: how much is shown, and what is not.
+    /// </summary>
+    /// <remarks>
+    /// The dropped count is the honest half. Under a flood the UI queue drops its oldest
+    /// lines rather than growing without limit, and a page that quietly showed fewer lines
+    /// than were logged would be misleading in exactly the situation somebody is reading it.
+    /// </remarks>
+    public string LogSummary
+    {
+        get
+        {
+            var shown = _visibleLogLines.Count == LogLines.Count
+                ? $"{LogLines.Count} satır"
+                : $"{_visibleLogLines.Count} / {LogLines.Count} satır";
+
+            var dropped = Interlocked.Read(ref _droppedLogLines);
+            var missed = dropped == 0
+                ? string.Empty
+                : $" · yoğunluk nedeniyle {dropped:N0} satır ekrana alınamadı (dosyada var)";
+
+            return $"{shown}{missed}. Görünümü temizlemek dosyadaki kayıtları silmez.";
+        }
+    }
 
     public ObservableCollection<string> ProtectedHosts { get; } = [];
 
@@ -476,6 +603,12 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand RememberVodafoneNetworkCommand { get; }
 
     public RelayCommand ClearDomainFilterCommand { get; }
+
+    /// <summary>Re-attempts a settings write the app already told the user about.</summary>
+    public RelayCommand RetrySaveCommand { get; }
+
+    /// <summary>Writes a masked diagnostics archive the user can attach to a message.</summary>
+    public AsyncRelayCommand SaveDiagnosticReportCommand { get; }
 
     public RelayCommand CopyLogCommand { get; }
 
@@ -776,6 +909,7 @@ public sealed class MainViewModel : ObservableObject
                 RaiseLatencyCommandStates();
                 Raise(nameof(IsLatencyProgressVisible));
                 Raise(nameof(LatencyProgressTitle));
+                TrackLatencyElapsed(value);
             }
         }
     }
@@ -902,6 +1036,93 @@ public sealed class MainViewModel : ObservableObject
     public string LatencyProgressTitle => _isDeepTestRunning
         ? _latencyStageTitle
         : _isLatencyBusy ? "Bağlantı ölçülüyor" : string.Empty;
+
+    /// <summary>
+    /// The six steps of the measurement flow, with where each one has got to.
+    /// </summary>
+    /// <remarks>
+    /// The card could say what state a run was in but not where in the process that state
+    /// sat, which makes a slow measurement indistinguishable from a stuck one. Each row is
+    /// derived from the result rather than announced by the run, so it can only ever claim
+    /// evidence that is really there.
+    /// </remarks>
+    public ObservableCollection<LatencyFlowStep> LatencyFlow { get; } = [];
+
+    private DateTimeOffset? _latencyRunStartedAt;
+
+    private string _latencyElapsed = string.Empty;
+
+    /// <summary>
+    /// How long the run has been going, in place of a progress percentage.
+    /// </summary>
+    /// <remarks>
+    /// A run has no predictable total - the number of candidates depends on the adapter,
+    /// and each cycle's length on how noisy the link is - so a percentage or a countdown
+    /// would be a made-up number. Elapsed time is measured, and it is what tells somebody
+    /// whether to keep waiting.
+    /// </remarks>
+    public string LatencyElapsed
+    {
+        get => _latencyElapsed;
+        private set => Set(ref _latencyElapsed, value);
+    }
+
+    /// <summary>Rebuilds the step list, leaving it alone when nothing visible changed.</summary>
+    private void RefreshLatencyFlow(LatencyStatusView status)
+    {
+        var steps = LatencyFlowSteps.From(status);
+
+        // An in-place update rather than clear-and-refill: emptying an ObservableCollection
+        // and putting the same rows back re-creates every container, which drops the
+        // selection and the scroll position for no visible change at all. Rows are records,
+        // so a step that has not moved compares equal and is left completely alone.
+        if (LatencyFlow.Count == steps.Count)
+        {
+            for (var i = 0; i < steps.Count; i++)
+            {
+                if (LatencyFlow[i] != steps[i])
+                {
+                    LatencyFlow[i] = steps[i];
+                }
+            }
+
+            return;
+        }
+
+        LatencyFlow.Clear();
+        foreach (var step in steps)
+        {
+            LatencyFlow.Add(step);
+        }
+    }
+
+    /// <summary>Starts or stops the elapsed clock as a run begins and ends.</summary>
+    private void TrackLatencyElapsed(bool busy)
+    {
+        if (busy)
+        {
+            _latencyRunStartedAt ??= DateTimeOffset.UtcNow;
+            UpdateLatencyElapsed();
+            return;
+        }
+
+        _latencyRunStartedAt = null;
+        LatencyElapsed = string.Empty;
+    }
+
+    private void UpdateLatencyElapsed()
+    {
+        if (_latencyRunStartedAt is not { } started)
+        {
+            LatencyElapsed = string.Empty;
+            return;
+        }
+
+        var elapsed = DateTimeOffset.UtcNow - started;
+        LatencyElapsed = elapsed < TimeSpan.FromMinutes(1)
+            ? $"Geçen süre: {elapsed.TotalSeconds:F0} sn"
+            : $"Geçen süre: {(int)elapsed.TotalMinutes} dk {elapsed.Seconds:D2} sn";
+    }
 
     /// <summary>Everything the finished run measured, as the result panel prints it.</summary>
     public string LatencyResultSummary
@@ -1607,6 +1828,7 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>Copies one structured status into the properties the card binds to.</summary>
     private void ApplyLatencyStatus(LatencyStatusView status)
     {
+        RefreshLatencyFlow(status);
         LatencyHeadline = status.Headline;
         LatencyStatusSeverity = status.Severity;
         LatencyStatusLine = string.IsNullOrWhiteSpace(status.Detail) ? status.Headline : status.Detail;
@@ -2258,9 +2480,11 @@ public sealed class MainViewModel : ObservableObject
     public async Task ToggleAsync()
     {
         IsBusy = true;
+        var wasRunning = _isRunning;
+
         try
         {
-            if (_isRunning)
+            if (wasRunning)
             {
                 await _service.StopAsync().ConfigureAwait(true);
             }
@@ -2271,8 +2495,11 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            AppLog.Error("Koruma durumu değiştirilemedi", ex);
-            StatusHeadline = "Başlatılamadı";
+            // Which of the two was attempted matters: a stop that could not put the
+            // machine's DNS back reported as "could not start" sends the user looking for
+            // the wrong problem.
+            AppLog.Error(wasRunning ? "Koruma durdurulamadı" : "Koruma başlatılamadı", ex);
+            StatusHeadline = wasRunning ? "Tam olarak durdurulamadı" : "Başlatılamadı";
             StatusDetail = ex.Message;
         }
         finally
@@ -2355,6 +2582,18 @@ public sealed class MainViewModel : ObservableObject
                 ? "Çalışan bir yöntem bulunamadı. Farklı bir DNS modu veya kapsam deneyin."
                 : $"Seçilen yöntem: {result.Winner.Name} ({result.Trials.Count} deneme)";
         }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer request - a second press, or the machine moving
+            // networks. Not a failure, and the status line has to stop saying "measuring"
+            // either way.
+            TuningStatus = "Arama durduruldu; daha yeni bir istek devraldı.";
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Yöntem araması başarısız", ex);
+            TuningStatus = $"Yöntem aranamadı: {ex.Message}";
+        }
         finally
         {
             IsTuning = false;
@@ -2393,6 +2632,7 @@ public sealed class MainViewModel : ObservableObject
         };
 
         StatusDetail = _service.StatusDetail ?? string.Empty;
+        RefreshVerification();
         NetworkName = _service.Network.DisplayName;
         IspSummary = _service.Detection?.Summary ?? _service.Isp.DisplayName;
         StrategySummary = _service.State == ProtectionState.Stopped ? "-" : _service.Strategy.Name;
@@ -2432,6 +2672,160 @@ public sealed class MainViewModel : ObservableObject
         StateChanged?.Invoke();
     }
 
+    /// <summary>
+    /// Surfaces a settings write that did not land, and clears the banner when one does.
+    /// </summary>
+    /// <remarks>
+    /// The service only raises this when the answer changes, so a disk that stays full
+    /// produces one banner rather than a new one on every timer tick.
+    /// </remarks>
+    private void OnSaveStatusChanged(ConfigSaveResult? failure)
+    {
+        if (!_dispatcher.CheckAccess())
+        {
+            _dispatcher.BeginInvoke(() => OnSaveStatusChanged(failure));
+            return;
+        }
+
+        SettingsSaveWarning = failure?.Describe() ?? string.Empty;
+        SettingsSaveFailed = failure is not null;
+    }
+
+    private string _settingsSaveWarning = string.Empty;
+
+    /// <summary>Why the last settings write did not land, or empty when it did.</summary>
+    public string SettingsSaveWarning
+    {
+        get => _settingsSaveWarning;
+        private set => Set(ref _settingsSaveWarning, value);
+    }
+
+    private bool _settingsSaveFailed;
+
+    /// <summary>Whether the "applied but not saved" banner and its retry button are shown.</summary>
+    public bool SettingsSaveFailed
+    {
+        get => _settingsSaveFailed;
+        private set
+        {
+            if (Set(ref _settingsSaveFailed, value))
+            {
+                RetrySaveCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Writes the settings again, on the user's request.
+    /// </summary>
+    /// <remarks>
+    /// The point of the banner: "kaydedilemedi" with no way to act on it is a notification,
+    /// not a recovery. Once the user has closed whatever held the file - or freed some
+    /// space - one button puts their settings on disk without them having to set each one
+    /// again.
+    /// </remarks>
+    private void RetrySettingsSave()
+    {
+        if (_service.RetrySave())
+        {
+            SettingsSaveWarning = string.Empty;
+            SettingsSaveFailed = false;
+            return;
+        }
+
+        SettingsSaveWarning = _service.LastSaveFailure?.Describe()
+            ?? "Ayarlar hâlâ kaydedilemiyor.";
+    }
+
+    private string _diagnosticReportStatus = string.Empty;
+
+    /// <summary>What the last "save a report" attempt did, or empty before the first one.</summary>
+    public string DiagnosticReportStatus
+    {
+        get => _diagnosticReportStatus;
+        private set => Set(ref _diagnosticReportStatus, value);
+    }
+
+    private string _diagnosticReportSeverity = string.Empty;
+
+    /// <summary>"ok", "warn" or empty. Never the only thing carrying the meaning.</summary>
+    public string DiagnosticReportSeverity
+    {
+        get => _diagnosticReportSeverity;
+        private set => Set(ref _diagnosticReportSeverity, value);
+    }
+
+    /// <summary>
+    /// Collects everything a support conversation needs into one archive.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The snapshot is taken the moment the button is pressed, before the file dialog
+    /// opens, so the report describes the state the user was looking at when they decided
+    /// to save it rather than whatever it had drifted to while they chose a folder.
+    /// </para>
+    /// <para>
+    /// Nothing is measured. No probe, no load test, no connection change: this reads what
+    /// is already known. And nothing is uploaded - the archive is written where the user
+    /// put it and goes no further.
+    /// </para>
+    /// </remarks>
+    private async Task SaveDiagnosticReportAsync()
+    {
+        DiagnosticReportSeverity = string.Empty;
+        DiagnosticReportStatus = "Anlık durum toplanıyor…";
+
+        DiagnosticSnapshot snapshot;
+        try
+        {
+            snapshot = _service.CaptureDiagnostics();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Tanı raporu hazırlanamadı", ex);
+            DiagnosticReportSeverity = "error";
+            DiagnosticReportStatus = $"Rapor hazırlanamadı: {ex.Message}";
+            return;
+        }
+
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Tanı raporunu kaydet",
+            FileName = $"dpibypass-tani-{DateTime.Now:yyyyMMdd-HHmm}.zip",
+            DefaultExt = ".zip",
+            Filter = "Sıkıştırılmış arşiv (*.zip)|*.zip",
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            OverwritePrompt = true,
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            // The user's own decision, not a failure.
+            DiagnosticReportSeverity = string.Empty;
+            DiagnosticReportStatus = "Kaydetme iptal edildi.";
+            return;
+        }
+
+        DiagnosticReportStatus = "Rapor yazılıyor…";
+        var result = await DiagnosticReportWriter
+            .WriteAsync(dialog.FileName, snapshot)
+            .ConfigureAwait(true);
+
+        if (!result.Saved)
+        {
+            DiagnosticReportSeverity = "error";
+            DiagnosticReportStatus = result.Failure ?? "Rapor kaydedilemedi.";
+            AppLog.Warning($"Tanı raporu kaydedilemedi: {result.Failure}");
+            return;
+        }
+
+        DiagnosticReportSeverity = "ok";
+        DiagnosticReportStatus =
+            $"Rapor kaydedildi: {System.IO.Path.GetFileName(result.Path)} · {snapshot.MaskedValues} tanımlayıcı değer maskelendi. "
+            + "Dosya yalnızca bu bilgisayarda; hiçbir yere gönderilmedi.";
+        AppLog.Info($"Tanı raporu kaydedildi ({snapshot.MaskedValues} değer maskelendi).");
+    }
+
     private void OnDomainLearned(string domain)
     {
         if (!_dispatcher.CheckAccess())
@@ -2446,6 +2840,117 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public event Action? StateChanged;
+
+    private string _verificationSummary = "Koruma kapalıyken doğrulama yapılmaz.";
+
+    /// <summary>
+    /// Whether the target site is actually reachable, as its own fact.
+    /// </summary>
+    /// <remarks>
+    /// "Koruma etkin" means a driver handle is open and a strategy is installed. It says
+    /// nothing about whether discord.com answers, and showing the two as one green state
+    /// is how somebody ends up staring at a reassuring window while nothing loads. This
+    /// line is separate, and it carries the time of the last check that really got
+    /// through - so "verified" can be read as "verified a moment ago" or "verified twenty
+    /// minutes ago and not since".
+    /// </remarks>
+    public string VerificationSummary
+    {
+        get => _verificationSummary;
+        private set => Set(ref _verificationSummary, value);
+    }
+
+    private string _verificationSeverity = string.Empty;
+
+    /// <summary>"ok" / "warn" / "error" / "", alongside the wording rather than instead of it.</summary>
+    public string VerificationSeverity
+    {
+        get => _verificationSeverity;
+        private set => Set(ref _verificationSeverity, value);
+    }
+
+    private void RefreshVerification()
+    {
+        if (_service.State == ProtectionState.Stopped)
+        {
+            VerificationSummary = "Koruma kapalıyken doğrulama yapılmaz.";
+            VerificationSeverity = string.Empty;
+            return;
+        }
+
+        if (_service.LastProbe is not { } probe)
+        {
+            VerificationSummary = "discord.com henüz doğrulanmadı.";
+            VerificationSeverity = "warn";
+            return;
+        }
+
+        var verified = _service.LastVerifiedAt;
+
+        if (probe.Success)
+        {
+            VerificationSummary =
+                $"discord.com erişilebilir · {probe.Elapsed.TotalMilliseconds:F0} ms · "
+                + $"son başarılı kontrol {Ago(verified)}";
+            VerificationSeverity = "ok";
+            return;
+        }
+
+        // A failing check with an earlier success behind it is a different situation from
+        // one that has never worked, and the difference is what tells somebody whether
+        // this just broke or never started.
+        VerificationSummary = verified is null
+            ? $"discord.com doğrulanamadı · {ProtectionService.DescribeOutcome(probe.Outcome)} · bu oturumda hiç erişilemedi"
+            : $"discord.com şu anda erişilemiyor · {ProtectionService.DescribeOutcome(probe.Outcome)} · "
+                + $"son başarılı kontrol {Ago(verified)}";
+        VerificationSeverity = "error";
+    }
+
+    /// <summary>How long ago something happened, in words rather than a bare timestamp.</summary>
+    private static string Ago(DateTimeOffset? moment)
+    {
+        if (moment is not { } value)
+        {
+            return "yok";
+        }
+
+        var elapsed = DateTimeOffset.Now - value;
+        return elapsed switch
+        {
+            { TotalSeconds: < 60 } => $"az önce ({value:HH:mm:ss})",
+            { TotalMinutes: < 60 } => $"{(int)elapsed.TotalMinutes} dk önce ({value:HH:mm})",
+            { TotalHours: < 24 } => $"{(int)elapsed.TotalHours} sa önce ({value:HH:mm})",
+            _ => $"{value:dd.MM.yyyy HH:mm}",
+        };
+    }
+
+    /// <summary>How often the counters are re-read while the window is on screen.</summary>
+    private static readonly TimeSpan VisibleRefreshInterval = TimeSpan.FromSeconds(2);
+
+    /// <summary>How often they are re-read while the window is in the notification area.</summary>
+    private static readonly TimeSpan HiddenRefreshInterval = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Tells the view model whether anybody is looking at it.
+    /// </summary>
+    /// <remarks>
+    /// Only the presentation counters slow down: formatting packet totals and a DNS
+    /// summary for a window in the notification area is work whose entire output is
+    /// discarded. Protection, the network watch, the DNS proxy and everything the user
+    /// asked for run exactly as before - this timer draws nothing but text. Coming back
+    /// re-reads immediately, so the window is current the moment it is on screen rather
+    /// than up to one interval stale.
+    /// </remarks>
+    public void SetPresentationActive(bool active)
+    {
+        _refreshTimer.Interval = active ? VisibleRefreshInterval : HiddenRefreshInterval;
+
+        if (active)
+        {
+            RefreshCounters();
+            OnServiceChanged();
+        }
+    }
 
     private void RefreshCounters()
     {
@@ -2466,24 +2971,80 @@ public sealed class MainViewModel : ObservableObject
         };
     }
 
+    /// <summary>
+    /// Records a host the engine rewrote, batching the way the log lines do.
+    /// </summary>
+    /// <remarks>
+    /// This is raised from the packet path, once per rewritten handshake, and it used to
+    /// post its own dispatcher operation every time. Opening a busy page is hundreds of
+    /// handshakes in a second or two, which is hundreds of operations queued ahead of
+    /// layout - the same starvation the log lines were already batched to avoid.
+    /// </remarks>
     private void OnHostRewritten(string host, string strategyId)
     {
-        if (!_dispatcher.CheckAccess())
-        {
-            _dispatcher.BeginInvoke(() => OnHostRewritten(host, strategyId));
-            return;
-        }
+        _pendingHosts.Enqueue($"{DateTime.Now:HH:mm:ss}  {host}");
 
-        var line = $"{DateTime.Now:HH:mm:ss}  {host}";
-        if (ProtectedHosts.Contains(line))
+        if (Interlocked.Exchange(ref _hostDrainQueued, 1) == 1)
         {
             return;
         }
 
-        ProtectedHosts.Insert(0, line);
+        try
+        {
+            _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainHosts));
+        }
+        catch (Exception)
+        {
+            // The dispatcher is shutting down. This runs on the packet path, and throwing
+            // from there over a list of hostnames nobody will read again would take the
+            // engine thread down with it.
+            Interlocked.Exchange(ref _hostDrainQueued, 0);
+        }
+    }
+
+    private void DrainHosts()
+    {
+        Interlocked.Exchange(ref _hostDrainQueued, 0);
+
+        var added = 0;
+        while (added < LogDrainBudget && _pendingHosts.TryDequeue(out var line))
+        {
+            added++;
+            if (ProtectedHosts.Contains(line))
+            {
+                continue;
+            }
+
+            ProtectedHosts.Insert(0, line);
+        }
+
         while (ProtectedHosts.Count > 100)
         {
             ProtectedHosts.RemoveAt(ProtectedHosts.Count - 1);
+        }
+
+        // Anything past the budget is picked up by the next pass rather than by this one.
+        if (!_pendingHosts.IsEmpty)
+        {
+            RequeueHostDrain();
+        }
+    }
+
+    private void RequeueHostDrain()
+    {
+        if (Interlocked.Exchange(ref _hostDrainQueued, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainHosts));
+        }
+        catch (Exception)
+        {
+            // Shutting down; the remaining hostnames are a display backlog.
+            Interlocked.Exchange(ref _hostDrainQueued, 0);
         }
     }
 
@@ -2515,6 +3076,16 @@ public sealed class MainViewModel : ObservableObject
     {
         _pendingLogLines.Enqueue(entry.ToString());
 
+        // Bounded: the page shows the last few hundred lines, so holding thousands of
+        // older ones to drop them on arrival is memory spent to no effect. The file keeps
+        // everything, and the count of what the UI missed is shown with the log.
+        if (Interlocked.Increment(ref _pendingLogCount) > PendingLogCapacity
+            && _pendingLogLines.TryDequeue(out _))
+        {
+            Interlocked.Decrement(ref _pendingLogCount);
+            Interlocked.Increment(ref _droppedLogLines);
+        }
+
         // Already queued: the pending drain will pick this line up as well.
         if (Interlocked.Exchange(ref _logDrainQueued, 1) == 1)
         {
@@ -2539,14 +3110,39 @@ public sealed class MainViewModel : ObservableObject
         // rather than being left in the queue with nobody coming back for it.
         Interlocked.Exchange(ref _logDrainQueued, 0);
 
-        while (_pendingLogLines.TryDequeue(out var line))
+        var added = 0;
+        while (added < LogDrainBudget && _pendingLogLines.TryDequeue(out var line))
         {
-            LogLines.Add(line);
+            Interlocked.Decrement(ref _pendingLogCount);
+            added++;
+            AppendLogLine(line);
         }
 
         while (LogLines.Count > LogCapacity)
         {
             LogLines.RemoveAt(0);
+            if (_visibleLogLines.Count > 0)
+            {
+                _visibleLogLines.RemoveAt(0);
+            }
+        }
+
+        RefreshLogFilter(rebuild: false);
+
+        // Whatever did not fit in this pass gets its own, so the dispatcher gets a turn
+        // at input and rendering in between.
+        if (!_pendingLogLines.IsEmpty && Interlocked.Exchange(ref _logDrainQueued, 1) == 0)
+        {
+            try
+            {
+                _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainLogLines));
+            }
+            catch (Exception)
+            {
+                // Shutting down. The lines are already in the file; what is left in the
+                // queue is a display backlog nobody will see.
+                Interlocked.Exchange(ref _logDrainQueued, 0);
+            }
         }
     }
 
@@ -2654,12 +3250,25 @@ public sealed class MainViewModel : ObservableObject
     /// owned by another process, so a refusal is logged rather than thrown - the log
     /// file is untouched either way.
     /// </summary>
+    /// <summary>
+    /// Copies exactly what the list is showing, and says so.
+    /// </summary>
+    /// <remarks>
+    /// With a level filter and a search box in front of the list, "copy" has two possible
+    /// meanings and only one of them is what the user is looking at. It copies the visible
+    /// rows, and the log line it writes afterwards names the filter that was applied, so
+    /// nobody pastes a filtered extract into a bug report believing it is the whole log.
+    /// </remarks>
     private void CopyLogToClipboard()
     {
         try
         {
-            System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, LogLines));
-            AppLog.Info($"Günlük görünümündeki {LogLines.Count} satır panoya kopyalandı.");
+            System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, VisibleLogLines));
+            AppLog.Info(
+                $"Günlük görünümündeki {VisibleLogLines.Count} satır panoya kopyalandı "
+                + $"(süzgeç: {SelectedLogLevel.Label}"
+                + (string.IsNullOrWhiteSpace(_logSearch) ? string.Empty : $", arama: '{_logSearch.Trim()}'")
+                + ").");
         }
         catch (Exception ex)
         {
@@ -2675,12 +3284,92 @@ public sealed class MainViewModel : ObservableObject
     private void ClearLogView()
     {
         _pendingLogLines.Clear();
+        Interlocked.Exchange(ref _pendingLogCount, 0);
+        Interlocked.Exchange(ref _droppedLogLines, 0);
         LogLines.Clear();
+        _visibleLogLines.Clear();
+        Raise(nameof(LogSummary));
+    }
+
+    /// <summary>Adds one line to the backing list, and to the view when it passes the filter.</summary>
+    private void AppendLogLine(string line)
+    {
+        LogLines.Add(line);
+
+        if (Matches(line))
+        {
+            _visibleLogLines.Add(line);
+        }
+    }
+
+    /// <summary>
+    /// Whether a line survives the level filter and the search box.
+    /// </summary>
+    /// <remarks>
+    /// The level is read from the single letter the formatter puts in brackets, which is
+    /// the only structure a rendered line has. A line that does not carry one - a wrapped
+    /// stack trace, for instance - always passes the level filter, because hiding the
+    /// second half of an exception while showing its first line is worse than showing both.
+    /// </remarks>
+    private bool Matches(string line)
+    {
+        if (SelectedLogLevel.Minimum > LogLevel.Debug && LevelOf(line) is { } level && level < SelectedLogLevel.Minimum)
+        {
+            return false;
+        }
+
+        var search = _logSearch;
+        return string.IsNullOrWhiteSpace(search)
+            || line.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static LogLevel? LevelOf(string line)
+    {
+        var open = line.IndexOf('[');
+        if (open < 0 || open + 2 >= line.Length || line[open + 2] != ']')
+        {
+            return null;
+        }
+
+        return line[open + 1] switch
+        {
+            'D' => LogLevel.Debug,
+            'I' => LogLevel.Info,
+            'W' => LogLevel.Warning,
+            'E' => LogLevel.Error,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Brings the visible list back in step with the filter.
+    /// </summary>
+    /// <param name="rebuild">
+    /// True when the filter itself changed, which is the only case that needs the whole
+    /// list walked. A drain passes false: it has already appended the lines that matched,
+    /// and only the summary line needs refreshing.
+    /// </param>
+    private void RefreshLogFilter(bool rebuild)
+    {
+        if (rebuild)
+        {
+            _visibleLogLines.Clear();
+            foreach (var line in LogLines)
+            {
+                if (Matches(line))
+                {
+                    _visibleLogLines.Add(line);
+                }
+            }
+        }
+
+        Raise(nameof(LogSummary));
     }
 
     public void Detach()
     {
         _refreshTimer.Stop();
+        _service.SaveStatusChanged -= OnSaveStatusChanged;
         _service.Changed -= OnServiceChanged;
         _service.HostRewritten -= OnHostRewritten;
         _service.TuningProgress -= OnTuningProgress;

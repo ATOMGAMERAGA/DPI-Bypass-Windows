@@ -1,6 +1,8 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -43,7 +45,13 @@ public partial class MainWindow : Window
             _theme.PersonalisationChanged += OnPersonalisationChanged;
         }
 
-        ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged += OnLogLinesChanged;
+        ((INotifyCollectionChanged)_viewModel.VisibleLogLines).CollectionChanged += OnLogLinesChanged;
+
+        // Hidden in the notification area, the only thing the counter timer produces is
+        // formatted text nobody can see. Protection and the network watch are untouched -
+        // this covers presentation and nothing else - and coming back re-reads at once so
+        // the window is current the moment it is on screen.
+        IsVisibleChanged += OnWindowVisibilityChanged;
 
         Loaded += OnWindowLoaded;
         Readiness = WindowReadiness.Created;
@@ -377,7 +385,8 @@ public partial class MainWindow : Window
 
         Loaded -= OnWindowLoaded;
         CompositionTarget.Rendering -= OnComposition;
-        ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged -= OnLogLinesChanged;
+        ((INotifyCollectionChanged)_viewModel.VisibleLogLines).CollectionChanged -= OnLogLinesChanged;
+        IsVisibleChanged -= OnWindowVisibilityChanged;
     }
 
     private void OnThemeChanged(bool isDark)
@@ -419,6 +428,44 @@ public partial class MainWindow : Window
     /// user's own action, and the next batch then follows again.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Scrolls the settings page to the section a jump link names.
+    /// </summary>
+    /// <remarks>
+    /// The Traffic Guard section is inside an expander that may be collapsed, and bringing
+    /// a collapsed element into view scrolls to wherever its zero-height placeholder sits.
+    /// So the expander is opened first, and the scroll is queued behind the layout pass
+    /// that opening it causes - otherwise the position is measured against a page that has
+    /// not grown yet.
+    /// </remarks>
+    private void OnJumpToSection(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: FrameworkElement target })
+        {
+            return;
+        }
+
+        for (var ancestor = VisualTreeHelper.GetParent(target); ancestor is not null; ancestor = VisualTreeHelper.GetParent(ancestor))
+        {
+            if (ancestor is Expander { IsExpanded: false } expander)
+            {
+                expander.IsExpanded = true;
+            }
+        }
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            target.BringIntoView();
+
+            // Focus follows the scroll, so a keyboard user lands in the section rather
+            // than having the page move under a caret that is still where it was.
+            target.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
+        }));
+    }
+
+    private void OnWindowVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
+        => _viewModel.SetPresentationActive(e.NewValue is true);
+
     private void OnLogLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (e.Action != NotifyCollectionChangedAction.Add || _scrollPending)

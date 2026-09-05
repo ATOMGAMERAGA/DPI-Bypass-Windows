@@ -1674,6 +1674,10 @@ public partial class App : Application
             _theme?.Dispose();
             _instance?.Dispose();
             AppLog.Info("Kapatıldı.");
+
+            // The file writer batches, so the closing lines - which are the ones that
+            // explain why the app is going away - are still queued at this point.
+            AppLog.Shutdown();
             Shutdown(_exitCode);
         }
     }
@@ -1709,6 +1713,11 @@ public partial class App : Application
         StartExternalDnsRecovery();
         StopServiceSynchronously(FatalRecoveryBudget);
         TryRestorePendingDnsAfterFatal(FatalRecoveryBudget);
+
+        // The crash itself is the last thing worth reading in the file, so the queued
+        // batch is flushed before the runtime finishes tearing the process down. Short
+        // leash like everything else here.
+        AppLog.Shutdown();
     }
 
     /// <summary>

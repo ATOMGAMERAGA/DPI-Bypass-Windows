@@ -43,6 +43,20 @@ public sealed record ProbeResult(
 }
 
 /// <summary>
+/// The scoring function the tuner optimises against.
+/// </summary>
+/// <remarks>
+/// One method wide, and it exists so the sweep can be driven in a test without a socket:
+/// the behaviour worth pinning - which candidate wins, what a superseded sweep installs,
+/// what a sweep that finds nothing leaves behind - is decided entirely by the sequence of
+/// results, not by how they were obtained.
+/// </remarks>
+public interface IConnectivityProbe
+{
+    Task<ProbeResult> ProbeAsync(string host, bool fetchHttp = false, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Verifies a site end to end: encrypted DNS, TCP connect, real TLS handshake with
 /// the hostname in SNI, then an HTTP request.
 /// </summary>
@@ -52,7 +66,7 @@ public sealed record ProbeResult(
 /// box answers on the site's behalf. That makes this both the "is it working?"
 /// button and the scoring function the auto-tuner optimises.
 /// </remarks>
-public sealed class ConnectivityTester
+public sealed class ConnectivityTester : IConnectivityProbe
 {
     /// <summary>The site the user cares about, and what the tuner scores against.</summary>
     public const string PrimaryHost = "discord.com";

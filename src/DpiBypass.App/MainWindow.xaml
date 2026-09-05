@@ -141,7 +141,23 @@
                                                Foreground="{DynamicResource AppTextPrimaryBrush}" />
                                     <TextBlock Text="{Binding StatusDetail}"
                                                Style="{StaticResource CaptionStyle}"
-                                               Margin="0,3,0,0" />
+                                               Margin="0,3,0,0"
+                                               TextWrapping="Wrap" />
+
+                                    <!-- Its own line, because "the engine is running" and
+                                         "the site actually answers" are two different
+                                         facts and one green headline for both is how a
+                                         reassuring window ends up in front of a
+                                         connection that is not working. The time of the
+                                         last check that really got through is part of it. -->
+                                    <TextBlock Text="{Binding VerificationSummary, Mode=OneWay}"
+                                               Tag="{Binding VerificationSeverity, Mode=OneWay}"
+                                               Style="{StaticResource SeverityStatusLineStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap"
+                                               AutomationProperties.Name="Hedef site doğrulaması"
+                                               AutomationProperties.LiveSetting="Polite" />
+
                                     <TextBlock Style="{StaticResource CaptionStyle}" Margin="0,10,0,0">
                                         <Run Text="Kapsam:" />
                                         <Run Text="{Binding SelectedScope.Title, Mode=OneWay}" FontWeight="SemiBold" />
@@ -164,6 +180,43 @@
                                                  Background="{DynamicResource AppSubtleBackgroundBrush}"
                                                  Foreground="{DynamicResource AppAccentBrush}" />
                                 </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <!-- Applied, but not written down. The setting is doing what the
+                             user asked for this session; the file on disk is not, and the
+                             app used to say nothing at all about the difference. The icon
+                             carries the meaning as well as the colour. -->
+                        <Border Style="{StaticResource NoticeCardStyle}"
+                                Margin="0,0,0,12"
+                                AutomationProperties.Name="Ayar kaydetme uyarısı"
+                                Visibility="{Binding SettingsSaveFailed, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Path Grid.Column="0"
+                                      Data="{StaticResource IconWarningGeometry}"
+                                      Width="18"
+                                      Height="18"
+                                      Stretch="Uniform"
+                                      Margin="0,0,12,0"
+                                      VerticalAlignment="Center"
+                                      Fill="{DynamicResource AppWarningBrush}" />
+                                <TextBlock Grid.Column="1"
+                                           Style="{StaticResource NoticeTextStyle}"
+                                           VerticalAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           Text="{Binding SettingsSaveWarning, Mode=OneWay}" />
+                                <Button Grid.Column="2"
+                                        Content="Yeniden kaydet"
+                                        MinWidth="130"
+                                        Margin="12,0,0,0"
+                                        VerticalAlignment="Center"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"
+                                        Command="{Binding RetrySaveCommand}" />
                             </Grid>
                         </Border>
 
@@ -596,6 +649,37 @@
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
                     <StackPanel>
+                        <!-- This page is long enough that the three sections people come
+                             here for - ping, the send-rate cap, Vodafone mode - are below
+                             the fold on a 1366x768 screen at 125%. These jump to them
+                             rather than adding another level of navigation to learn. They
+                             are buttons, so they are in the tab order and can be reached
+                             from the keyboard like everything else. -->
+                        <WrapPanel Margin="0,0,0,12" AutomationProperties.Name="Bölüme git">
+                            <TextBlock Text="Bölüme git:"
+                                       Style="{StaticResource CaptionStyle}"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,10,8" />
+                            <Button Content="Ping düşürme"
+                                    Margin="0,0,8,8"
+                                    MinWidth="130"
+                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                    Tag="{Binding ElementName=LatencySection}"
+                                    Click="OnJumpToSection" />
+                            <Button Content="Gönderim sınırı"
+                                    Margin="0,0,8,8"
+                                    MinWidth="140"
+                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                    Tag="{Binding ElementName=TrafficGuardSection}"
+                                    Click="OnJumpToSection" />
+                            <Button Content="Vodafone Sınırsız Modu"
+                                    Margin="0,0,8,8"
+                                    MinWidth="190"
+                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                    Tag="{Binding ElementName=VodafoneSection}"
+                                    Click="OnJumpToSection" />
+                        </WrapPanel>
+
                         <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Alan adı çözümleme" Style="{StaticResource SectionTitleStyle}" />
@@ -667,7 +751,7 @@
                              button, the numbers, one sentence about them, and only then
                              the technical surface. Everything a developer needs and a
                              user does not lives under "Ölçüm ayrıntıları". -->
-                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="LatencySection" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
                             <StackPanel>
 
                                 <!-- 1. Title, and the two states that are not the same
@@ -879,6 +963,60 @@
                                                    Style="{StaticResource HintStyle}"
                                                    Margin="0,2,0,0"
                                                    Visibility="{Binding LatencyStageData, Converter={StaticResource EmptyToCollapsedConverter}}" />
+
+                                        <!-- Measured, unlike a percentage: a run's total
+                                             depends on the adapter and on how noisy the
+                                             link is, so elapsed time is the only honest
+                                             answer to "how long has this been going". -->
+                                        <TextBlock Text="{Binding LatencyElapsed}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,2,0,0"
+                                                   AutomationProperties.LiveSetting="Polite"
+                                                   Visibility="{Binding LatencyElapsed, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Where the run has got to. Each row carries a word for
+                                     its state as well as a colour, so the sequence reads
+                                     the same with colour vision differences or in a
+                                     screen reader. -->
+                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,12,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Ölçüm adımları"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,0,0,6" />
+                                        <ItemsControl ItemsSource="{Binding LatencyFlow}"
+                                                      AutomationProperties.Name="Ölçüm adımları">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,3,0,3">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0"
+                                                                   Text="{Binding Ordinal}"
+                                                                   Style="{StaticResource HintStyle}"
+                                                                   MinWidth="18"
+                                                                   VerticalAlignment="Top" />
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding StateLabel}"
+                                                                   Style="{StaticResource SeverityStatusLineStyle}"
+                                                                   Tag="{Binding Severity}"
+                                                                   MinWidth="96"
+                                                                   VerticalAlignment="Top" />
+                                                        <TextBlock Grid.Column="2"
+                                                                   Style="{StaticResource CaptionStyle}"
+                                                                   TextWrapping="Wrap">
+                                                            <Run Text="{Binding Title, Mode=OneWay}" FontWeight="SemiBold" />
+                                                            <Run Text=" · " />
+                                                            <Run Text="{Binding Detail, Mode=OneWay}" />
+                                                        </TextBlock>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                     </StackPanel>
                                 </Border>
 
@@ -1054,7 +1192,8 @@
                                         <!-- Traffic Guard: the one intervention that moves
                                              loaded latency, and the one that costs upload
                                              speed. Both halves are stated. -->
-                                        <TextBlock Text="Gönderim sınırı (Traffic Guard)"
+                                        <TextBlock x:Name="TrafficGuardSection"
+                                                   Text="Gönderim sınırı (Traffic Guard)"
                                                    Style="{StaticResource SectionTitleStyle}"
                                                    Margin="0,16,0,6" />
                                         <TextBlock Style="{StaticResource CaptionStyle}"
@@ -1142,7 +1281,7 @@
                              Same shape: what network you are on, what the mode is doing
                              here, one button, then the findings as cards. The raw report
                              lives under "Teknik ayrıntılar" and is never parsed. -->
-                        <Border Style="{StaticResource CardStyle}">
+                        <Border x:Name="VodafoneSection" Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <Grid>
                                     <Grid.ColumnDefinitions>
@@ -1412,7 +1551,9 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0">
                             <TextBlock Text="Günlük" Style="{StaticResource PageTitleStyle}" />
-                            <TextBlock Text="Son 500 satır. Görünümü temizlemek dosyadaki kayıtları silmez." Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding LogSummary, Mode=OneWay}"
+                                       Style="{StaticResource CaptionStyle}"
+                                       TextWrapping="Wrap" />
                         </StackPanel>
                         <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
                             <Button Content="Kopyala"
@@ -1427,18 +1568,83 @@
                                     Command="{Binding ClearLogCommand}" />
                             <Button Content="Klasörü aç"
                                     MinWidth="130"
+                                    Margin="0,0,8,0"
                                     Style="{StaticResource SecondaryActionButtonStyle}"
                                     Command="{Binding OpenLogFolderCommand}" />
+                            <!-- One action instead of collecting the same evidence by
+                                 hand from four screens. Read-only: it measures nothing
+                                 and changes no setting. -->
+                            <Button Content="Tanı raporu kaydet"
+                                    MinWidth="170"
+                                    Style="{StaticResource SecondaryActionButtonStyle}"
+                                    AutomationProperties.Name="Tanı raporu kaydet"
+                                    AutomationProperties.HelpText="Durumu, ölçümleri ve günlük kesitini maskelenmiş bir arşive yazar. Hiçbir yere gönderilmez."
+                                    ToolTip="Durum, ölçümler ve günlük kesiti tek bir ZIP dosyasına yazılır. Ağ adı, donanım ve IP adresleri takma adlarla değiştirilir; dosya bu bilgisayarda kalır."
+                                    Command="{Binding SaveDiagnosticReportCommand}" />
                         </WrapPanel>
                     </Grid>
 
-                    <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="6">
-                        <ListBox x:Name="LogList"
-                                 Style="{StaticResource MonospaceListStyle}"
-                                 ItemContainerStyle="{StaticResource DomainRowStyle}"
-                                 ItemsSource="{Binding LogLines}"
-                                 ScrollViewer.HorizontalScrollBarVisibility="Auto" />
-                    </Border>
+                    <TextBlock Grid.Row="0"
+                               VerticalAlignment="Bottom"
+                               Margin="0,0,0,-4"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource SeverityStatusLineStyle}"
+                               Text="{Binding DiagnosticReportStatus, Mode=OneWay}"
+                               Tag="{Binding DiagnosticReportSeverity, Mode=OneWay}" />
+
+                    <Grid Grid.Row="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Level and search narrow the same list the copy button copies,
+                             so what is on screen and what reaches the clipboard agree. -->
+                        <Grid Grid.Row="0" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Grid.Column="0"
+                                       Text="Düzey"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,0"
+                                       Style="{StaticResource CaptionStyle}" />
+                            <ComboBox Grid.Column="1"
+                                      infra:NestedScrolling.IgnoreWheel="True"
+                                      x:Name="LogLevelFilter"
+                                      MinWidth="160"
+                                      Margin="0,0,16,0"
+                                      AutomationProperties.Name="Günlük düzeyi süzgeci"
+                                      ItemsSource="{Binding LogLevelOptions}"
+                                      DisplayMemberPath="Label"
+                                      SelectedItem="{Binding SelectedLogLevel, Mode=TwoWay}" />
+
+                            <TextBlock Grid.Column="2"
+                                       Text="Ara"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,0"
+                                       Style="{StaticResource CaptionStyle}" />
+                            <TextBox Grid.Column="3"
+                                     x:Name="LogSearchBox"
+                                     MinWidth="180"
+                                     AutomationProperties.Name="Günlükte ara"
+                                     AutomationProperties.HelpText="Görünen satırları metne göre süzer"
+                                     Text="{Binding LogSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, Delay=200}" />
+                        </Grid>
+
+                        <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="6">
+                            <ListBox x:Name="LogList"
+                                     Style="{StaticResource MonospaceListStyle}"
+                                     ItemContainerStyle="{StaticResource DomainRowStyle}"
+                                     ItemsSource="{Binding VisibleLogLines}"
+                                     AutomationProperties.Name="Günlük satırları"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+                        </Border>
+                    </Grid>
                 </Grid>
             </TabItem>
         </TabControl>
