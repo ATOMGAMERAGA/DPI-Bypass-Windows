@@ -119,8 +119,26 @@ public sealed class DpiFastPathTests
     /// Four handles, and the reason for each one. A fifth means somebody put another
     /// subsystem on the packet path.
     /// </summary>
+    /// <summary>
+    /// The list of things allowed to hold a WinDivert handle, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>HotspotTtlFix</c> is on it deliberately, and it is the one entry that costs
+    /// something. Rewriting the TTL of outgoing packets cannot be done from user mode
+    /// without seeing them, so while Vodafone Sınırsız Modu is active every outbound
+    /// packet on that one adapter is copied to user mode and back - which is why the rule
+    /// is scoped to a single adapter index and to networks the user registered by hand,
+    /// and why it comes down the moment either stops being true.
+    /// </para>
+    /// <para>
+    /// It does not touch the engine's fast path: it is a separate handle at a lower
+    /// priority with its own filter, and the guard keeps it away from the low-TTL decoy
+    /// packets the strategies depend on.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public void OnlyTheEngineTheSocketWatcherAndTheFlowObserverOpenADivertHandle()
+    public void OnlyFourNamedSubsystemsOpenADivertHandle()
     {
         var callers = new List<string>();
 
@@ -139,7 +157,13 @@ public sealed class DpiFastPathTests
         }
 
         Assert.Equal(
-            ["BypassEngine.cs", "BypassEngine.cs", "ProcessFlowObserver.cs", "ProcessPortMap.cs"],
+            [
+                "BypassEngine.cs",
+                "BypassEngine.cs",
+                "HotspotTtlFix.cs",
+                "ProcessFlowObserver.cs",
+                "ProcessPortMap.cs",
+            ],
             callers.Order(StringComparer.Ordinal));
     }
 

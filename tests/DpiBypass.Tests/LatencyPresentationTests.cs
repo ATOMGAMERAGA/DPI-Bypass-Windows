@@ -386,11 +386,21 @@ public sealed class VodafoneCardTests
         Assert.True(HotspotStatusView.From(Status(enabled: true), legacyResidue: true).LegacyCleanupAvailable);
     }
 
+    /// <summary>
+    /// The ordinary state these tests are about: the mode on and the rewrite running.
+    /// </summary>
+    /// <remarks>
+    /// <c>TtlActive</c> follows the switch by default because a rule that is on for this
+    /// network and not installed is its own headline and its own suggestion - see
+    /// <see cref="VodafoneRewriteCardTests"/> - and it would otherwise mask the wording
+    /// each of these tests is checking.
+    /// </remarks>
     private static HotspotStatus Status(
         bool enabled,
         bool registeredHere = true,
         int registeredNetworks = 1,
-        HotspotDiagnosticResult? result = null) => new(
+        HotspotDiagnosticResult? result = null,
+        bool? ttlActive = null) => new(
         VodafoneModeEnabled: enabled,
         DiagnosticsEnabled: enabled,
         RegisteredHere: registeredHere,
@@ -398,7 +408,8 @@ public sealed class VodafoneCardTests
         NetworkName: "Telefonum",
         AdapterName: "Wi-Fi",
         LegacyCleanedAt: null,
-        LastResult: result);
+        LastResult: result,
+        TtlActive: ttlActive ?? (enabled && registeredHere));
 
     private static HotspotDiagnosticResult Result(
         bool hasIpv6 = true,

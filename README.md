@@ -139,9 +139,50 @@ Arayüzdeki **Kapsam** sekmesinde dört seçenek var:
 
 ## Vodafone Sınırsız Modu
 
-**DNS ve ayarlar → Vodafone Sınırsız Modu** kartı ağ bazlı durum, tercihler,
-tanılama ve kurtarma araçlarını birlikte sunar. Mod Vodafone mobil
-bağlantılarını ve telefon paylaşımını **kalıcı ağ ayarı değiştirmeden** inceler:
+**DNS ve ayarlar → Vodafone Sınırsız Modu** kartı iki işi bir arada yapar:
+kaydettiğiniz ağlarda **giden paketlerin TTL değerini düzeltir**, ve aynı
+bağlantıyı **kalıcı ağ ayarı değiştirmeden** inceler.
+
+### Ne yapıyor
+
+Operatör, paylaşımı paketin TTL değerinden anlar: telefonun kendi trafiği 64 ile
+ulaşırken, paylaşılan bağlantıdan gelen paket telefonda bir kez yönlendirildiği
+için 63 olarak varır. Mod açıkken giden paketler **65** ile yollanır; telefon bir
+düşürünce operatöre tam **64** gider. Linux sürümü aynı işi nftables ile yapar
+(`src/dpibypass/vodafone.py`), Windows sürümü WinDivert ile yapar — sayılar ve
+davranış aynıdır.
+
+Üç koşul birden gerekir, aksi hâlde kural kurulmaz veya kaldırılır:
+
+1. mod açık,
+2. bulunduğunuz ağ **kayıtlı ağlar** listesinde,
+3. bağdaştırıcı belirlenebiliyor.
+
+Ev Wi-Fi'ına geçtiğinizde kural kendiliğinden kalkar — kimsenin hop saymadığı bir
+ağda TTL yeniden yazmak trafiğinizi değiştirir ve size bir şey kazandırmaz.
+
+Kural **çekirdekte kalıcı bir ayar bırakmaz**: modu kapattığınızda, ağ
+değiştirdiğinizde ya da uygulama kapandığında kaldırılır. Windows'ta
+**yönetici hakkı** ve **WinDivert sürücüsü** gerekir; ikisinden biri yoksa kart
+"Aktif" demez, kuralın neden kurulamadığını yazar.
+
+**Maliyeti.** TTL'i kullanıcı alanından yeniden yazmanın tek yolu paketi görmektir:
+mod etkinken **yalnızca o bağdaştırıcının** giden paketleri kullanıcı alanına
+kopyalanıp geri gönderilir. Kural bu yüzden tek bir bağdaştırıcıya ve elle
+kaydettiğiniz ağlara sınırlıdır, ve bu iki koşuldan biri bozulur bozulmaz
+kaldırılır. Gelen trafik hiç görülmez.
+
+**Atlatma yöntemleri korunur.** Sahte paket yöntemleri kasıtlı olarak 3-8 gibi
+düşük TTL kullanır ve paketin erken ölmesi *yöntemin kendisidir*. Bu yüzden
+yalnızca TTL'i **32'nin (koruma eşiği) üstünde** olan paketler yeniden yazılır;
+bir yöntem bu eşiği geçerse derleme testte kırılır.
+
+**Giden IPv6.** Telefon paylaşım yaparken bilgisayara ayrı bir genel IPv6 adresi
+verir; TTL ne olursa olsun operatör aynı aboneden iki farklı kaynak görür. Bu
+yüzden mod etkinken paylaşılan bağdaştırıcıda giden IPv6 varsayılan olarak
+düşürülür. Karttan kapatılabilir.
+
+### Tanılama
 
 Kartı açtığınızda bağlı olduğunuz ağı, modun bu ağdaki durumunu ve tek bir
 **"Bağlantıyı kontrol et"** düğmesini görürsünüz. Sonuç ham rapor metni olarak
@@ -171,8 +212,10 @@ ağın sonucu gösterilmez.
 - Uygulama açıldığında zaten kayıtlı bir ağdaysanız kontrol **bir kez
   kendiliğinden** çalışır (yalnızca "Kayıtlı ağlarda otomatik kontrol" açıkken).
 
-Tanılama kalıcı ağ ayarı veya trafik sınıflandırma kuralı değiştirmez; ölçüm için
-sıradan ICMP, DNS ve bağlantı denetimi paketleri gönderir.
+**"Bağlantıyı kontrol et"** hiçbir şeyi değiştirmez: ölçüm için sıradan ICMP, DNS
+ve bağlantı denetimi paketleri gönderir, kalıcı ağ ayarı veya trafik
+sınıflandırma kuralı oluşturmaz. Değişiklik yapan tek şey yukarıdaki TTL
+kuralıdır.
 
 - IPv4 ve IPv6 adresi var mı, trafik geçiyor mu;
 - ad çözümleme (DNS) çalışıyor mu;
@@ -186,10 +229,10 @@ sıradan ICMP, DNS ve bağlantı denetimi paketleri gönderir.
 ```powershell
 DpiBypass.exe hotspot            # durum
 DpiBypass.exe hotspot diagnose   # bağlantıyı incele
-DpiBypass.exe hotspot cleanup    # yalnız eski TTL alt özelliğini temizle
-DpiBypass.exe vodafone           # Vodafone modu durumu
-DpiBypass.exe vodafone on        # bu ağda güvenli modu etkinleştir
-DpiBypass.exe vodafone off       # modu kapat; kayıtlı ağları koru
+DpiBypass.exe hotspot cleanup    # eski alan adlarını güncel ayarlara taşı
+DpiBypass.exe vodafone           # mod durumu: kural kurulu mu, kaç paket düzeltildi
+DpiBypass.exe vodafone on        # bu ağı kaydet ve TTL kuralını kur
+DpiBypass.exe vodafone off       # kuralı kaldır; kayıtlı ağları koru
 DpiBypass.exe vodafone diagnose  # aynı tanılamayı Vodafone adıyla çalıştır
 ```
 
@@ -197,23 +240,24 @@ DpiBypass.exe vodafone diagnose  # aynı tanılamayı Vodafone adıyla çalışt
 adı, APN ve IP aralığı operatörün kendi sebepleriyle ayarladığı şeylerdir;
 hiçbiri bir aboneliğin neyi kapsadığını göstermez. Uygulama tahmin etmez.
 
-### Geri yüklenen özellik / geri getirilmeyen alt özellik
+### Eski ayar dosyaları
 
-**ÖZELLİK GERİ YÜKLENDİ:** Vodafone Sınırsız Modu adı ve ayar girişi, ağ bazlı
-kayıtlar, durum görünümü, otomatik/elle tanılama, temizleme ve komut satırı
-uyumluluğu.
+Bir ara sürüm (PR #11) TTL yeniden yazımını tamamen kaldırmış, kartın anahtarını
+yalnızca salt-okunur tanılamaya bağlamıştı: Windows'ta mod "açık" görünürken
+pakete hiç dokunulmuyordu, Linux sürümü ise aynı işi yapmaya devam ediyordu.
+Mekanizma geri getirildi ve iki sürüm yeniden aynı davranışı gösteriyor.
 
-**GERİ GETİRİLMEYEN ALT ÖZELLİK:** Paylaşılan trafiği operatörün hotspot
-sayacından gizlemek amacıyla paket TTL'sini yeniden yazma ve giden IPv6'yı
-düşürme. Bu mekanizma etkinleştirilemez ve paket yoluna geri eklenmemiştir.
+Yükseltmede eski alan adları güncel olanlara taşınır: `HotspotTtlFix` →
+`VodafoneModeEnabled`, `HotspotTtlValue` → `VodafoneTtl`, `HotspotDropIPv6` →
+`VodafoneDropIPv6`, `HotspotTtlNetworks` → `VodafoneModeNetworks`. Kendi
+seçtiğiniz TTL ve IPv6 tercihi korunur; kapsam, DNS, başlangıç ve diğer
+tercihlere dokunulmaz. Geçiş idempotenttir. PR #11 tarafından daha önce işlenmiş
+bir dosyanın Vodafone kimliği de bir kez geri yüklenir; kullanıcı daha sonra modu
+kapatırsa tekrar açılmaz. `vodafone off` modu kapatır, `hotspot cleanup` ise
+yalnız eski alan adlarını taşır.
 
-Yükseltmede yalnızca eski TTL/IPv6 paket değiştirme alanları devre dışı bırakılıp
-kaldırılır. Eski ağ kayıtları silinmek yerine güvenli `VodafoneModeNetworks`
-listesine taşınır; kapsam, DNS, başlangıç ve diğer tercihlere dokunulmaz. Geçiş
-idempotenttir. PR #11 tarafından daha önce işlenmiş bir dosyanın Vodafone kimliği
-de bir kez geri yüklenir; kullanıcı daha sonra modu kapatırsa tekrar açılmaz.
-`vodafone off` modu kapatır, `hotspot cleanup` ise yalnız kalmış eski TTL
-alanlarını temizler.
+Kullanılamayacak bir TTL (koruma eşiğinin altında ya da 255 üstünde) elle
+yazılmışsa varsayılana döndürülür ve günlüğe yazılır; mod sessizce çalışmamaz.
 
 ## Ping düşürme (Beta)
 
@@ -574,10 +618,10 @@ DpiBypass.exe domains             # korunan alan adları
 DpiBypass.exe strategies          # yöntem kataloğu
 DpiBypass.exe isps                # operatör profilleri
 DpiBypass.exe enable / disable    # korumayı aç / kapat
-DpiBypass.exe vodafone on / off   # Vodafone güvenli tanılama modunu aç / kapat
+DpiBypass.exe vodafone on / off   # Vodafone Sınırsız Modu'nu aç / kapat
 DpiBypass.exe vodafone diagnose   # Vodafone bağlantısını incele
 DpiBypass.exe hotspot diagnose    # mobil paylaşım bağlantısını incele
-DpiBypass.exe hotspot cleanup     # yalnız eski TTL alt özelliğini temizle
+DpiBypass.exe hotspot cleanup     # eski alan adlarını güncel ayarlara taşı
 DpiBypass.exe latency status                 # düşük-gecikme durumu
 DpiBypass.exe latency status --json          # otomasyon için kararlı şema
 DpiBypass.exe latency on / off               # ölçümlü optimizasyonu aç / kapat
@@ -733,7 +777,9 @@ src/DpiBypass.Core/
   Diagnostics/StrategyTuner.cs        gerçek bağlantı testleriyle yöntem arama
   Diagnostics/BlockedSiteDiscovery.cs yeni engelli siteleri ölçerek bulma
   MobileHotspot/MobileHotspotDiagnostics.cs salt-okunur bağlantı incelemesi
-  MobileHotspot/HotspotLegacyMigration.cs eski ağ kayıtlarını koruyup yalnız TTL alt özelliğini temizleme
+  MobileHotspot/HotspotLegacyMigration.cs eski alan adlarını güncel ayarlara taşıma
+  Vodafone/HotspotTtlFix.cs               tek bağdaştırıcıda giden TTL'yi yeniden yazma
+  Vodafone/TtlFixSettings.cs              TTL, koruma eşiği ve IPv6 seçeneği
   Ipc/ControlServer.cs        uygulama ↔ komut satırı protokolü
 ```
 
@@ -766,7 +812,8 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
 | Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Vodafone Sınırsız Modu** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor ölçülen parçalanmasız sınırı söyler; yalnızca belirti varsa bu sınıra yakın bir MTU denenip yeniden doğrulanmalıdır |
 | Vodafone Sınırsız Modu kayıtlı ağımı tanımıyor | İki sebebi vardı ve ikisi de giderildi: ağ kimliği yalnız koruma çalışırken okunuyordu, ve eşleştirme erişim noktasının MAC adresini içeren parmak izine bakıyordu — telefon paylaşımı her açılışta yeni bir rastgele MAC dağıttığı için kayıt tanınmıyordu. Artık ağ adı da eşleştirilir, kayıt bu oturumun kimliğiyle güncellenir ve kart kayıtlı ağda "Aktif · \<ağ adı\>" der. Hâlâ tanımıyorsa **"Bu ağı kaydet"** ile bir kez kaydedin |
-| "Vodafone sınırsız modu" nereye gitti | **DNS ve ayarlar** içindeki özgün adıyla geri yüklendi. Ağ kayıtları ve tanılama korunur; yalnız hotspot muhasebesini gizlemeye yönelik TTL/IPv6 alt özelliği geri getirilmemiştir |
+| Vodafone Sınırsız Modu açık ama bir şey değişmiyor | Windows'ta modun "açık" olması yetmez; kartta **"Aktif · \<ağ adı\> · TTL 65"** yazmalı ve düzeltilen paket sayacı artmalıdır. "Kurulamadı" diyorsa sebebi hemen yanında yazar: uygulamayı **yönetici olarak** çalıştırın ve kurulum klasöründeki WinDivert dosyalarının yerinde olduğunu doğrulayın. Ağ kayıtlı değilse **"Bu ağı kaydet"** deyin |
+| Linux'ta çalışıyor, Windows'ta çalışmıyordu | Bir ara sürüm Windows tarafında TTL yeniden yazımını tamamen kaldırmış, anahtarı yalnız salt-okunur tanılamaya bağlamıştı. Mekanizma geri getirildi; iki sürüm de aynı TTL (65) ve aynı koruma eşiği (32) ile çalışır |
 | Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 
 ## Yasal not

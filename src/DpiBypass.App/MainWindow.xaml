@@ -1306,6 +1306,17 @@
                                            Margin="0,10,0,0"
                                            TextWrapping="Wrap"
                                            Foreground="{Binding HotspotStatusSeverity, Converter={StaticResource SeverityBrushConverter}}" />
+
+                                <!-- Whether the rule is actually installed, and the packet
+                                     counter that proves it. The switch being on is not the
+                                     same claim, and the card must not let the two blur. -->
+                                <TextBlock Text="{Binding VodafoneRewriteLine}"
+                                           Style="{StaticResource BodyStyle}"
+                                           Margin="0,6,0,0"
+                                           TextWrapping="Wrap"
+                                           AutomationProperties.LiveSetting="Polite"
+                                           Foreground="{Binding VodafoneRewriteSeverity, Converter={StaticResource SeverityBrushConverter}}" />
+
                                 <TextBlock Text="{Binding HotspotCheckedAt}"
                                            Style="{StaticResource HintStyle}"
                                            Margin="0,4,0,0" />
@@ -1403,6 +1414,16 @@
                                                    Margin="26,2,0,0"
                                                    TextWrapping="Wrap"
                                                    Text="Kayıtlı bir ağa geçtiğinizde kontrolü kendiliğinden çalıştırır. Kapalıyken yukarıdaki düğme yine kullanılabilir." />
+
+                                        <CheckBox Content="Giden IPv6 trafiğini kapat"
+                                                  Margin="0,14,0,0"
+                                                  Style="{StaticResource SwitchStyle}"
+                                                  AutomationProperties.Name="Paylaşılan bağdaştırıcıda giden IPv6 trafiğini kapat"
+                                                  IsChecked="{Binding VodafoneDropIPv6, Mode=TwoWay}" />
+                                        <TextBlock Style="{StaticResource HintStyle}"
+                                                   Margin="26,2,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Text="Telefon paylaşımı sırasında bilgisayara ayrı bir IPv6 adresi verilir; TTL ne olursa olsun bu tek başına paylaşımı belli eder. Kapalı bırakmak yalnızca IPv6 gerektiren bir işiniz varsa mantıklıdır." />
                                     </StackPanel>
                                 </Border>
 
@@ -1462,7 +1483,7 @@
                                     <StackPanel>
                                         <TextBlock Style="{StaticResource CaptionStyle}"
                                                    TextWrapping="Wrap"
-                                                   Text="Kontrol sıradan ağ tanılama paketleri gönderir: kalıcı ağ ayarı, paket değişikliği veya trafik sınıflandırma kuralı oluşturmaz. Tarife ve hotspot hakkı ölçümle belirlenemediği için “Bilinmiyor” olarak kalır." />
+                                                   Text="Mod açıkken yalnızca kaydettiğiniz ağın bağdaştırıcısında, giden paketlerin TTL değeri yeniden yazılır; kalıcı bir sistem ayarı değiştirilmez ve mod kapandığında kural kaldırılır. “Bağlantıyı kontrol et” ise sıradan tanılama paketleri gönderir, hiçbir şeyi değiştirmez. Tarife ve hotspot hakkı ölçümle belirlenemediği için “Bilinmiyor” olarak kalır." />
 
                                         <ItemsControl ItemsSource="{Binding HotspotDetails}" Margin="0,12,0,0">
                                             <ItemsControl.ItemTemplate>

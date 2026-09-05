@@ -29,7 +29,7 @@ Denetim; paket yakalama/yeniden yazma, IPv4/IPv6 ayristirma, QUIC siniflandirma,
 | REL-009 | P2 | Yuksek | OPEN | TLS ClientHello birden cok TCP segmentine veya TLS record'una bolunurse dar filtre/yeniden yazma yolu bunu birlestirmiyor. `src/DpiBypass.Core/Engine/BypassEngine.cs:30` | Akis basina sinirli ve zaman asimli reassembly gerekir. Mevcut davranis bu trafikte fail-open'dir. |
 | REL-010 | P2 | Yuksek | OPEN | DNS-over-TCP baglanti basina tek sorgu isliyor; ayni sorgu birlestirme ve istemci EDNS UDP boyutuna gore TC fallback yok. `src/DpiBypass.Core/Dns/DnsProxyServer.cs:237` | RFC 7766 oturum dongusu, in-flight coalescing ve EDNS boyut politikasi ayri degisiklik olarak tasarlanmali. |
 | REL-011 | P2 | Orta | OPEN | Proses atfi temel olarak source-port haritasina dayanir; port yeniden kullanimi/PID yarisi yanlis atif uretebilir. `src/DpiBypass.Core/Engine/ProcessPortMap.cs:1` | Akis 5-tuple ve zaman damgali sahiplik modeli gerekir. |
-| REL-012 | P2 | Yuksek | NOT FIXED | Hotspot TTL yolu checksum sonucunu kullanmiyor. `src/DpiBypass.Core/Vodafone/HotspotTtlFix.cs:207` | Kullanici bu operator/kota ozelliginin gelistirilmemesini istedi; varsayilan kapali ve izole tutulmali. |
+| REL-012 | P2 | Yuksek | FIXED | Hotspot TTL yolu checksum sonucunu kullanmiyor. `src/DpiBypass.Core/Vodafone/HotspotTtlFix.cs` | Ozellik kullanici talebiyle geri getirildi. Checksum yeniden hesaplanamazsa paket geldigi haliyle geri yazilip degistirilmeden iletiliyor; sayac `ChecksumFailures` ile gorunur. IPv4 baslik checksum'i TTL'yi kapsadigi icin aksi hâlde paket bir sonraki atlamada dusurulurdu. |
 
 ## Yanlis Pozitif Kontrolleri
 

@@ -1,11 +1,15 @@
+using System.Text.Json;
+using DpiBypass.Core.Vodafone;
+
 namespace DpiBypass.Core.MobileHotspot;
 
 /// <summary>
-/// A network an older build had the TTL rewrite switched on for.
+/// A network an older build recorded under the pre-Vodafone field names.
 /// </summary>
 /// <remarks>
-/// Kept only so an existing settings file can be recognised and cleaned up. Nothing
-/// reads this list to decide behaviour any more; the migration empties it.
+/// Kept only so a settings file written by one of those builds can still be read. The
+/// migration moves each entry into <see cref="VodafoneModeNetwork"/> and empties this
+/// list; nothing reads it to decide behaviour.
 /// </remarks>
 public sealed record LegacyHotspotNetwork
 {
@@ -22,10 +26,9 @@ public sealed record LegacyHotspotNetwork
 /// A network the user associated with Vodafone Sınırsız Modu.
 /// </summary>
 /// <remarks>
-/// The network identity remains useful for legitimate per-network diagnostics even
-/// though the old TTL packet rewrite is no longer available. Keeping it in a separate
-/// current-model list lets migration remove only the obsolete mechanism without
-/// throwing away the user's remembered networks.
+/// The mode only installs its rule on one of these. Registration is per network because
+/// the rewrite is only meaningful where something is counting hops: on a home router it
+/// changes the user's traffic and buys them nothing.
 /// </remarks>
 public sealed record VodafoneModeNetwork
 {
@@ -66,10 +69,10 @@ public sealed record HotspotMigrationResult
 
     public required bool Changed { get; init; }
 
-    /// <summary>Whether the retired TTL rewrite was switched on in the file.</summary>
+    /// <summary>Whether the mode was switched on under the old field name.</summary>
     public required bool LegacyWasEnabled { get; init; }
 
-    /// <summary>How many legacy registrations were preserved in the safe mode.</summary>
+    /// <summary>How many legacy registrations were carried into the current list.</summary>
     public required int MigratedNetworks { get; init; }
 
     /// <summary>Whether a PR #11-era settings file had its Vodafone identity restored.</summary>
@@ -79,39 +82,35 @@ public sealed record HotspotMigrationResult
 }
 
 /// <summary>
-/// Retires only the old hotspot TTL rewrite while preserving the surrounding feature.
+/// Folds a settings file written under the old field names into the current ones.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Earlier builds shipped a mode that rewrote the TTL of every outgoing packet on a
-/// tethered adapter and dropped its IPv6, so an operator's tethering counter would not
-/// recognise the traffic. That mechanism is gone. What is left here is the part that
-/// still matters to somebody upgrading: making sure a file written by one of those
-/// builds can never switch it back on. The feature identity, remembered networks and
-/// legitimate diagnostics are retained.
+/// The hotspot TTL rewrite predates the Vodafone naming and was stored as
+/// <c>HotspotTtlFix</c>, <c>HotspotTtlNetworks</c>, <c>HotspotTtlValue</c> and
+/// <c>HotspotDropIPv6</c>. One intermediate build then deleted the mechanism outright
+/// and had this pass erase those fields on every load. Both of those files have to end
+/// up in the same place: the mode switched on where the user had switched it on, the
+/// networks they registered still registered, and the TTL and IPv6 choices they made
+/// still theirs.
 /// </para>
 /// <para>
 /// The migration is deterministic and idempotent by construction. It reads only the
-/// legacy fields, migrates reusable state, and running it again on its own output changes
-/// nothing. A separate restoration marker also upgrades settings already processed by
-/// PR #11 without re-enabling the mode after a user later switches it off.
+/// legacy fields, moves what they hold into the current ones, and running it again on
+/// its own output changes nothing. A separate restoration marker also upgrades settings
+/// already processed by the erasing build without re-enabling the mode after a user
+/// later switches it off.
 /// </para>
 /// </remarks>
 public static class HotspotLegacyMigration
 {
     /// <summary>
-    /// Disables the obsolete rewrite and moves reusable network registrations into the
-    /// safe Vodafone mode.
-    /// </summary>
-    /// <param name="state">The legacy fields as loaded, mutated in place.</param>
-    /// <param name="now">Timestamp for the migration marker.</param>
-    /// <summary>
     /// Whether an older build actually left anything behind on this machine.
     /// </summary>
     /// <remarks>
     /// A pure read, so the card can offer the cleanup only when there is something to
-    /// clean rather than showing every user on a clean install a button about a
-    /// sub-feature they never had.
+    /// migrate rather than showing every user on a clean install a button about field
+    /// names they never had.
     /// </remarks>
     public static bool HasResidue(IHotspotLegacyState state)
     {
@@ -123,6 +122,11 @@ public static class HotspotLegacyMigration
             || state.LegacyNetworks.Count > 0;
     }
 
+    /// <summary>
+    /// Moves the legacy fields into the current model and clears them.
+    /// </summary>
+    /// <param name="state">The settings as loaded, mutated in place.</param>
+    /// <param name="now">Timestamp for the migration marker.</param>
     public static HotspotMigrationResult Apply(IHotspotLegacyState state, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(state);
@@ -134,8 +138,19 @@ public static class HotspotLegacyMigration
         var restoresPr11Identity = state.VodafoneIdentityRestoredAt is null
             && state.LegacyMigratedAt is not null;
 
-        // Belt and braces: even a file that already carries the marker has the switch
-        // forced off, so a hand edit or a restored backup cannot bring the rewrite back.
+        // The user's own tuning, carried across rather than reset to the default. Read
+        // before the fields are cleared, and only applied when the old file actually
+        // carried a usable value.
+        if (ReadTtl(state.LegacyTtlValue) is { } ttl)
+        {
+            state.VodafoneTtl = ttl;
+        }
+
+        if (ReadBool(state.LegacyDropIpv6) is { } dropIpv6)
+        {
+            state.VodafoneDropIpv6 = dropIpv6;
+        }
+
         state.LegacyTtlFixEnabled = false;
         state.LegacyTtlValue = null;
         state.LegacyDropIpv6 = null;
@@ -169,8 +184,9 @@ public static class HotspotLegacyMigration
 
         networks.Clear();
 
-        // The old switch selected the whole user-facing feature as well as the unsafe
-        // implementation detail. Preserve that intent, but only for the diagnostic mode.
+        // The old switch selected the whole feature, mechanism included, so an upgrade
+        // leaves the user with the mode they had switched on rather than with a toggle
+        // they have to find again.
         if (wasEnabled)
         {
             state.VodafoneModeEnabled = true;
@@ -200,6 +216,33 @@ public static class HotspotLegacyMigration
         };
     }
 
+    /// <summary>
+    /// A legacy TTL, when the file holds one this build can use.
+    /// </summary>
+    /// <remarks>
+    /// The field is a raw <see cref="JsonElement"/> because a hand-edited file can put
+    /// anything there. A value outside the usable range is dropped rather than carried:
+    /// the current default is a better answer than a number that would rewrite the
+    /// engine's own low-TTL decoys.
+    /// </remarks>
+    private static int? ReadTtl(JsonElement? value)
+    {
+        if (value is not { ValueKind: JsonValueKind.Number } element
+            || !element.TryGetInt32(out var ttl))
+        {
+            return null;
+        }
+
+        return ttl == TtlFixSettings.CoerceTimeToLive(ttl) ? ttl : null;
+    }
+
+    private static bool? ReadBool(JsonElement? value) => value?.ValueKind switch
+    {
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        _ => null,
+    };
+
     private static string BuildSummary(
         bool wasEnabled,
         bool hadNetworks,
@@ -209,29 +252,28 @@ public static class HotspotLegacyMigration
     {
         if (wasEnabled)
         {
-            return $"Eski TTL yeniden yazımı kapatıldı; {migratedNetworks} Vodafone ağ kaydı "
-                + "güvenli tanılama moduna taşındı.";
+            return $"Vodafone Sınırsız Modu eski ayar dosyasından geri yüklendi; {migratedNetworks} "
+                + "ağ kaydı taşındı.";
         }
 
         if (hadNetworks)
         {
-            return $"{migratedNetworks} Vodafone ağ kaydı korundu; kullanılmayan TTL alanları temizlendi.";
+            return $"{migratedNetworks} Vodafone ağ kaydı eski alan adlarından taşındı.";
         }
 
         if (hadLegacyOptions)
         {
-            return "Eski TTL/IPv6 seçenekleri temizlendi; Vodafone modu ve diğer tercihler korundu.";
+            return "Eski TTL/IPv6 seçenekleri güncel ayarlara taşındı.";
         }
 
         return restoredPr11Identity
-            ? "Vodafone Sınırsız Modu kimliği ve güvenli tanılama ayarı geri yüklendi."
+            ? "Vodafone Sınırsız Modu kimliği ve tanılama ayarı geri yüklendi."
             : HotspotMigrationResult.NothingToDo.Summary;
     }
-
 }
 
 /// <summary>
-/// The legacy fields the migration touches.
+/// The fields the migration reads and writes.
 /// </summary>
 /// <remarks>
 /// An interface rather than the settings type itself so the migration can be tested and
@@ -243,15 +285,21 @@ public interface IHotspotLegacyState
 
     List<LegacyHotspotNetwork> LegacyNetworks { get; }
 
-    System.Text.Json.JsonElement? LegacyTtlValue { get; set; }
+    JsonElement? LegacyTtlValue { get; set; }
 
-    System.Text.Json.JsonElement? LegacyDropIpv6 { get; set; }
+    JsonElement? LegacyDropIpv6 { get; set; }
 
     bool VodafoneModeEnabled { get; set; }
 
     List<VodafoneModeNetwork> VodafoneNetworks { get; }
 
     bool DiagnosticsEnabled { get; set; }
+
+    /// <summary>The TTL outgoing packets are rewritten to.</summary>
+    int VodafoneTtl { get; set; }
+
+    /// <summary>Whether outbound IPv6 is dropped on the shared adapter.</summary>
+    bool VodafoneDropIpv6 { get; set; }
 
     DateTimeOffset? LegacyMigratedAt { get; set; }
 

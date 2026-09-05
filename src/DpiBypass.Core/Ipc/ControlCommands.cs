@@ -81,8 +81,10 @@ public sealed class ControlCommands
                 }
 
             case ControlProtocol.Commands.VodafoneOff:
+                // Only the mode. Folding old field names is what hotspot.cleanup is for,
+                // and running a migration that can switch the mode back on from the
+                // command that switches it off is a way to be surprised.
                 _service.DisableVodafoneMode();
-                _service.CleanUpLegacyHotspotConfiguration();
                 return ControlResponse.Success(DescribeHotspot());
 
             case ControlProtocol.Commands.VodafoneStatus:
@@ -248,12 +250,27 @@ public sealed class ControlCommands
                 : $" · bu ağ ('{status.NetworkName}') kayıtlı değil");
         }
 
+        // Whether the rule is up, and the counter that shows it is doing something. A
+        // command line that reports the switch and not the rule cannot tell a working
+        // machine from one where the driver never opened.
+        if (status.VodafoneModeEnabled && status.RegisteredHere)
+        {
+            builder.Append(status.TtlActive
+                ? $" · TTL {status.TtlValue} · düzeltilen {status.RewrittenPackets:N0}"
+                : $" · TTL kuralı kurulu değil{(status.TtlFailure is { } why ? $" ({why})" : string.Empty)}");
+
+            if (status.TtlActive && status.DroppedIPv6Packets > 0)
+            {
+                builder.Append($" · düşürülen IPv6 {status.DroppedIPv6Packets:N0}");
+            }
+        }
+
         builder.Append(status.DiagnosticsEnabled ? " · otomatik tanılama açık" : " · otomatik tanılama kapalı");
         builder.Append($" · kayıtlı ağ {status.RegisteredNetworks}");
 
-        if (status.LegacyCleanedAt is { } cleaned)
+        if (status.LegacyCleanedAt is { } migrated)
         {
-            builder.Append($" · eski TTL alt özelliği {cleaned.LocalDateTime:yyyy-MM-dd} tarihinde devre dışı bırakıldı");
+            builder.Append($" · eski ayarlar {migrated.LocalDateTime:yyyy-MM-dd} tarihinde taşındı");
         }
 
         if (status.LastResult is { } last)

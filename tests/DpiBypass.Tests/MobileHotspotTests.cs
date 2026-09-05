@@ -661,7 +661,7 @@ public sealed class HotspotVpnDetectionTests
     }
 }
 
-/// <summary>The restored name and both CLI spellings remain wired to safe commands.</summary>
+/// <summary>The product name and both CLI spellings remain wired to the mode.</summary>
 public sealed class VodafoneCompatibilitySurfaceTests
 {
     [Fact]
@@ -678,18 +678,43 @@ public sealed class VodafoneCompatibilitySurfaceTests
         Assert.Contains("DpiBypass.exe vodafone [on|off]", source, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The mode's mechanism exists and the switch reaches it.
+    /// </summary>
+    /// <remarks>
+    /// This replaces a test that asserted the opposite. An earlier build deleted the
+    /// rewrite and left the switch wired to a read-only diagnostic pass, so "Vodafone
+    /// Sınırsız Modu" was on and doing nothing while the Linux build was rewriting the
+    /// TTL all along. The files being present is not enough - the service has to be the
+    /// thing that installs and removes the rule - so both halves are pinned.
+    /// </remarks>
     [Fact]
-    public void SafeVodafoneModeDoesNotRestoreTheDeletedPacketRewriteClasses()
+    public void TheVodafoneModeSwitchReachesAnActualTtlRewrite()
     {
         var root = new DirectoryInfo(RepoFiles.Find("src", "DpiBypass.Core", "ProtectionService.cs")).Parent!;
-        var oldNamespace = Path.Combine(root.FullName, "Vodafone");
+        var vodafone = Path.Combine(root.FullName, "Vodafone");
         var service = File.ReadAllText(Path.Combine(root.FullName, "ProtectionService.cs"));
 
-        Assert.False(File.Exists(Path.Combine(oldNamespace, "HotspotTtlFix.cs")));
-        Assert.False(File.Exists(Path.Combine(oldNamespace, "TtlFixSettings.cs")));
-        Assert.DoesNotContain("ApplyTtlFix", service, StringComparison.Ordinal);
-        Assert.DoesNotContain("HotspotTtlFix _", service, StringComparison.Ordinal);
-        Assert.DoesNotContain("HotspotTtlValue", service, StringComparison.Ordinal);
-        Assert.DoesNotContain("HotspotDropIPv6", service, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(vodafone, "HotspotTtlFix.cs")));
+        Assert.True(File.Exists(Path.Combine(vodafone, "TtlFixSettings.cs")));
+
+        Assert.Contains("IHotspotTtlFix _ttlFix", service, StringComparison.Ordinal);
+        Assert.Contains("_ttlFix.Apply(", service, StringComparison.Ordinal);
+        Assert.Contains("_ttlFix.Clear()", service, StringComparison.Ordinal);
+
+        // Every path that can change the answer goes through the one decision, so there
+        // is a single description of when the rule is up.
+        Assert.Contains("private void ApplyVodafoneMode()", service, StringComparison.Ordinal);
+        foreach (var caller in new[]
+        {
+            "EnableVodafoneMode",
+            "DisableVodafoneMode",
+            "RememberCurrentVodafoneNetwork",
+            "ForgetVodafoneNetwork",
+            "AdoptNetwork",
+        })
+        {
+            Assert.Contains(caller, service, StringComparison.Ordinal);
+        }
     }
 }
