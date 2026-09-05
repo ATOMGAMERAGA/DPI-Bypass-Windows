@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using DpiBypass.Core.Interop;
@@ -405,15 +406,39 @@ public sealed class DnsConfigurator
     /// <summary>Every adapter that currently carries traffic, with both address family indexes.</summary>
     public async Task<IReadOnlyList<AdapterDnsSnapshot>> EnumerateAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        return await EnumerateAsync(NetworkInterface.GetAllNetworkInterfaces(),
+            (script, token) => ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(30), token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<IReadOnlyList<AdapterDnsSnapshot>> EnumerateAsync(
+        IEnumerable<NetworkInterface> interfaces,
+        Func<string, CancellationToken, Task<ProcessResult>> probeDns,
+        CancellationToken cancellationToken = default)
+    {
         var result = new List<AdapterDnsSnapshot>();
 
-        // The managed API gives us the reliable "is this adapter actually usable"
-        // answer; PowerShell fills in the per family interface indexes.
-        var live = NetworkInterface.GetAllNetworkInterfaces()
+        cancellationToken.ThrowIfCancellationRequested();
+        var live = interfaces
             .Where(nic => nic.OperationalStatus == OperationalStatus.Up
                 && nic.NetworkInterfaceType != NetworkInterfaceType.Loopback
                 && nic.NetworkInterfaceType != NetworkInterfaceType.Tunnel)
             .ToList();
+
+        // GetAdaptersAddresses already supplies DNS servers and both interface
+        // indexes through .NET. Avoid a cold PowerShell/module load on every start.
+        // If any adapter cannot be read completely, use the existing probe for that
+        // adapter; never manufacture an empty recovery snapshot from a failed read.
+        var pending = new List<NetworkInterface>();
+        foreach (var nic in live)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryCaptureAdapter(nic) is { } snapshot) result.Add(snapshot);
+            else pending.Add(nic);
+        }
+
+        if (pending.Count == 0) return result;
 
         // AddressFamily comes back as "IPv4"/"IPv6" on some builds, "InterNetwork"/
         // "InterNetworkV6" or the bare enum numbers 2/23 on others, so it is normalised
@@ -433,11 +458,12 @@ public sealed class DnsConfigurator
             $out | ConvertTo-Json -Depth 4 -Compress
             """;
 
-        var probe = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+        var probe = await probeDns(script, cancellationToken).ConfigureAwait(false);
         var rows = ParseRows(probe.StandardOutput);
 
-        foreach (var nic in live)
+        foreach (var nic in pending)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var alias = nic.Name;
             var v4 = rows.FirstOrDefault(r => r.Alias == alias && IsV4Family(r.Family));
             var v6 = rows.FirstOrDefault(r => r.Alias == alias && IsV6Family(r.Family));
@@ -470,6 +496,33 @@ public sealed class DnsConfigurator
         }
 
         return result;
+    }
+
+    private static AdapterDnsSnapshot? TryCaptureAdapter(NetworkInterface nic)
+    {
+        try
+        {
+            var properties = nic.GetIPProperties();
+            var v4 = nic.Supports(NetworkInterfaceComponent.IPv4)
+                ? properties.GetIPv4Properties()?.Index ?? 0 : 0;
+            var supportsV6 = nic.Supports(NetworkInterfaceComponent.IPv6);
+            var v6 = supportsV6 ? properties.GetIPv6Properties()?.Index ?? 0 : 0;
+
+            // Keep the existing IPv4-capable adapter policy and fall back if a
+            // supported family has no index (e.g. an adapter changing state).
+            if (v4 <= 0 || (supportsV6 && v6 <= 0)) return null;
+
+            var servers = properties.DnsAddresses;
+            return new AdapterDnsSnapshot(nic.Id, nic.Name, v4, v6,
+                FilterOurOwn(servers.Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(ip => ip.ToString()).ToArray()),
+                FilterOurOwn(servers.Where(ip => ip.AddressFamily == AddressFamily.InterNetworkV6)
+                    .Select(ip => ip.ToString()).ToArray()));
+        }
+        catch (Exception ex) when (ex is NetworkInformationException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

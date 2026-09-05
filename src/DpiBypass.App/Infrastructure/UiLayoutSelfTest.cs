@@ -19,6 +19,11 @@ internal static class UiLayoutSelfTest
         var originalTab = tabs.SelectedIndex;
         var originalWidth = window.Width;
         var originalHeight = window.Height;
+        var deferred = tabs.Items.Cast<TabItem>()
+            .Where(tab => DeferredTabContent.GetTemplate(tab) is not null).ToArray();
+        Require(deferred.Length == 4, "Expected four deferred navigation pages.");
+        Require(deferred.All(tab => tab.Content is null), "Unvisited pages were built before the first frame.");
+        var realised = new Dictionary<TabItem, object>();
         var palettes = Application.Current.Resources.MergedDictionaries;
         var palette = new ResourceDictionary();
         palettes.Add(palette);
@@ -35,6 +40,22 @@ internal static class UiLayoutSelfTest
                     {
                         tabs.SelectedIndex = i;
                         window.UpdateLayout();
+                        var tab = (TabItem)tabs.Items[i];
+                        Require(tab.Content is FrameworkElement, "Selected page has no controls.");
+                        Require(ReferenceEquals(((FrameworkElement)tab.Content).DataContext, window.DataContext),
+                            "Page lost its view model.");
+                        if (realised.TryGetValue(tab, out var previous))
+                            Require(ReferenceEquals(previous, tab.Content), "Revisiting a page recreated its controls.");
+                        else
+                            realised.Add(tab, tab.Content);
+
+                        // The settings shortcuts use ElementName inside a template's
+                        // namescope. Verify they still point to their section controls.
+                        foreach (var shortcut in Descendants<Button>(window)
+                            .Where(button => button.ReadLocalValue(FrameworkElement.TagProperty)
+                                is System.Windows.Data.BindingExpression))
+                            Require(shortcut.Tag is FrameworkElement, "Section shortcut lost its target.");
+
                         foreach (var button in Descendants<Button>(window).Where(b => b.IsVisible))
                         {
                             Require(button.ActualHeight is > 0 and <= 64,
@@ -60,13 +81,13 @@ internal static class UiLayoutSelfTest
 
     private static void VerifyLatencyProgress(MainWindow window, string scenario)
     {
-        var panel = (FrameworkElement)window.FindName("LatencyProgressPanel");
-        var slot = (FrameworkElement)window.FindName("LatencyProgressSlot");
-        var cards = (FrameworkElement)window.FindName("LatencyResultCards");
-        var button = (Button)window.FindName("LatencyPrimaryButton");
-        var title = (TextBlock)window.FindName("LatencyProgressLabel");
-        var section = (FrameworkElement)window.FindName("LatencySection");
-        var idleHint = (FrameworkElement)window.FindName("LatencyIdleHint");
+        var panel = (FrameworkElement)FindPageElement(window, "LatencyProgressPanel");
+        var slot = (FrameworkElement)FindPageElement(window, "LatencyProgressSlot");
+        var cards = (FrameworkElement)FindPageElement(window, "LatencyResultCards");
+        var button = (Button)FindPageElement(window, "LatencyPrimaryButton");
+        var title = (TextBlock)FindPageElement(window, "LatencyProgressLabel");
+        var section = (FrameworkElement)FindPageElement(window, "LatencySection");
+        var idleHint = (FrameworkElement)FindPageElement(window, "LatencyIdleHint");
         var oldHintVisibility = idleHint.Visibility;
         var oldVisibility = panel.Visibility;
         var oldText = title.Text;
@@ -113,6 +134,9 @@ internal static class UiLayoutSelfTest
             button.SetCurrentValue(UIElement.IsEnabledProperty, oldEnabled);
         }
     }
+
+    private static FrameworkElement FindPageElement(MainWindow window, string name)
+        => Descendants<FrameworkElement>(window).Single(element => element.Name == name);
 
     private static void SaveFrame(MainWindow window, string scenario)
     {

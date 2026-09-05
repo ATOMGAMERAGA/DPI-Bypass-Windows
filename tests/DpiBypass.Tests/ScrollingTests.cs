@@ -87,6 +87,9 @@ public sealed class ScrollingTests
 
         var pages = window.Descendants(ns + "TabItem")
             .Select(tab => tab.Elements().FirstOrDefault(child => child.Name != ns + "TabItem.Header"))
+            .Select(content => content?.Name.LocalName == "DeferredTabContent.Template"
+                ? content.Element(ns + "DataTemplate")?.Elements().Single()
+                : content)
             .Where(content => content is not null)
             .ToArray();
 

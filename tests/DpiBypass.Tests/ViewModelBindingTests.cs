@@ -106,7 +106,7 @@ public sealed partial class ViewModelBindingTests
     }
 
     /// <summary>
-    /// The markup with every <c>&lt;DataTemplate&gt;</c> body removed.
+    /// The markup with item templates removed; deferred pages still use the view model.
     /// </summary>
     /// <remarks>
     /// A binding inside a template resolves against the item, so checking it against the
@@ -115,7 +115,14 @@ public sealed partial class ViewModelBindingTests
     /// which is how "Title" and "Detail" slipped through. They are checked against the
     /// item type instead.
     /// </remarks>
-    private static string WithoutItemTemplates(string text) => DataTemplateBody().Replace(text, string.Empty);
+    private static string WithoutItemTemplates(string text)
+    {
+        var document = XDocument.Parse(text);
+        document.Descendants()
+            .Where(element => element.Name.LocalName.EndsWith(".ItemTemplate", StringComparison.Ordinal))
+            .Remove();
+        return document.ToString();
+    }
 
     /// <summary>
     /// Every binding inside an item template names a member of the item type it is bound to.
@@ -283,10 +290,6 @@ public sealed partial class ViewModelBindingTests
             }
         }
     }
-
-    /// <summary>A whole <c>&lt;DataTemplate&gt;</c> element, body and all.</summary>
-    [GeneratedRegex(@"<DataTemplate\b.*?</DataTemplate>", RegexOptions.Singleline | RegexOptions.Compiled)]
-    private static partial Regex DataTemplateBody();
 
     /// <summary>
     /// Public members declared in the view model file: the view model itself plus the

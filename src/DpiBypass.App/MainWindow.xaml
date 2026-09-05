@@ -313,6 +313,8 @@
                         <AccessText Text="_Kapsam" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
+                <infra:DeferredTabContent.Template>
+                    <DataTemplate>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
                     <StackPanel>
                         <TextBlock Text="Ne korunsun?" Style="{StaticResource PageTitleStyle}" />
@@ -370,6 +372,8 @@
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
+                    </DataTemplate>
+                </infra:DeferredTabContent.Template>
             </TabItem>
 
             <!-- ============ Siteler ============ -->
@@ -381,6 +385,8 @@
                         <AccessText Text="_Siteler" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
+                <infra:DeferredTabContent.Template>
+                    <DataTemplate>
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -533,6 +539,8 @@
                         </Grid>
                     </Border>
                 </Grid>
+                    </DataTemplate>
+                </infra:DeferredTabContent.Template>
             </TabItem>
 
             <!-- ============ Ağ ve yöntem ============ -->
@@ -544,6 +552,8 @@
                         <AccessText Text="Ağ ve _yöntem" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
+                <infra:DeferredTabContent.Template>
+                    <DataTemplate>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
                     <StackPanel>
                         <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
@@ -642,6 +652,8 @@
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
+                    </DataTemplate>
+                </infra:DeferredTabContent.Template>
             </TabItem>
 
             <!-- ============ DNS ve ayarlar ============ -->
@@ -653,6 +665,8 @@
                         <AccessText Text="DNS ve _ayarlar" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
+                <infra:DeferredTabContent.Template>
+                    <DataTemplate>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
                     <StackPanel>
                         <!-- This page is long enough that the three sections people come
@@ -1555,6 +1569,8 @@
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
+                    </DataTemplate>
+                </infra:DeferredTabContent.Template>
             </TabItem>
 
             <!-- ============ Günlük ============ -->
