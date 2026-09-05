@@ -2480,9 +2480,11 @@ public sealed class MainViewModel : ObservableObject
     public async Task ToggleAsync()
     {
         IsBusy = true;
+        var wasRunning = _isRunning;
+
         try
         {
-            if (_isRunning)
+            if (wasRunning)
             {
                 await _service.StopAsync().ConfigureAwait(true);
             }
@@ -2493,8 +2495,11 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            AppLog.Error("Koruma durumu değiştirilemedi", ex);
-            StatusHeadline = "Başlatılamadı";
+            // Which of the two was attempted matters: a stop that could not put the
+            // machine's DNS back reported as "could not start" sends the user looking for
+            // the wrong problem.
+            AppLog.Error(wasRunning ? "Koruma durdurulamadı" : "Koruma başlatılamadı", ex);
+            StatusHeadline = wasRunning ? "Tam olarak durdurulamadı" : "Başlatılamadı";
             StatusDetail = ex.Message;
         }
         finally
@@ -2576,6 +2581,18 @@ public sealed class MainViewModel : ObservableObject
             TuningStatus = result?.Winner is null
                 ? "Çalışan bir yöntem bulunamadı. Farklı bir DNS modu veya kapsam deneyin."
                 : $"Seçilen yöntem: {result.Winner.Name} ({result.Trials.Count} deneme)";
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer request - a second press, or the machine moving
+            // networks. Not a failure, and the status line has to stop saying "measuring"
+            // either way.
+            TuningStatus = "Arama durduruldu; daha yeni bir istek devraldı.";
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Yöntem araması başarısız", ex);
+            TuningStatus = $"Yöntem aranamadı: {ex.Message}";
         }
         finally
         {

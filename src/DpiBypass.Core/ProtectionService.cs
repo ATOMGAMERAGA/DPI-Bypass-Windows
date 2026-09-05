@@ -1121,9 +1121,17 @@ public sealed class ProtectionService : IAsyncDisposable
                 await TuneAsync(StrategyWorkKind.Automatic, "düzenli denetim başarısız", cancellationToken)
                     .ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (OperationCanceledException)
+            {
+                // Superseded, not shut down: the user pressed re-tune, or the machine moved
+                // networks, while this pass was waiting its turn. Returning here would end
+                // the periodic check for the rest of the session over somebody else doing
+                // the very work it was about to do.
+                AppLog.Info("Düzenli denetim, daha yeni bir ayarlama işi tarafından devralındı.");
             }
             catch (Exception ex)
             {
@@ -1142,6 +1150,17 @@ public sealed class ProtectionService : IAsyncDisposable
         // out of it from inside the app. Applying it puts the original servers back.
         var mode = Settings.DnsMode;
         var loopbackHasIPv6 = false;
+
+        // A stop whose DNS restore failed deliberately leaves the previous proxy running,
+        // so the machine can still resolve names. Starting again replaces it: leaving it
+        // behind would leak the socket and hand port 53 to our own predecessor, which the
+        // new listener would then fail to bind and quietly fall back from.
+        if (_dnsProxy is not null)
+        {
+            AppLog.Info("Önceki yerel DNS sunucusu kapatılıyor; yerine yenisi açılacak.");
+            await _dnsProxy.DisposeAsync().ConfigureAwait(false);
+            _dnsProxy = null;
+        }
 
         if (mode == DnsMode.EncryptedLoopback)
         {

@@ -23,11 +23,32 @@ namespace DpiBypass.Core.Logging;
 /// </remarks>
 public sealed class LogFileWriter : IDisposable
 {
-    /// <summary>How many entries may wait to be written before the oldest are dropped.</summary>
-    public const int DefaultQueueCapacity = 10_000;
+    /// <summary>
+    /// How many entries may wait to be written before the oldest are dropped.
+    /// </summary>
+    /// <remarks>
+    /// Sized so that dropping means the disk has genuinely stopped answering, not that a
+    /// burst outran the writer for a moment: at roughly 120 bytes an entry this is about
+    /// six megabytes at its worst, against a packet path that logs a few lines a second
+    /// and a strategy sweep that logs a few hundred in total. A tighter bound saved
+    /// nothing worth having and turned an ordinary burst into lost evidence.
+    /// </remarks>
+    public const int DefaultQueueCapacity = 50_000;
 
     /// <summary>How many entries one append covers.</summary>
     public const int DefaultBatchSize = 256;
+
+    /// <summary>
+    /// How full the queue may get before the writer stops gathering and writes.
+    /// </summary>
+    /// <remarks>
+    /// Without this the writer slept for the whole flush interval before its first drain,
+    /// so a burst was measured against the queue's capacity rather than against the disk:
+    /// twenty thousand entries in fifteen milliseconds filled a ten thousand entry queue
+    /// and half of them were dropped by a writer that was not busy at all, only waiting.
+    /// The gather now ends as soon as there is clearly enough to write.
+    /// </remarks>
+    private const int DrainThresholdBatches = 4;
 
     /// <summary>
     /// How large one day's file may grow before it continues in a numbered part.
@@ -72,6 +93,18 @@ public sealed class LogFileWriter : IDisposable
     private int _filePart;
     private long _fileBytes;
     private int _pendingCount;
+
+    /// <summary>
+    /// Whether the writer has already been told there is work.
+    /// </summary>
+    /// <remarks>
+    /// One wake-up per drain cycle rather than one per entry. Releasing a semaphore takes
+    /// its internal lock, so signalling on every entry put eight logging threads in a
+    /// queue behind each other for a writer that was going to take the whole burst in one
+    /// pass anyway - the contention the batching exists to avoid, moved from the file to
+    /// the semaphore.
+    /// </remarks>
+    private int _signalled;
     private long _dropped;
     private bool _disposed;
 
@@ -136,6 +169,17 @@ public sealed class LogFileWriter : IDisposable
             Interlocked.Increment(ref _dropped);
         }
 
+        Signal();
+    }
+
+    /// <summary>Wakes the writer, unless it has already been woken and not yet answered.</summary>
+    private void Signal()
+    {
+        if (Interlocked.Exchange(ref _signalled, 1) != 0)
+        {
+            return;
+        }
+
         try
         {
             _signal.Release();
@@ -175,54 +219,59 @@ public sealed class LogFileWriter : IDisposable
                 break;
             }
 
+            // Cleared before the gather, so an entry arriving during this cycle raises a
+            // fresh wake-up rather than being left in the queue with nobody coming back.
+            Volatile.Write(ref _signalled, 0);
+
             // One entry woke us; wait a moment for the rest of its burst so a start-up
-            // sweep's few hundred lines cost a handful of appends rather than hundreds.
-            if (_flushInterval > TimeSpan.Zero)
-            {
-                try
-                {
-                    await Task.Delay(_flushInterval, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Still drain: a writer that discards its last batch on cancellation
-                    // loses exactly the lines a shutdown or a crash needs.
-                }
-            }
+            // sweep's few hundred lines cost a handful of appends rather than hundreds -
+            // but never at the cost of the queue overflowing while the writer waits.
+            await GatherAsync(cancellationToken).ConfigureAwait(false);
 
             Drain();
-            ClearSignal();
+
+            if (!_pending.IsEmpty)
+            {
+                Signal();
+            }
         }
 
         Drain();
     }
 
     /// <summary>
-    /// Drops the wake-ups already served, without losing a real one.
+    /// Waits briefly for the rest of a burst, cut short once there is plenty to write.
     /// </summary>
     /// <remarks>
-    /// The semaphore counts entries and one drain covers a burst of them, so the leftover
-    /// count would spin the loop once per entry over an empty queue. Anything that arrived
-    /// while draining is put back as a single wake-up.
+    /// Batching is what turns a start-up sweep's few hundred lines into a handful of
+    /// appends, and it only needs a moment. Sitting out the whole interval regardless is
+    /// what let a fast producer overflow the queue against a disk that was keeping up.
     /// </remarks>
-    private void ClearSignal()
+    private async Task GatherAsync(CancellationToken cancellationToken)
     {
+        if (_flushInterval <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var threshold = _batchSize * DrainThresholdBatches;
+        // Short slices on purpose: the gather has to notice a queue filling within a
+        // millisecond or two, and this only runs while there is already work waiting.
+        var slice = TimeSpan.FromMilliseconds(Math.Clamp(_flushInterval.TotalMilliseconds / 8, 1, 5));
+        var waited = TimeSpan.Zero;
+
         try
         {
-            while (_signal.Wait(0))
+            while (waited < _flushInterval && Volatile.Read(ref _pendingCount) < threshold)
             {
-            }
-
-            if (!_pending.IsEmpty)
-            {
-                _signal.Release();
+                await Task.Delay(slice, cancellationToken).ConfigureAwait(false);
+                waited += slice;
             }
         }
-        catch (ObjectDisposedException)
+        catch (OperationCanceledException)
         {
-        }
-        catch (SemaphoreFullException)
-        {
+            // Still drain: a writer that discards its last batch on cancellation loses
+            // exactly the lines a shutdown or a crash needs.
         }
     }
 

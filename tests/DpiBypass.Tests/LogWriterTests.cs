@@ -150,6 +150,37 @@ public sealed class LogWriterTests
         Assert.Contains("kapatma nedeni", ReadAll(directory.Path));
     }
 
+    /// <summary>
+    /// A burst far larger than anything the app produces still loses nothing.
+    /// </summary>
+    /// <remarks>
+    /// The bounded queue exists for a disk that has stopped answering, not for a writer
+    /// that is merely behind for a moment. An earlier version of this writer slept for its
+    /// whole flush interval before its first drain, so twenty thousand entries arriving in
+    /// fifteen milliseconds filled the queue and half of them were dropped by a writer
+    /// that was not busy at all - which is why the gather now ends as soon as there is
+    /// clearly enough to write.
+    /// </remarks>
+    [Fact]
+    public async Task ABurstFasterThanTheDiskStillLosesNothing()
+    {
+        using var directory = new TempDirectory();
+        using var writer = new LogFileWriter(directory.Path);
+
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(thread => Task.Run(() =>
+        {
+            for (var i = 0; i < 2_500; i++)
+            {
+                writer.Enqueue(Entry($"t{thread}-{i} host=discord.com strategy=fake-ttl-split-sni"));
+            }
+        })));
+
+        writer.Flush();
+
+        Assert.Equal(0, writer.Dropped);
+        Assert.Equal(20_000, ReadAll(directory.Path).Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+    }
+
     /// <summary>Entries written from many threads all arrive, none of them torn.</summary>
     [Fact]
     public async Task ConcurrentProducersAllReachTheFileIntact()
