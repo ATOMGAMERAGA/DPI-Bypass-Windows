@@ -97,8 +97,17 @@ public sealed record DiagnosticSaveResult(bool Saved, string? Path, string? Fail
 /// </remarks>
 public static class DiagnosticReportWriter
 {
-    /// <summary>The most log text one report carries.</summary>
+    /// <summary>The most log text one report carries, as written.</summary>
     public const int MaxLogBytes = 512 * 1024;
+
+    /// <summary>
+    /// Room kept back for the "older lines skipped" marker.
+    /// </summary>
+    /// <remarks>
+    /// The marker is written after the budget has been spent, so its own length has to be
+    /// reserved up front or the file finishes just over the cap it advertises.
+    /// </remarks>
+    private const int SkipMarkerReserve = 128;
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -255,12 +264,19 @@ public static class DiagnosticReportWriter
 
         // Newest first, so the cap takes the oldest lines rather than the ones describing
         // whatever the user is reporting.
+        // Counted as it will be written, not as it would be on the machine that wrote the
+        // code: AppendLine emits Environment.NewLine, which is two bytes on Windows and one
+        // elsewhere. Budgeting one byte a line put the excerpt about six kilobytes over its
+        // own cap on Windows - which is the only platform this application runs on.
+        var newline = Encoding.UTF8.GetByteCount(Environment.NewLine);
+        var budget = MaxLogBytes - SkipMarkerReserve;
+
         var kept = new List<string>();
         for (var i = snapshot.LogExcerpt.Count - 1; i >= 0; i--)
         {
             var line = snapshot.LogExcerpt[i];
-            var size = Encoding.UTF8.GetByteCount(line) + 1;
-            if (bytes + size > MaxLogBytes)
+            var size = Encoding.UTF8.GetByteCount(line) + newline;
+            if (bytes + size > budget)
             {
                 text.AppendLine($"[… {i + 1} eski satır boyut sınırı nedeniyle atlandı …]");
                 break;

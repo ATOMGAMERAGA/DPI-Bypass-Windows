@@ -184,12 +184,51 @@ public sealed class DiagnosticReportWriterTests
         using var archive = ZipFile.OpenRead(path);
         var log = Read(archive, "gunluk.txt");
 
+        // Strictly within the cap, on every platform. The slack this assertion used to
+        // allow is exactly what hid the newline accounting being a byte short per line on
+        // Windows - the one platform the application actually runs on.
         Assert.True(
-            Encoding.UTF8.GetByteCount(log) <= DiagnosticReportWriter.MaxLogBytes + 1024,
-            $"the excerpt was {Encoding.UTF8.GetByteCount(log)} bytes");
+            Encoding.UTF8.GetByteCount(log) <= DiagnosticReportWriter.MaxLogBytes,
+            $"the excerpt was {Encoding.UTF8.GetByteCount(log)} bytes against a "
+                + $"{DiagnosticReportWriter.MaxLogBytes} byte cap");
         Assert.Contains("satır 39999", log);
         Assert.DoesNotContain("satır 0 ", log);
         Assert.Contains("boyut sınırı nedeniyle atlandı", log);
+    }
+
+    /// <summary>
+    /// The budget counts the newline the file will really carry.
+    /// </summary>
+    /// <remarks>
+    /// Written so it fails on either kind of host rather than only on the one whose
+    /// newline happens to be longer: the excerpt is measured as bytes on disk, and a line
+    /// count derived from the cap and the real line size has to bracket what was kept.
+    /// </remarks>
+    [Fact]
+    public async Task TheExcerptBudgetCountsTheNewlineTheFileActuallyCarries()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("tani.zip");
+
+        var line = new string('y', 100);
+        var lines = Enumerable.Range(0, 20_000).Select(_ => line).ToArray();
+
+        await DiagnosticReportWriter.WriteAsync(path, Snapshot(log: lines));
+
+        using var archive = ZipFile.OpenRead(path);
+        var log = Read(archive, "gunluk.txt");
+        var kept = log.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length - 1; // minus the marker
+
+        var perLine = 100 + Encoding.UTF8.GetByteCount(Environment.NewLine);
+        var affordable = DiagnosticReportWriter.MaxLogBytes / perLine;
+
+        Assert.True(
+            Encoding.UTF8.GetByteCount(log) <= DiagnosticReportWriter.MaxLogBytes,
+            $"the excerpt was {Encoding.UTF8.GetByteCount(log)} bytes");
+
+        // Close to what the cap affords, so a budget that quietly under-counted - and so
+        // kept more lines than fit - would show up here as well as in the byte count.
+        Assert.InRange(kept, affordable - 10, affordable);
     }
 
     [Fact]
