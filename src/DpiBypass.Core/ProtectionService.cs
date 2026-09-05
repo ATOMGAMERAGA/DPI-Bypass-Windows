@@ -71,6 +71,30 @@ public sealed class ProtectionService : IAsyncDisposable
 
     private readonly Lock _latencyStageGate = new();
 
+    /// <summary>
+    /// The one place the engine's strategy is written from.
+    /// </summary>
+    /// <remarks>
+    /// The first start, a network change, the periodic re-check and the user's re-tune
+    /// button all reach strategy selection, and they used to do it concurrently through
+    /// one shared engine field. A sweep begun on the cafe's wifi could therefore install
+    /// its winner - and file it under the phone hotspot's key - seconds after the machine
+    /// had already moved. Every one of those paths now runs under a lease from here, and
+    /// a lease that has been superseded writes nothing.
+    /// </remarks>
+    private readonly StrategyCoordinator _strategies;
+
+    /// <summary>
+    /// Background work that must be finished before the objects it uses are disposed.
+    /// </summary>
+    /// <remarks>
+    /// Cancelling is a request, not a completion. Teardown used to cancel the lifetime
+    /// token and then immediately dispose the engine, the resolver and the DNS proxy,
+    /// which is a race the tuner loses roughly as often as it is mid-probe: an
+    /// ObjectDisposedException on a thread nobody awaits.
+    /// </remarks>
+    private readonly TrackedWork _background = new();
+
     private DohResolver? _resolver;
     private DnsProxyServer? _dnsProxy;
     private DnsConfigurator? _dnsConfigurator;
@@ -133,12 +157,23 @@ public sealed class ProtectionService : IAsyncDisposable
             stages: new DelegateStageReporter(PublishLatencyStage));
         _hotspot = hotspotDiagnostics ?? new MobileHotspotDiagnostics(log: AppLog.InfoSink);
 
+        _strategies = new StrategyCoordinator(
+            read: () => _engine?.Strategy ?? StrategyLibrary.Default,
+            write: strategy =>
+            {
+                if (_engine is { } engine)
+                {
+                    engine.Strategy = strategy;
+                }
+            },
+            log: AppLog.InfoSink);
+
         // Load already disabled the obsolete TTL sub-feature and preserved any reusable
         // Vodafone-mode settings in memory. Persist the one-time migration immediately.
         Settings = _store.Load();
         if (Settings.LegacyHotspotCleaned)
         {
-            _store.Save(Settings);
+            ReportSave(_store.Save(Settings), "ayarlar");
         }
 
         _latencyResult = _latencyOptimizer.Current;
@@ -422,6 +457,17 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         Network = network;
 
+        // Before anything else: a run still going belongs to the link we just left, and
+        // from here on its writes are refused rather than landing on the new network.
+        if (_strategies.AdoptNetwork(network.Key))
+        {
+            // Cached names and endpoint health both describe the previous link. A
+            // split-horizon answer or a resolver blocked by the last network's operator
+            // is correct where it was learned and wrong here.
+            _resolver?.OnNetworkChanged();
+            _dnsProxy?.OnNetworkChanged();
+        }
+
         if (Settings.VodafoneModeNetworks.Count == 0
             || !network.IsOnline
             || !Settings.RefreshVodafoneNetworkIdentity(network))
@@ -429,7 +475,7 @@ public sealed class ProtectionService : IAsyncDisposable
             return;
         }
 
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         AppLog.Info($"vodafone: '{network.DisplayName}' kayıtlı ağ olarak tanındı.");
     }
 
@@ -477,7 +523,7 @@ public sealed class ProtectionService : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         Settings.LowLatencyMode = enabled;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         Changed?.Invoke();
 
         await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -779,7 +825,7 @@ public sealed class ProtectionService : IAsyncDisposable
             StringComparison.Ordinal);
 
         Settings.Latency = preferences;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         ApplyLatencyPreferences();
 
         // A run already measuring the old target is now measuring the wrong thing, so its
@@ -879,6 +925,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        CancellationTokenSource? lifetime = null;
         try
         {
             // Degraded is a running engine that cannot reach discord.com, not a stopped
@@ -891,6 +938,15 @@ public sealed class ProtectionService : IAsyncDisposable
                 return;
             }
 
+            // A previous stop that could not put the machine's DNS back left the proxy
+            // running on purpose, so names still resolve. Starting again reuses nothing:
+            // teardown here is what releases that proxy and its socket before the new
+            // start tries to bind the same port.
+            if (_dnsProxy is not null || _resolver is not null || _dnsConfigurator is not null)
+            {
+                await TeardownAsync().ConfigureAwait(false);
+            }
+
             if (!Elevation.IsElevated)
             {
                 throw new InvalidOperationException(
@@ -901,8 +957,18 @@ public sealed class ProtectionService : IAsyncDisposable
 
             // A stop/start cycle would otherwise leave the previous source behind.
             _lifetime?.Dispose();
-            var lifetime = new CancellationTokenSource();
+            lifetime = new CancellationTokenSource();
             _lifetime = lifetime;
+
+            // Two different lifetimes, and confusing them is how a start used to leave
+            // half configured DNS behind. The service's own lifetime is `lifetime`, and
+            // everything that outlives this call hangs off it. Cancelling the *call* -
+            // the user closing the window mid-start - is a separate thing, so the start
+            // body runs on a token linked to both: the caller can abandon the start, the
+            // catch below undoes what it managed to do, and the running service is never
+            // tied to the token of whichever call happened to start it.
+            using var starting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+            var startToken = starting.Token;
 
             // Opening the driver, enumerating the adapters and shelling out to netsh take
             // seconds. The caller is the dispatcher, and an uncontended gate hands control
@@ -918,7 +984,7 @@ public sealed class ProtectionService : IAsyncDisposable
                 // the difference between a slow start and an application that looks
                 // wedged. The state stays Starting throughout; only the detail moves.
                 SetState(ProtectionState.Starting, "Ad çözümleme ayarlanıyor…");
-                await ConfigureDnsAsync(lifetime.Token).ConfigureAwait(false);
+                await ConfigureDnsAsync(startToken).ConfigureAwait(false);
 
                 SetState(ProtectionState.Starting, "Ağ sürücüsü açılıyor…");
                 _portMap = new ProcessPortMap(AppLog.InfoSink);
@@ -937,7 +1003,7 @@ public sealed class ProtectionService : IAsyncDisposable
                 _engine.HostRewritten += OnHostRewritten;
                 _engine.Start();
 
-                _tuner = new StrategyTuner(_engine, _tester, AppLog.InfoSink);
+                _tuner = new StrategyTuner(_tester, AppLog.InfoSink);
                 _tuner.Progress += (name, index, total) => TuningProgress?.Invoke(name, index, total);
 
                 _discovery = new BlockedSiteDiscovery(_tester, _engine, _learned, _matcher, AppLog.InfoSink)
@@ -957,7 +1023,11 @@ public sealed class ProtectionService : IAsyncDisposable
                 // The watch belongs to the service, not to the engine, so it is started
                 // rather than rebuilt: it is already running whenever the app is.
                 StartNetworkWatch();
-            }).ConfigureAwait(false);
+
+                // The engine exists and the network is known, so runs can be stamped.
+                // Anything still unwinding from the previous engine is now superseded.
+                _strategies.BeginSession(Network.Key);
+            }, startToken).ConfigureAwait(false);
 
             SetState(ProtectionState.Running, "Koruma etkin");
         }
@@ -975,9 +1045,13 @@ public sealed class ProtectionService : IAsyncDisposable
             _gate.Release();
         }
 
-        // Detection and tuning are slow; do them after the UI is already responsive.
-        _networkWork = Task.Run(() => InitialiseNetworkAsync(_lifetime!.Token));
-        _recheckWork = Task.Run(() => RecheckLoopAsync(_lifetime!.Token));
+        // Detection and tuning are slow; do them after the UI is already responsive. The
+        // token is the one this start created, read once here rather than off the field:
+        // a stop racing in behind us replaces _lifetime, and a background task that reads
+        // it late would attach itself to somebody else's session.
+        var sessionToken = lifetime!.Token;
+        _networkWork = _background.Track(Task.Run(() => InitialiseNetworkAsync(sessionToken), CancellationToken.None));
+        _recheckWork = _background.Track(Task.Run(() => RecheckLoopAsync(sessionToken), CancellationToken.None));
     }
 
     private void OnDomainLearned(string domain)
@@ -1028,7 +1102,8 @@ public sealed class ProtectionService : IAsyncDisposable
                 }
 
                 AppLog.Warning($"Düzenli denetim başarısız ({DescribeOutcome(probe.Outcome)}); yöntem yeniden aranıyor.");
-                await DetectAndTuneAsync("düzenli denetim başarısız", cancellationToken).ConfigureAwait(false);
+                await TuneAsync(StrategyWorkKind.Automatic, "düzenli denetim başarısız", cancellationToken)
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -1078,8 +1153,8 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         try
         {
-            Network = NetworkFingerprint.Capture();
-            await DetectAndTuneAsync(reason: "ilk başlatma", cancellationToken).ConfigureAwait(false);
+            AdoptNetwork(NetworkFingerprint.Capture());
+            await TuneAsync(StrategyWorkKind.Automatic, "ilk başlatma", cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -1092,14 +1167,41 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>
+    /// The single entry point for every re-tune, whoever asked for it.
+    /// </summary>
+    /// <remarks>
+    /// The start-up pass, a network change, the periodic re-check, the re-tune button and
+    /// the CLI all come through here. Automatic requests for a network already being
+    /// tuned join that run instead of queueing a second sweep behind it; a manual request
+    /// supersedes whatever the app decided to do on its own, because the user is standing
+    /// in front of it.
+    /// </remarks>
+    private Task<TuningResult?> TuneAsync(StrategyWorkKind kind, string reason, CancellationToken cancellationToken)
+        => _strategies.RunAsync<TuningResult?>(
+            kind,
+            reason,
+            (lease, token) => DetectAndTuneAsync(lease, reason, token),
+            coalescedResult: null,
+            cancellationToken);
+
+    /// <summary>
     /// Detects the operator, reuses a cached recipe for this network if there is one,
     /// verifies it for real, and only runs the full sweep when verification fails.
     /// </summary>
-    private async Task DetectAndTuneAsync(string reason, CancellationToken cancellationToken)
+    /// <remarks>
+    /// Everything this writes - the engine's strategy, the network profile - goes through
+    /// <paramref name="lease"/>, and the lease knows which network and which engine the
+    /// run started on. A pass that is still finishing after the machine has moved
+    /// therefore reports its findings to the log and changes nothing.
+    /// </remarks>
+    private async Task<TuningResult?> DetectAndTuneAsync(
+        StrategyLease lease,
+        string reason,
+        CancellationToken cancellationToken)
     {
         if (_engine is null || _tuner is null || _resolver is null)
         {
-            return;
+            return null;
         }
 
         SetState(State, $"Ağ inceleniyor ({reason})…");
@@ -1111,53 +1213,68 @@ public sealed class ProtectionService : IAsyncDisposable
             var forced = StrategyLibrary.Find(manualStrategy);
             if (forced is not null)
             {
-                _engine.Strategy = forced;
+                if (!lease.TryWrite(forced))
+                {
+                    return null;
+                }
+
                 await VerifyAsync(cancellationToken).ConfigureAwait(false);
-                return;
+                return null;
             }
         }
 
-        if (Settings.Networks.TryGetValue(Network.Key, out var cached)
+        if (Settings.Networks.TryGetValue(lease.NetworkKey, out var cached)
             && StrategyLibrary.Find(cached.StrategyId) is { } remembered)
         {
-            _engine.Strategy = remembered;
+            if (!lease.TryWrite(remembered))
+            {
+                return null;
+            }
+
             SetState(State, $"Kayıtlı yöntem deneniyor: {remembered.Name}");
 
             if (await _tuner.VerifyCurrentAsync(cancellationToken).ConfigureAwait(false))
             {
-                RecordNetworkResult(remembered, success: true, wasUnfiltered: cached.WasUnfiltered);
+                RecordNetworkResult(lease, remembered, success: true, wasUnfiltered: cached.WasUnfiltered);
                 SetState(ProtectionState.Running, $"Koruma etkin · {remembered.Name}");
                 await VerifyAsync(cancellationToken).ConfigureAwait(false);
-                return;
+                return null;
             }
 
             AppLog.Info("Kayıtlı yöntem artık işe yaramıyor; yeni yöntem aranıyor.");
-            RecordNetworkResult(remembered, success: false, wasUnfiltered: false);
+            RecordNetworkResult(lease, remembered, success: false, wasUnfiltered: false);
         }
 
-        if (!Settings.AutoTuneOnNetworkChange && Settings.Networks.ContainsKey(Network.Key))
+        if (!Settings.AutoTuneOnNetworkChange && Settings.Networks.ContainsKey(lease.NetworkKey))
         {
-            return;
+            return null;
         }
 
-        var result = await _tuner.FindBestAsync(Isp, checkUnfilteredFirst: true, cancellationToken).ConfigureAwait(false);
+        var result = await _tuner
+            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken)
+            .ConfigureAwait(false);
 
-        if (result.Winner is not null)
+        if (result.Winner is not null && lease.TryWrite(result.Winner))
         {
-            _engine.Strategy = result.Winner;
-            RecordNetworkResult(result.Winner, success: true, result.NetworkWasAlreadyOpen);
+            RecordNetworkResult(lease, result.Winner, success: true, result.NetworkWasAlreadyOpen);
             SetState(
                 ProtectionState.Running,
                 result.NetworkWasAlreadyOpen
                     ? "Bu ağda engel yok · koruma bekleme modunda"
                     : $"Koruma etkin · {result.Winner.Name}");
         }
-        else
+        else if (result.Winner is null && lease.IsCurrent)
         {
             SetState(ProtectionState.Degraded, "Çalışan bir yöntem bulunamadı");
         }
 
+        if (!lease.IsCurrent)
+        {
+            return result;
+        }
+
         await VerifyAsync(cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     /// <summary>
@@ -1251,7 +1368,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         Settings.HotspotDiagnostics = enabled;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
 
         if (!enabled)
         {
@@ -1285,7 +1402,7 @@ public sealed class ProtectionService : IAsyncDisposable
         Settings.RememberVodafoneNetwork(network);
         Settings.VodafoneModeEnabled = true;
         Settings.HotspotDiagnostics = true;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         Changed?.Invoke();
     }
 
@@ -1302,7 +1419,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         Settings.VodafoneModeEnabled = false;
         Settings.HotspotDiagnostics = false;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         CancelHotspotDiagnostics();
         Changed?.Invoke();
     }
@@ -1333,7 +1450,7 @@ public sealed class ProtectionService : IAsyncDisposable
             // keeps the entry describing this connection rather than an expired one.
             if (Settings.RefreshVodafoneNetworkIdentity(network))
             {
-                _store.Save(Settings);
+                ReportSave(_store.Save(Settings), "ayarlar");
                 Changed?.Invoke();
             }
 
@@ -1342,7 +1459,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         Settings.RememberVodafoneNetwork(network);
 
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         Changed?.Invoke();
         return true;
     }
@@ -1355,7 +1472,7 @@ public sealed class ProtectionService : IAsyncDisposable
             return;
         }
 
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         Changed?.Invoke();
     }
 
@@ -1380,7 +1497,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         // Saved either way: the switch is forced off on every pass, and persisting that
         // is the whole point of an explicit cleanup call.
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         Changed?.Invoke();
 
         return migration;
@@ -1431,20 +1548,29 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         // Re-tuning happens off the event thread so the OS notification returns at once.
-        _networkWork = Task.Run(async () =>
-        {
-            try
+        // Tracked and started with CancellationToken.None: a task the scheduler never ran
+        // because its token was already cancelled leaves teardown waiting on something
+        // that will not run, and the run's own cancellation is handled inside instead.
+        _networkWork = _background.Track(Task.Run(
+            async () =>
             {
-                await DetectAndTuneAsync($"'{fingerprint.DisplayName}' ağına geçildi", token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                AppLog.Error("Ağ değişikliği sonrası ayarlama başarısız", ex);
-            }
-        }, token);
+                try
+                {
+                    await TuneAsync(
+                            StrategyWorkKind.Automatic,
+                            $"'{fingerprint.DisplayName}' ağına geçildi",
+                            token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error("Ağ değişikliği sonrası ayarlama başarısız", ex);
+                }
+            },
+            CancellationToken.None));
     }
 
     internal static bool ShouldRunHotspotDiagnostics(AppSettings settings, NetworkFingerprint fingerprint)
@@ -1601,9 +1727,29 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>Forces a fresh sweep, ignoring anything cached for this network.</summary>
-    public async Task<TuningResult?> RetuneAsync(CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// A manual run through the same coordinator every automatic one uses, so the button,
+    /// the tray menu and the CLI cannot end up sweeping alongside the timer: this one
+    /// supersedes whatever the app had started for itself.
+    /// </remarks>
+    public Task<TuningResult?> RetuneAsync(CancellationToken cancellationToken = default)
     {
         if (_engine is null || _tuner is null)
+        {
+            return Task.FromResult<TuningResult?>(null);
+        }
+
+        return _strategies.RunAsync<TuningResult?>(
+            StrategyWorkKind.Manual,
+            "elle yeniden ayarlama",
+            RetuneAsync,
+            coalescedResult: null,
+            cancellationToken);
+    }
+
+    private async Task<TuningResult?> RetuneAsync(StrategyLease lease, CancellationToken cancellationToken)
+    {
+        if (_tuner is null)
         {
             return null;
         }
@@ -1611,26 +1757,32 @@ public sealed class ProtectionService : IAsyncDisposable
         // Persisted straight away: a sweep that ends without a winner used to leave the
         // discarded profile on disk, so the next launch started on the very recipe the
         // user had just asked us to stop using.
-        if (Settings.Networks.Remove(Network.Key))
+        if (Settings.Networks.Remove(lease.NetworkKey))
         {
-            _store.SaveNetworks(Settings);
+            ReportSave(_store.SaveNetworks(Settings), "ağ profilleri");
         }
 
         // The operator is settled again first. Without this, switching back to automatic
         // detection left the sweep ordered by the profile the user had just deselected.
         await ResolveIspAsync(cancellationToken).ConfigureAwait(false);
 
-        var result = await _tuner.FindBestAsync(Isp, checkUnfilteredFirst: true, cancellationToken).ConfigureAwait(false);
+        var result = await _tuner
+            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken)
+            .ConfigureAwait(false);
 
-        if (result.Winner is not null)
+        if (result.Winner is not null && lease.TryWrite(result.Winner))
         {
-            _engine.Strategy = result.Winner;
-            RecordNetworkResult(result.Winner, success: true, result.NetworkWasAlreadyOpen);
+            RecordNetworkResult(lease, result.Winner, success: true, result.NetworkWasAlreadyOpen);
             SetState(ProtectionState.Running, $"Koruma etkin · {result.Winner.Name}");
         }
-        else
+        else if (result.Winner is null && lease.IsCurrent)
         {
             SetState(ProtectionState.Degraded, "Çalışan bir yöntem bulunamadı");
+        }
+
+        if (!lease.IsCurrent)
+        {
+            return result;
         }
 
         await VerifyAsync(cancellationToken).ConfigureAwait(false);
@@ -1641,7 +1793,7 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         Settings.Scope = scope;
         _matcher.Scope = scope;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
         SetState(State, StatusDetail);
         AppLog.Info($"Koruma kapsamı: {DescribeScope(scope)}");
     }
@@ -1649,11 +1801,14 @@ public sealed class ProtectionService : IAsyncDisposable
     public void ApplyManualStrategy(string? strategyId)
     {
         Settings.ManualStrategyId = strategyId;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
 
         if (_engine is not null && StrategyLibrary.Find(strategyId) is { } strategy)
         {
-            _engine.Strategy = strategy;
+            // Through the coordinator like every other write, and as a supersede: the
+            // user picking a recipe by hand outranks a sweep that is still measuring
+            // candidates, whose restore on the way out would otherwise undo this.
+            _strategies.ApplyImmediate("elle seçilen yöntem", strategy);
             SetState(State, $"Koruma etkin · {strategy.Name}");
         }
     }
@@ -1661,7 +1816,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public void ApplyManualIsp(string? ispProfileId)
     {
         Settings.ManualIspProfileId = ispProfileId;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
 
         if (ispProfileId is null)
         {
@@ -1684,7 +1839,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public void ApplyQuicSetting(bool blockQuic)
     {
         Settings.BlockQuicHandshakes = blockQuic;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
 
         if (_engine is not null)
         {
@@ -1695,7 +1850,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public void SaveSettings()
     {
         ApplySettingsToMatcher();
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -1713,9 +1868,24 @@ public sealed class ProtectionService : IAsyncDisposable
             // Putting the DNS back shells out to netsh and closing the driver blocks
             // until the packet threads come out of the kernel. The stop button is on
             // the dispatcher, so this gets the same hop off it that starting does.
-            await Task.Run(TeardownAsync).ConfigureAwait(false);
+            var outcome = await Task.Run(TeardownAsync).ConfigureAwait(false);
 
-            _store.Save(Settings);
+            ReportSave(_store.Save(Settings), "ayarlar");
+
+            if (outcome.DnsRestoreFailure is { } dnsFailure)
+            {
+                // The engine is down but the machine's resolvers are still pointed at our
+                // proxy, which is why the proxy is deliberately still running: reporting
+                // this as a clean stop would leave the user with working name resolution
+                // that disappears the moment they close the app.
+                DnsRestorePending = dnsFailure.Message;
+                SetState(ProtectionState.Stopped, $"Koruma kapalı · DNS geri yüklenemedi: {dnsFailure.Message}");
+                throw new InvalidOperationException(
+                    $"Koruma durduruldu, ancak DNS ayarları geri yüklenemedi: {dnsFailure.Message}",
+                    dnsFailure);
+            }
+
+            DnsRestorePending = null;
             SetState(ProtectionState.Stopped, "Koruma kapalı");
         }
         finally
@@ -1725,11 +1895,21 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Set when a stop could not put the machine's DNS back, cleared when one could.
+    /// </summary>
+    /// <remarks>
+    /// The recovery snapshot is kept on disk and the loopback proxy is left running, so
+    /// names still resolve; the separate recovery process and the watchdog handle the
+    /// rest. What must not happen is the app reporting a clean shutdown over it.
+    /// </remarks>
+    public string? DnsRestorePending { get; private set; }
+
+    /// <summary>
     /// Puts everything the start built back the way it was. Each step stands on its own
     /// so a start that fell over half way through can call it with the same result.
     /// </summary>
     /// <remarks>Expects the gate to be held, and never touches it.</remarks>
-    private async Task TeardownAsync()
+    private async Task<TeardownOutcome> TeardownAsync()
     {
         // Everything running in the background hangs off this token, so it goes first:
         // nothing should still be reaching for the objects about to be disposed.
@@ -1738,7 +1918,23 @@ public sealed class ProtectionService : IAsyncDisposable
             await _lifetime.CancelAsync().ConfigureAwait(false);
         }
 
+        // The engine is going away, so every lease handed out against it is invalid from
+        // here on - including the ones held by work that has not noticed the cancellation
+        // yet, and which would otherwise write its findings onto the engine that replaces
+        // it during a quick stop/start.
+        _strategies.EndSession();
+
         CancelHotspotDiagnostics();
+
+        // Asking is not finishing. Waiting here is what stops a probe that is still in
+        // flight from reaching a disposed resolver; the budget is short because a task
+        // wedged in a kernel call must delay shutdown by seconds rather than forever, and
+        // anything still running has already lost the right to write anything.
+        if (!await _background.DrainAsync(TeardownBudget).ConfigureAwait(false))
+        {
+            AppLog.Warning(
+                $"Arka plan işleri {TeardownBudget.TotalSeconds:F0} saniyede bitmedi; kapatmaya devam ediliyor.");
+        }
 
         if (_discovery is not null)
         {
@@ -1759,22 +1955,56 @@ public sealed class ProtectionService : IAsyncDisposable
 
         // DNS must go back before the proxy dies, or the machine is left pointing
         // at a socket nobody is listening on.
+        Exception? dnsRestoreFailure = null;
         if (_dnsConfigurator is not null)
         {
-            await _dnsConfigurator.RestoreAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await _dnsConfigurator.RestoreAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Kept and reported rather than thrown from here. Throwing abandoned the
+                // rest of the teardown, so the resolver and the tester stayed live under
+                // a service that said it was stopping, and the caller got an exception
+                // with a half dismantled object behind it.
+                dnsRestoreFailure = ex;
+                AppLog.Error("DNS ayarları geri yüklenemedi", ex);
+            }
         }
 
-        if (_dnsProxy is not null)
+        if (dnsRestoreFailure is null)
         {
-            await _dnsProxy.DisposeAsync().ConfigureAwait(false);
-            _dnsProxy = null;
+            if (_dnsProxy is not null)
+            {
+                await _dnsProxy.DisposeAsync().ConfigureAwait(false);
+                _dnsProxy = null;
+            }
+
+            _resolver?.Dispose();
+            _resolver = null;
+            _tester = null;
+        }
+        else
+        {
+            // The adapters still point at 127.0.0.1, so closing the listener here would
+            // take name resolution off the machine entirely - a far worse outcome than a
+            // proxy that outlives the engine until the restore can be retried.
+            AppLog.Warning(
+                "Yerel DNS sunucusu açık bırakıldı: bağdaştırıcılar hâlâ 127.0.0.1 adresine bakıyor.");
+            _tester = null;
         }
 
-        _resolver?.Dispose();
-        _resolver = null;
-        _tester = null;
         _tuner = null;
+        _dnsConfigurator = dnsRestoreFailure is null ? null : _dnsConfigurator;
+        return new TeardownOutcome(dnsRestoreFailure);
     }
+
+    /// <summary>How long a stop waits for background work before carrying on without it.</summary>
+    private static readonly TimeSpan TeardownBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>What a teardown could not finish.</summary>
+    private readonly record struct TeardownOutcome(Exception? DnsRestoreFailure);
 
     private BypassStrategy ResolveInitialStrategy()
     {
@@ -1792,13 +2022,30 @@ public sealed class ProtectionService : IAsyncDisposable
         return StrategyLibrary.Default;
     }
 
-    private void RecordNetworkResult(BypassStrategy strategy, bool success, bool wasUnfiltered)
+    /// <summary>
+    /// Writes what a run learned into the profile of the network that run was measuring.
+    /// </summary>
+    /// <remarks>
+    /// Keyed off the lease rather than off <see cref="Network"/>. Reading the live field
+    /// at write time is what let a sweep begun on one network file its verdict under the
+    /// key of the network the machine had since moved to - the numbers were real, the
+    /// heading was not, and the next launch started on a recipe measured somewhere else.
+    /// </remarks>
+    private void RecordNetworkResult(StrategyLease lease, BypassStrategy strategy, bool success, bool wasUnfiltered)
     {
-        var existing = Settings.Networks.GetValueOrDefault(Network.Key);
-
-        Settings.Networks[Network.Key] = new NetworkProfile
+        if (!lease.IsCurrent)
         {
-            Key = Network.Key,
+            AppLog.Info(
+                $"network.stale: '{lease.Reason}' işi '{lease.NetworkKey}' ağının profilini yazmak istedi; "
+                + "ağ değiştiği için yazılmadı.");
+            return;
+        }
+
+        var existing = Settings.Networks.GetValueOrDefault(lease.NetworkKey);
+
+        Settings.Networks[lease.NetworkKey] = new NetworkProfile
+        {
+            Key = lease.NetworkKey,
             DisplayName = Network.DisplayName,
             IspProfileId = Isp.Id,
             StrategyId = strategy.Id,
@@ -1808,7 +2055,7 @@ public sealed class ProtectionService : IAsyncDisposable
             FailureCount = (existing?.FailureCount ?? 0) + (success ? 0 : 1),
         };
 
-        _store.SaveNetworks(Settings);
+        ReportSave(_store.SaveNetworks(Settings), "ağ profilleri");
     }
 
     private void ApplySettingsToMatcher()
@@ -1824,6 +2071,77 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             _discovery.Enabled = Settings.AutoDiscoverBlockedSites;
         }
+    }
+
+    /// <summary>
+    /// The last settings write that did not land, or null when the file is current.
+    /// </summary>
+    /// <remarks>
+    /// The store used to swallow write failures, so a machine whose profile directory was
+    /// read-only showed a settings screen that quietly reverted itself on every launch.
+    /// The setting still applies for this session - the user asked for it - but they are
+    /// now told it is not saved, and can ask for it to be written again.
+    /// </remarks>
+    public ConfigSaveResult? LastSaveFailure { get; private set; }
+
+    /// <summary>Raised when a save starts or stops failing, never on every repeat.</summary>
+    public event Action<ConfigSaveResult?>? SaveStatusChanged;
+
+    private readonly Lock _saveStatusGate = new();
+
+    /// <summary>
+    /// Records the outcome of a save and notifies only when the answer changed.
+    /// </summary>
+    /// <remarks>
+    /// The periodic re-check writes profiles, so reporting every failure would put an
+    /// identical banner on screen every few minutes for as long as the disk stayed full.
+    /// A repeat of the same failure is silent; recovering from one is not.
+    /// </remarks>
+    private void ReportSave(ConfigSaveResult result, string what)
+    {
+        bool changed;
+        lock (_saveStatusGate)
+        {
+            var previous = LastSaveFailure;
+            if (result.Succeeded)
+            {
+                changed = previous is not null;
+                LastSaveFailure = null;
+            }
+            else
+            {
+                changed = previous is null || previous.Value.Failure != result.Failure;
+                LastSaveFailure = result;
+            }
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        if (result.Succeeded)
+        {
+            AppLog.Info($"config.save: {what} yeniden kaydedilebiliyor.");
+        }
+        else
+        {
+            AppLog.Warning($"config.save: {what} kaydedilemedi ({result.Detail}). {result.Describe()}");
+        }
+
+        SaveStatusChanged?.Invoke(LastSaveFailure);
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Tries the failed write again, on the user's request.
+    /// </summary>
+    /// <returns>True when the settings are on disk again.</returns>
+    public bool RetrySave()
+    {
+        var result = _store.Save(Settings);
+        ReportSave(result, "ayarlar");
+        return result.Succeeded;
     }
 
     /// <summary>Adds a domain the user typed in. Returns false when it was already covered.</summary>
@@ -1900,7 +2218,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public void ApplyDiscoverySetting(bool enabled)
     {
         Settings.AutoDiscoverBlockedSites = enabled;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
 
         if (_discovery is not null)
         {
@@ -1911,7 +2229,7 @@ public sealed class ProtectionService : IAsyncDisposable
     public void ApplyRecheckInterval(int seconds)
     {
         Settings.RecheckIntervalSeconds = seconds < 0 ? 0 : seconds;
-        _store.Save(Settings);
+        ReportSave(_store.Save(Settings), "ayarlar");
     }
 
     private void SetState(ProtectionState state, string? detail)
@@ -1955,21 +2273,12 @@ public sealed class ProtectionService : IAsyncDisposable
             AppLog.Error("Kapatma sırasında hata", ex);
         }
 
-        foreach (var work in new[] { _networkWork, _recheckWork })
+        // Everything long lived is registered, so this covers the network change work
+        // that used to be missed here: only the two fields were waited for, and a re-tune
+        // started by a transition overwrote one of them.
+        if (!await _background.DrainAsync(TeardownBudget).ConfigureAwait(false))
         {
-            if (work is null)
-            {
-                continue;
-            }
-
-            try
-            {
-                await work.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                // Best effort.
-            }
+            AppLog.Warning("Kapatmada arka plan işleri zamanında bitmedi.");
         }
 
         // Whatever the mode says, nothing is left listening after the service is gone.
@@ -1978,6 +2287,7 @@ public sealed class ProtectionService : IAsyncDisposable
         _latencyOptimizer.Changed -= OnLatencyChanged;
         await _latencyOptimizer.DisposeAsync().ConfigureAwait(false);
         _latencyGate.Dispose();
+        _strategies.Dispose();
         _lifetime?.Dispose();
         _gate.Dispose();
     }

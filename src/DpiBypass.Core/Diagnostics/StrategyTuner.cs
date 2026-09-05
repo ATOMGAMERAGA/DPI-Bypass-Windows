@@ -33,25 +33,32 @@ public sealed class StrategyTuner
 
     private const int AttemptsPerCandidate = 2;
 
-    private readonly BypassEngine _engine;
-    private readonly ConnectivityTester _tester;
+    private readonly IConnectivityProbe _tester;
     private readonly Action<string>? _log;
 
-    public StrategyTuner(BypassEngine engine, ConnectivityTester tester, Action<string>? log = null)
+    public StrategyTuner(IConnectivityProbe tester, Action<string>? log = null)
     {
-        _engine = engine;
         _tester = tester;
         _log = log;
     }
 
     public event Action<string, int, int>? Progress;
 
+    /// <summary>
+    /// Measures candidates on the live engine and returns the fastest that works.
+    /// </summary>
+    /// <param name="writer">
+    /// The lease this sweep may install candidates through. Every write goes through it,
+    /// including the restore on the way out, so a sweep that has been superseded - by a
+    /// network change, a restart, or the user pressing re-tune - installs nothing at all.
+    /// </param>
     public async Task<TuningResult> FindBestAsync(
+        IStrategyWriter writer,
         IspProfile profile,
         bool checkUnfilteredFirst = true,
         CancellationToken cancellationToken = default)
     {
-        var previous = _engine.Strategy;
+        var previous = writer.Current;
         var trials = new List<StrategyTrial>();
         BypassStrategy? winner = null;
 
@@ -59,7 +66,11 @@ public sealed class StrategyTuner
         {
             if (checkUnfilteredFirst)
             {
-                _engine.Strategy = StrategyLibrary.Passthrough;
+                if (!writer.TryWrite(StrategyLibrary.Passthrough))
+                {
+                    return Superseded(trials);
+                }
+
                 var control = await MeasureAsync(cancellationToken).ConfigureAwait(false);
                 trials.Add(new StrategyTrial(StrategyLibrary.Passthrough, control));
 
@@ -83,7 +94,11 @@ public sealed class StrategyTuner
                 index++;
                 Progress?.Invoke(candidate.Name, index, candidates.Count);
 
-                _engine.Strategy = candidate;
+                if (!writer.TryWrite(candidate))
+                {
+                    return Superseded(trials);
+                }
+
                 var result = await MeasureAsync(cancellationToken).ConfigureAwait(false);
                 trials.Add(new StrategyTrial(candidate, result));
 
@@ -115,9 +130,22 @@ public sealed class StrategyTuner
             // Every candidate is installed on the engine in order to measure it, so a
             // sweep that ends without a winner - cancelled, failed, or nothing got
             // through - would otherwise leave the machine desyncing every connection
-            // with whichever recipe happened to be tried last.
-            _engine.Strategy = winner ?? previous;
+            // with whichever recipe happened to be tried last. Through the lease, so a
+            // sweep whose network is already gone cannot undo the live sweep's winner on
+            // its way out: that restore belonged to a link nobody is on any more.
+            writer.TryWrite(winner ?? previous);
         }
+    }
+
+    /// <summary>What a sweep returns once it has been superseded mid-flight.</summary>
+    /// <remarks>
+    /// No winner, because nothing it measured describes the engine as it is now, and the
+    /// trials it did get through are kept so the caller can still report what happened.
+    /// </remarks>
+    private TuningResult Superseded(List<StrategyTrial> trials)
+    {
+        _log?.Invoke("Strategy sweep was superseded before it finished; nothing was installed.");
+        return new TuningResult(null, trials, NetworkWasAlreadyOpen: false);
     }
 
     /// <summary>Re-checks the current strategy; used after a network change before a full re-tune.</summary>

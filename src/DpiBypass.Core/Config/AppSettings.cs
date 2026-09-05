@@ -455,6 +455,53 @@ public sealed record AppSettings : IHotspotLegacyState
 /// Loads and saves settings. Writes go through a temporary file and a replace so a
 /// power cut cannot leave a half written settings file behind.
 /// </summary>
+/// <summary>Why a settings write did not land.</summary>
+public enum ConfigSaveFailure
+{
+    None = 0,
+
+    /// <summary>Windows refused the write: permissions, or a lock held by something else.</summary>
+    AccessDenied = 1,
+
+    /// <summary>No room left on the volume.</summary>
+    DiskFull = 2,
+
+    /// <summary>Any other I/O problem: a disconnected drive, a path that vanished.</summary>
+    Io = 3,
+
+    /// <summary>The settings could not be turned into JSON at all.</summary>
+    Serialization = 4,
+}
+
+/// <summary>
+/// What happened to a save.
+/// </summary>
+/// <remarks>
+/// Returned rather than swallowed. A write that fails still leaves the setting applied
+/// for this session - the user asked for it and it is doing what they asked - but they
+/// were being told it was saved, and it was not there next launch. The caller now has
+/// something to show and something to retry.
+/// </remarks>
+public readonly record struct ConfigSaveResult(ConfigSaveFailure Failure, string? Detail)
+{
+    public static readonly ConfigSaveResult Ok = new(ConfigSaveFailure.None, null);
+
+    public bool Succeeded => Failure == ConfigSaveFailure.None;
+
+    /// <summary>A short sentence for the UI, in the app's language.</summary>
+    public string Describe() => Failure switch
+    {
+        ConfigSaveFailure.None => "Kaydedildi.",
+        ConfigSaveFailure.AccessDenied =>
+            "Bu oturumda uygulandı; ayar dosyasına yazma izni yok, kaydedilemedi.",
+        ConfigSaveFailure.DiskFull =>
+            "Bu oturumda uygulandı; diskte yer kalmadığı için kaydedilemedi.",
+        ConfigSaveFailure.Serialization =>
+            "Bu oturumda uygulandı; ayarlar dosyaya dönüştürülemediği için kaydedilemedi.",
+        _ => "Bu oturumda uygulandı; kaydedilemedi.",
+    };
+}
+
 public sealed class ConfigStore
 {
     private static readonly JsonSerializerOptions Options = new()
@@ -482,22 +529,35 @@ public sealed class ConfigStore
         return settings;
     }
 
-    public void Save(AppSettings settings)
+    /// <summary>
+    /// Writes both files and reports the first thing that went wrong.
+    /// </summary>
+    /// <remarks>
+    /// The snapshot of the mutable collections is taken under the same lock as the write,
+    /// so a network profile being recorded on a background thread cannot be half copied
+    /// into the file the UI thread is serialising. The file lock alone never protected
+    /// those collections - it is a lock on the writer, not on the data.
+    /// </remarks>
+    public ConfigSaveResult Save(AppSettings settings)
     {
         lock (_gate)
         {
-            WriteJson(_settingsPath, settings);
-            WriteJson(_profilesPath, settings.Networks);
+            var settingsResult = WriteJson(_settingsPath, settings);
+            var profilesResult = WriteJson(_profilesPath, Snapshot(settings.Networks));
+            return settingsResult.Succeeded ? profilesResult : settingsResult;
         }
     }
 
-    public void SaveNetworks(AppSettings settings)
+    public ConfigSaveResult SaveNetworks(AppSettings settings)
     {
         lock (_gate)
         {
-            WriteJson(_profilesPath, settings.Networks);
+            return WriteJson(_profilesPath, Snapshot(settings.Networks));
         }
     }
+
+    private static Dictionary<string, NetworkProfile> Snapshot(Dictionary<string, NetworkProfile> networks)
+        => new(networks, StringComparer.Ordinal);
 
     /// <summary>
     /// A file that parses can still be wrong: <c>"ExtraDomains": null</c> is valid JSON,
@@ -628,12 +688,23 @@ public sealed class ConfigStore
         }
     }
 
-    private static void WriteJson<T>(string path, T value)
+    /// <summary>
+    /// Writes atomically: a full temporary file first, then a replace.
+    /// </summary>
+    /// <remarks>
+    /// The last good file is never truncated on the way to a failed write, so a disk that
+    /// filled up half way through costs the newest preference rather than every setting
+    /// the user ever chose. Failures are classified and returned; they used to be
+    /// swallowed here, which is how a machine with a read-only profile directory could
+    /// show a settings screen that reverted itself on every launch with no explanation.
+    /// </remarks>
+    private static ConfigSaveResult WriteJson<T>(string path, T value)
     {
+        var temporary = path + ".tmp";
+
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var temporary = path + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(value, Options));
 
             if (File.Exists(path))
@@ -644,10 +715,45 @@ public sealed class ConfigStore
             {
                 File.Move(temporary, path);
             }
+
+            return ConfigSaveResult.Ok;
+        }
+        catch (JsonException ex)
+        {
+            return Failed(temporary, ConfigSaveFailure.Serialization, path, ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Failed(temporary, ConfigSaveFailure.AccessDenied, path, ex);
+        }
+        catch (IOException ex)
+        {
+            // 0x27 ERROR_HANDLE_DISK_FULL, 0x70 ERROR_DISK_FULL. HResult carries the
+            // Win32 code in its low word, and the two cases read very differently to a
+            // user: one is "fix your permissions", the other is "free some space".
+            var code = ex.HResult & 0xFFFF;
+            var failure = code is 0x27 or 0x70 ? ConfigSaveFailure.DiskFull : ConfigSaveFailure.Io;
+            return Failed(temporary, failure, path, ex);
+        }
+        catch (Exception ex)
+        {
+            return Failed(temporary, ConfigSaveFailure.Io, path, ex);
+        }
+    }
+
+    private static ConfigSaveResult Failed(string temporary, ConfigSaveFailure failure, string path, Exception error)
+    {
+        // A half written temporary must not be left where a later run could mistake it
+        // for something meaningful, and it costs space on the disk that just filled up.
+        try
+        {
+            File.Delete(temporary);
         }
         catch (Exception)
         {
-            // Settings that cannot be persisted still apply for this session.
+            // Best effort; the replace never happened, so the real file is still intact.
         }
+
+        return new ConfigSaveResult(failure, $"{Path.GetFileName(path)}: {error.Message}");
     }
 }

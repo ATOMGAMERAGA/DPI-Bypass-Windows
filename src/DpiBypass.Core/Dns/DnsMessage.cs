@@ -181,6 +181,118 @@ public static class DnsMessage
         return aged;
     }
 
+    /// <summary>The OPT pseudo-record type, whose CLASS field carries the UDP payload size.</summary>
+    private const ushort OptRecordType = 41;
+
+    /// <summary>What a client without EDNS can receive over UDP (RFC 1035 §4.2.1).</summary>
+    public const int ClassicUdpPayloadSize = 512;
+
+    /// <summary>
+    /// The largest UDP answer this client said it can take.
+    /// </summary>
+    /// <remarks>
+    /// A client that offers EDNS0 puts its receive buffer size in the CLASS field of an
+    /// OPT record in the additional section (RFC 6891 §6.1.2). Sending more than that -
+    /// or more than 512 bytes to a client that never offered EDNS at all - is a datagram
+    /// the resolver will not reassemble, which is why the answer has to be truncated and
+    /// the client sent to TCP instead.
+    /// </remarks>
+    public static int GetClientUdpPayloadSize(ReadOnlySpan<byte> query)
+    {
+        if (query.Length < HeaderLength)
+        {
+            return ClassicUdpPayloadSize;
+        }
+
+        var questionCount = BinaryPrimitives.ReadUInt16BigEndian(query[4..]);
+        var answerCount = BinaryPrimitives.ReadUInt16BigEndian(query[6..]);
+        var authorityCount = BinaryPrimitives.ReadUInt16BigEndian(query[8..]);
+        var additionalCount = BinaryPrimitives.ReadUInt16BigEndian(query[10..]);
+        var pos = HeaderLength;
+
+        for (var i = 0; i < questionCount; i++)
+        {
+            if (!TryReadName(query, ref pos, out _) || pos + 4 > query.Length)
+            {
+                return ClassicUdpPayloadSize;
+            }
+
+            pos += 4;
+        }
+
+        var records = answerCount + authorityCount + additionalCount;
+        for (var i = 0; i < records; i++)
+        {
+            if (!TryReadName(query, ref pos, out _) || pos + 10 > query.Length)
+            {
+                return ClassicUdpPayloadSize;
+            }
+
+            var type = BinaryPrimitives.ReadUInt16BigEndian(query[pos..]);
+            var advertised = BinaryPrimitives.ReadUInt16BigEndian(query[(pos + 2)..]);
+            var dataLength = BinaryPrimitives.ReadUInt16BigEndian(query[(pos + 8)..]);
+            pos += 10;
+
+            if (type == OptRecordType)
+            {
+                // Below 512 the client is asking for less than the classic minimum, which
+                // no resolver honours; above 4096 is a buffer nothing on the path will
+                // carry unfragmented, and fragmented DNS is what this app exists to avoid.
+                return Math.Clamp((int)advertised, ClassicUdpPayloadSize, 4096);
+            }
+
+            if (pos + dataLength > query.Length)
+            {
+                return ClassicUdpPayloadSize;
+            }
+
+            pos += dataLength;
+        }
+
+        return ClassicUdpPayloadSize;
+    }
+
+    /// <summary>
+    /// The header-and-question-only form of a response, with TC set.
+    /// </summary>
+    /// <remarks>
+    /// The honest way to say "this does not fit": the client reads TC and asks the same
+    /// question again over TCP, which is a listener this proxy also runs. Sending the
+    /// first N bytes of the real answer instead - which is what a plain length cap does -
+    /// hands the client a message whose record counts promise sections that are not there.
+    /// </remarks>
+    public static byte[] BuildTruncatedResponse(ReadOnlySpan<byte> response)
+    {
+        if (response.Length < HeaderLength)
+        {
+            return response.ToArray();
+        }
+
+        var pos = HeaderLength;
+        var questionCount = BinaryPrimitives.ReadUInt16BigEndian(response[4..]);
+
+        for (var i = 0; i < questionCount; i++)
+        {
+            if (!TryReadName(response, ref pos, out _) || pos + 4 > response.Length)
+            {
+                return response[..Math.Min(response.Length, HeaderLength)].ToArray();
+            }
+
+            pos += 4;
+        }
+
+        var truncated = response[..pos].ToArray();
+        truncated[2] = (byte)(truncated[2] | 0x82); // QR = response, TC = truncated
+        BinaryPrimitives.WriteUInt16BigEndian(truncated.AsSpan(6), 0); // no answers
+        BinaryPrimitives.WriteUInt16BigEndian(truncated.AsSpan(8), 0); // no authority
+        BinaryPrimitives.WriteUInt16BigEndian(truncated.AsSpan(10), 0); // no additional
+        return truncated;
+    }
+
+    /// <summary>Whether the TC bit is set, i.e. the sender is asking for a TCP retry.</summary>
+    public static bool IsTruncated(ReadOnlySpan<byte> message)
+        => message.Length >= 3 && (message[2] & 0x02) != 0;
+
     public static IReadOnlyList<DnsResourceRecord> ReadAnswers(ReadOnlySpan<byte> message)
     {
         var results = new List<DnsResourceRecord>();

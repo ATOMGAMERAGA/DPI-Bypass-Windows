@@ -20,7 +20,28 @@ public sealed class DnsProxyServer : IAsyncDisposable
     private const int MaxCacheEntries = 4096;
     private const int MaxConcurrentQueries = 128;
     private static readonly TimeSpan MaxStale = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan TcpClientTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>How long one query on a TCP connection may take from prefix to answer.</summary>
+    private static readonly TimeSpan TcpQueryTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How long a TCP connection may sit between queries before it is closed.
+    /// </summary>
+    /// <remarks>
+    /// RFC 7766 §6.2.1 asks a server to keep the connection open for further queries and
+    /// to set its own idle timeout; each held connection is one of the proxy's request
+    /// slots, so a client that connects and goes quiet must give the slot back.
+    /// </remarks>
+    private static readonly TimeSpan TcpIdleTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// The most queries one TCP connection may ask before it is closed.
+    /// </summary>
+    /// <remarks>
+    /// A ceiling on the work a single connection can claim, not a limit any real resolver
+    /// will reach: Windows opens a TCP connection for one truncated answer and closes it.
+    /// </remarks>
+    private const int MaxQueriesPerConnection = 64;
 
     private readonly DohResolver _resolver;
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
@@ -38,6 +59,9 @@ public sealed class DnsProxyServer : IAsyncDisposable
     private Socket? _tcp6;
     private long _served;
     private long _cacheHits;
+    private long _truncated;
+    private long _partialSends;
+    private long _crossNetworkDrops;
 
     public DnsProxyServer(DohResolver resolver, Action<string>? log = null)
     {
@@ -50,6 +74,15 @@ public sealed class DnsProxyServer : IAsyncDisposable
     public long QueriesServed => Interlocked.Read(ref _served);
 
     public long CacheHits => Interlocked.Read(ref _cacheHits);
+
+    /// <summary>Answers sent back with TC set because they did not fit the client's buffer.</summary>
+    public long TruncatedAnswers => Interlocked.Read(ref _truncated);
+
+    /// <summary>TCP answers the client stopped reading half way through.</summary>
+    public long AbandonedTcpAnswers => Interlocked.Read(ref _partialSends);
+
+    /// <summary>Answers that came back after a network change and were not cached.</summary>
+    public long CrossNetworkDrops => Interlocked.Read(ref _crossNetworkDrops);
 
     public int Port { get; private set; } = 53;
 
@@ -154,6 +187,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
             var query = buffer[..received.ReceivedBytes];
             var sender = received.RemoteEndPoint;
+            var clientLimit = DnsMessage.GetClientUdpPayloadSize(query);
 
             // Acquire capacity before creating work so a burst cannot build an
             // unbounded queue of tasks behind the resolver semaphore.
@@ -172,7 +206,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
                 continue;
             }
 
-            TrackRequest(HandleUdpQueryAsync(socket, query, sender, cancellationToken));
+            TrackRequest(HandleUdpQueryAsync(socket, query, sender, clientLimit, cancellationToken));
         }
     }
 
@@ -180,6 +214,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
         Socket socket,
         byte[] query,
         EndPoint sender,
+        int clientPayloadLimit,
         CancellationToken cancellationToken)
     {
         try
@@ -187,6 +222,21 @@ public sealed class DnsProxyServer : IAsyncDisposable
             var answer = await ResolveAsync(query, cancellationToken).ConfigureAwait(false);
             if (answer is not null)
             {
+                // Over the size this client said it can take, the answer goes back as a
+                // header with TC set rather than as its own first N bytes: the client
+                // reads that and asks the same question over TCP, which is a listener
+                // this proxy also runs. Cutting the datagram short instead would hand the
+                // resolver a message whose record counts promise sections that are not
+                // there - a malformed answer, which is worse than a large one.
+                if (answer.Length > clientPayloadLimit)
+                {
+                    _log?.Invoke(
+                        $"DNS answer of {answer.Length} bytes exceeds the client's {clientPayloadLimit} byte "
+                        + "buffer; replying truncated so it retries over TCP.");
+                    answer = DnsMessage.BuildTruncatedResponse(answer);
+                    Interlocked.Increment(ref _truncated);
+                }
+
                 await socket.SendToAsync(answer, SocketFlags.None, sender, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -238,48 +288,87 @@ public sealed class DnsProxyServer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Serves one TCP client until it goes away, its budget runs out, or we shut down.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Successive queries on one connection are answered rather than the connection being
+    /// closed after the first, which is what RFC 7766 §6.2.1 asks of a server and what a
+    /// resolver retrying a truncated answer expects. Both bounds it needs come with it: a
+    /// per-query deadline, and an idle timeout so a connection that stops asking gives its
+    /// request slot back.
+    /// </para>
+    /// <para>
+    /// The answer goes out through <see cref="DnsStreamTransport.SendAllAsync"/>, which is
+    /// the actual fix here: the length prefix and the message used to be handed to one
+    /// <c>SendAsync</c> whose return value was dropped, so a partial send produced a reply
+    /// shorter than its own prefix and a client that waited for the rest until it timed out.
+    /// </para>
+    /// </remarks>
     private async Task HandleTcpClientAsync(Socket client, CancellationToken cancellationToken)
     {
         using (client)
-        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
-            deadline.CancelAfter(TcpClientTimeout);
-            var token = deadline.Token;
+            var sink = new DnsStreamTransport.SocketSink(client);
+            var lengthPrefix = new byte[2];
 
             try
             {
-                var lengthPrefix = new byte[2];
-                if (!await ReadExactAsync(client, lengthPrefix, token).ConfigureAwait(false))
+                for (var served = 0; served < MaxQueriesPerConnection; served++)
                 {
-                    return;
+                    // A fresh deadline per query: the first one gets the connection
+                    // timeout, and a client that keeps asking keeps being served, but
+                    // neither the wait for the next question nor one answer can run long.
+                    using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    idle.CancelAfter(served == 0 ? TcpQueryTimeout : TcpIdleTimeout);
+
+                    if (!await ReadExactAsync(client, lengthPrefix, idle.Token).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
+                    using var query = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    query.CancelAfter(TcpQueryTimeout);
+                    var token = query.Token;
+
+                    var length = BinaryPrimitives.ReadUInt16BigEndian(lengthPrefix);
+                    if (length is 0 or > MaxUdpResponse)
+                    {
+                        return;
+                    }
+
+                    var message = new byte[length];
+                    if (!await ReadExactAsync(client, message, token).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
+                    var answer = await ResolveAsync(message, token).ConfigureAwait(false);
+                    if (answer is null)
+                    {
+                        return;
+                    }
+
+                    // No size limit on this leg: TCP is where a client is sent when an
+                    // answer will not fit in a datagram, so truncating here would be a
+                    // loop with no way out of it.
+                    if (!await DnsStreamTransport
+                        .SendAllAsync(sink, DnsStreamTransport.Frame(answer), token)
+                        .ConfigureAwait(false))
+                    {
+                        // The client stopped taking bytes half way through an answer.
+                        // Nothing useful can follow on this connection.
+                        Interlocked.Increment(ref _partialSends);
+                        return;
+                    }
                 }
 
-                var length = BinaryPrimitives.ReadUInt16BigEndian(lengthPrefix);
-                if (length is 0 or > MaxUdpResponse)
-                {
-                    return;
-                }
-
-                var query = new byte[length];
-                if (!await ReadExactAsync(client, query, token).ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                var answer = await ResolveAsync(query, token).ConfigureAwait(false);
-                if (answer is null)
-                {
-                    return;
-                }
-
-                var framed = new byte[answer.Length + 2];
-                BinaryPrimitives.WriteUInt16BigEndian(framed, (ushort)answer.Length);
-                answer.CopyTo(framed, 2);
-                await client.SendAsync(framed, SocketFlags.None, token).ConfigureAwait(false);
+                _log?.Invoke($"DNS TCP client reached {MaxQueriesPerConnection} queries; closing the connection.");
             }
             catch (OperationCanceledException)
             {
-                // Client deadline or normal shutdown.
+                // Client deadline, idle timeout, or normal shutdown.
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
@@ -323,7 +412,11 @@ public sealed class DnsProxyServer : IAsyncDisposable
             TaskScheduler.Default);
     }
 
-    private async Task<byte[]?> ResolveAsync(byte[] query, CancellationToken cancellationToken)
+    /// <summary>
+    /// Answers one query from the cache, from a stale entry, or from upstream.
+    /// </summary>
+    /// <remarks>Internal so the tests can drive it without binding port 53.</remarks>
+    internal async Task<byte[]?> ResolveAsync(byte[] query, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _served);
 
@@ -362,6 +455,12 @@ public sealed class DnsProxyServer : IAsyncDisposable
             return reply;
         }
 
+        // Read before the query and compared after it. A lookup that started on the
+        // cafe's resolver and came back after the laptop joined the home network is an
+        // answer about a link nobody is on: it goes to the client that asked for it, and
+        // it stays out of the new network's cache.
+        var epoch = _resolver.Epoch;
+
         var response = await _resolver.QueryAsync(query, cancellationToken).ConfigureAwait(false);
         if (response is null)
         {
@@ -383,7 +482,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
             return BuildServerFailure(query);
         }
 
-        if (DnsMessage.GetResponseCode(response) == 0)
+        if (DnsMessage.GetResponseCode(response) == 0 && _resolver.Epoch == epoch)
         {
             var ttl = DnsMessage.GetMinimumTtl(response);
             var now = DateTimeOffset.UtcNow;
@@ -392,6 +491,11 @@ public sealed class DnsProxyServer : IAsyncDisposable
                 _cache[key] = new CacheEntry(response.ToArray(), now.AddSeconds(ttl), now);
                 PruneIfLarge();
             }
+        }
+        else if (_resolver.Epoch != epoch)
+        {
+            Interlocked.Increment(ref _crossNetworkDrops);
+            _log?.Invoke("DNS answer arrived after a network change; not cached for the new link.");
         }
 
         DnsMessage.SetId(response, id);
@@ -448,6 +552,21 @@ public sealed class DnsProxyServer : IAsyncDisposable
         {
             _cache.Clear();
         }
+    }
+
+    /// <summary>
+    /// The machine moved: everything cached describes the resolver of a different link.
+    /// </summary>
+    /// <remarks>
+    /// Split-horizon names, a captive portal's answers and a home router's own records
+    /// are all correct where they were learned and wrong everywhere else, so the cache is
+    /// emptied rather than aged out. The resolver's epoch moves with it, which is what
+    /// keeps a lookup still in flight from putting the old link's answer straight back.
+    /// </remarks>
+    public void OnNetworkChanged()
+    {
+        ClearCache();
+        _log?.Invoke("DNS cache cleared after a network change.");
     }
 
     private void Cleanup()
