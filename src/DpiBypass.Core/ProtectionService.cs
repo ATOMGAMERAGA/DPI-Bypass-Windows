@@ -262,6 +262,22 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <summary>Last verification result against discord.com.</summary>
     public ProbeResult? LastProbe { get; private set; }
 
+    /// <summary>When the last verification ran, whatever it concluded.</summary>
+    public DateTimeOffset? LastProbeAt { get; private set; }
+
+    /// <summary>
+    /// When the target site was last actually reachable through the engine.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a separate fact from the engine being up. "Koruma etkin" says a driver
+    /// handle is open and a strategy is installed; it says nothing about whether
+    /// discord.com answers, and presenting the two as one green state is how a user ends
+    /// up staring at a reassuring window while nothing loads. This is null until something
+    /// has genuinely got through, and it keeps its value afterwards so the card can say
+    /// how long ago that was rather than only "yes" or "no".
+    /// </remarks>
+    public DateTimeOffset? LastVerifiedAt { get; private set; }
+
     public string? StatusDetail { get; private set; }
 
     /// <summary>Domains the discovery pass has found to be filtered here.</summary>
@@ -1689,6 +1705,7 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             var offline = new ProbeResult(ProbeOutcome.DnsFailed, TimeSpan.Zero, "servis çalışmıyor");
             LastProbe = offline;
+            LastVerifiedAt = null;
             return offline;
         }
 
@@ -1696,6 +1713,12 @@ public sealed class ProtectionService : IAsyncDisposable
             .ConfigureAwait(false);
 
         LastProbe = result;
+        LastProbeAt = DateTimeOffset.Now;
+
+        if (result.Success)
+        {
+            LastVerifiedAt = LastProbeAt;
+        }
 
         if (State is ProtectionState.Running or ProtectionState.Degraded)
         {
@@ -1886,6 +1909,13 @@ public sealed class ProtectionService : IAsyncDisposable
             }
 
             DnsRestorePending = null;
+
+            // The verification described traffic going through an engine that is now
+            // gone. Keeping it would let a stopped app go on claiming the site was
+            // reachable "3 minutes ago" as though the protection were still doing it.
+            LastVerifiedAt = null;
+            LastProbeAt = null;
+            LastProbe = null;
             SetState(ProtectionState.Stopped, "Koruma kapalı");
         }
         finally
@@ -2222,6 +2252,9 @@ public sealed class ProtectionService : IAsyncDisposable
             // Invariant formatting throughout the report: it is a file the user sends on,
             // and a decimal comma that depends on the machine that wrote it makes two
             // reports of the same fault impossible to line up.
+            new("Son başarılı doğrulama", LastVerifiedAt is { } verified
+                ? FormattableString.Invariant($"{verified:yyyy-MM-dd HH:mm:ss zzz}")
+                : "ölçülmedi"),
             new("Son doğrulama", LastProbe is null
                 ? "ölçülmedi"
                 : FormattableString.Invariant(

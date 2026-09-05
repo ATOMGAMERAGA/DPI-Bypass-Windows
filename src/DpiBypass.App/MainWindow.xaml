@@ -141,7 +141,23 @@
                                                Foreground="{DynamicResource AppTextPrimaryBrush}" />
                                     <TextBlock Text="{Binding StatusDetail}"
                                                Style="{StaticResource CaptionStyle}"
-                                               Margin="0,3,0,0" />
+                                               Margin="0,3,0,0"
+                                               TextWrapping="Wrap" />
+
+                                    <!-- Its own line, because "the engine is running" and
+                                         "the site actually answers" are two different
+                                         facts and one green headline for both is how a
+                                         reassuring window ends up in front of a
+                                         connection that is not working. The time of the
+                                         last check that really got through is part of it. -->
+                                    <TextBlock Text="{Binding VerificationSummary, Mode=OneWay}"
+                                               Tag="{Binding VerificationSeverity, Mode=OneWay}"
+                                               Style="{StaticResource SeverityStatusLineStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap"
+                                               AutomationProperties.Name="Hedef site doğrulaması"
+                                               AutomationProperties.LiveSetting="Polite" />
+
                                     <TextBlock Style="{StaticResource CaptionStyle}" Margin="0,10,0,0">
                                         <Run Text="Kapsam:" />
                                         <Run Text="{Binding SelectedScope.Title, Mode=OneWay}" FontWeight="SemiBold" />
@@ -916,6 +932,60 @@
                                                    Style="{StaticResource HintStyle}"
                                                    Margin="0,2,0,0"
                                                    Visibility="{Binding LatencyStageData, Converter={StaticResource EmptyToCollapsedConverter}}" />
+
+                                        <!-- Measured, unlike a percentage: a run's total
+                                             depends on the adapter and on how noisy the
+                                             link is, so elapsed time is the only honest
+                                             answer to "how long has this been going". -->
+                                        <TextBlock Text="{Binding LatencyElapsed}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,2,0,0"
+                                                   AutomationProperties.LiveSetting="Polite"
+                                                   Visibility="{Binding LatencyElapsed, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Where the run has got to. Each row carries a word for
+                                     its state as well as a colour, so the sequence reads
+                                     the same with colour vision differences or in a
+                                     screen reader. -->
+                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,12,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Ölçüm adımları"
+                                                   Style="{StaticResource FieldLabelStyle}"
+                                                   Margin="0,0,0,6" />
+                                        <ItemsControl ItemsSource="{Binding LatencyFlow}"
+                                                      AutomationProperties.Name="Ölçüm adımları">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,3,0,3">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0"
+                                                                   Text="{Binding Ordinal}"
+                                                                   Style="{StaticResource HintStyle}"
+                                                                   MinWidth="18"
+                                                                   VerticalAlignment="Top" />
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding StateLabel}"
+                                                                   Style="{StaticResource SeverityStatusLineStyle}"
+                                                                   Tag="{Binding Severity}"
+                                                                   MinWidth="96"
+                                                                   VerticalAlignment="Top" />
+                                                        <TextBlock Grid.Column="2"
+                                                                   Style="{StaticResource CaptionStyle}"
+                                                                   TextWrapping="Wrap">
+                                                            <Run Text="{Binding Title, Mode=OneWay}" FontWeight="SemiBold" />
+                                                            <Run Text=" · " />
+                                                            <Run Text="{Binding Detail, Mode=OneWay}" />
+                                                        </TextBlock>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                     </StackPanel>
                                 </Border>
 

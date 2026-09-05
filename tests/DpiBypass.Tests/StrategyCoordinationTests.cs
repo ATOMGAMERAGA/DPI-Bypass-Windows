@@ -363,10 +363,16 @@ public sealed class StrategyCoordinationTests
     }
 
     /// <summary>
-    /// Two runs must never be inside the work at the same time, however they arrived.
+    /// Work that honours its cancellation never overlaps with another run.
     /// </summary>
+    /// <remarks>
+    /// This is the guarantee the coordinator actually makes, and it is worth stating
+    /// precisely: runs are serialised, and a run that is asked to stop and does stop
+    /// leaves before the next one starts. What it deliberately does not promise is that a
+    /// run ignoring its cancellation can hold the newest one up - see the test below.
+    /// </remarks>
     [Fact]
-    public async Task OnlyOneRunIsInsideTheWorkAtATime()
+    public async Task RunsThatHonourTheirCancellationNeverOverlap()
     {
         var engine = new FakeEngine();
         using var coordinator = Coordinator(engine, log: null);
@@ -379,21 +385,84 @@ public sealed class StrategyCoordinationTests
             .Select(i => Task.Run(() => Settled(coordinator.RunAsync(
                 StrategyWorkKind.Manual,
                 $"elle {i}",
-                async (_, _) =>
+                async (_, token) =>
                 {
                     if (Interlocked.Increment(ref inside) > 1)
                     {
                         overlapped = true;
                     }
 
-                    await Task.Delay(1).ConfigureAwait(false);
-                    Interlocked.Decrement(ref inside);
+                    try
+                    {
+                        // Real work passes its token down to the probe, so a superseded
+                        // run leaves as soon as it is asked to.
+                        await Task.Delay(TimeSpan.FromMilliseconds(5), token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref inside);
+                    }
                 }))))
             .ToArray();
 
         await Task.WhenAll(runs).WaitAsync(Patience);
 
         Assert.False(overlapped);
+    }
+
+    /// <summary>
+    /// A run that ignores its cancellation cannot hold the newest one hostage, and cannot
+    /// write anything either.
+    /// </summary>
+    /// <remarks>
+    /// The deliberate trade. Waiting indefinitely for a superseded run to let go means a
+    /// probe wedged in a kernel call blocks every re-tune for the rest of the session -
+    /// which is the deadlock the serialisation exists to avoid, not a stronger guarantee.
+    /// After a short grace period the new run proceeds, and being the current run rather
+    /// than holding the turnstile is what grants the right to write.
+    /// </remarks>
+    [Fact]
+    public async Task ARunThatIgnoresItsCancellationDelaysNobodyAndWritesNothing()
+    {
+        var engine = new FakeEngine();
+        using var coordinator = Coordinator(engine);
+        coordinator.BeginSession("network-a");
+
+        var stuck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var wedged = coordinator.RunAsync(
+            StrategyWorkKind.Automatic,
+            "takılan iş",
+            async (lease, _) =>
+            {
+                stuck.SetResult();
+                await release.Task.ConfigureAwait(false);
+                lease.TryWrite(StrategyLibrary.Passthrough);
+            });
+
+        await stuck.Task.WaitAsync(Patience);
+
+        // The next run gets through without waiting for the wedged one to finish.
+        await coordinator.RunAsync(
+            StrategyWorkKind.Manual,
+            "yeni iş",
+            (lease, _) =>
+            {
+                Assert.True(lease.TryWrite(StrategyLibrary.MultiSplitSni));
+                return Task.CompletedTask;
+            }).WaitAsync(Patience);
+
+        Assert.Equal(StrategyLibrary.MultiSplitSni, engine.Strategy);
+
+        release.SetResult();
+        await wedged.WaitAsync(Patience);
+
+        Assert.Equal(StrategyLibrary.MultiSplitSni, engine.Strategy);
+        Assert.DoesNotContain(StrategyLibrary.Passthrough.Id, engine.Writes);
     }
 
     /// <summary>

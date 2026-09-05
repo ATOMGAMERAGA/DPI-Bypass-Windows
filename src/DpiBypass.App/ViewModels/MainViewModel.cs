@@ -15,6 +15,7 @@ using DpiBypass.Core.Interop;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
+using DpiBypass.Core.Network.Latency;
 using DpiBypass.Core.Startup;
 
 namespace DpiBypass.App.ViewModels;
@@ -413,7 +414,15 @@ public sealed class MainViewModel : ObservableObject
         }
 
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = VisibleRefreshInterval };
-        _refreshTimer.Tick += (_, _) => RefreshCounters();
+        _refreshTimer.Tick += (_, _) =>
+        {
+            RefreshCounters();
+            UpdateLatencyElapsed();
+
+            // The wording is relative ("3 dk önce"), so it goes stale on its own even when
+            // nothing has changed.
+            RefreshVerification();
+        };
         _refreshTimer.Start();
 
         // Both are discarded on purpose - nothing waits for them - so both have to be
@@ -897,6 +906,7 @@ public sealed class MainViewModel : ObservableObject
                 RaiseLatencyCommandStates();
                 Raise(nameof(IsLatencyProgressVisible));
                 Raise(nameof(LatencyProgressTitle));
+                TrackLatencyElapsed(value);
             }
         }
     }
@@ -1023,6 +1033,99 @@ public sealed class MainViewModel : ObservableObject
     public string LatencyProgressTitle => _isDeepTestRunning
         ? _latencyStageTitle
         : _isLatencyBusy ? "Bağlantı ölçülüyor" : string.Empty;
+
+    /// <summary>
+    /// The six steps of the measurement flow, with where each one has got to.
+    /// </summary>
+    /// <remarks>
+    /// The card could say what state a run was in but not where in the process that state
+    /// sat, which makes a slow measurement indistinguishable from a stuck one. Each row is
+    /// derived from the result rather than announced by the run, so it can only ever claim
+    /// evidence that is really there.
+    /// </remarks>
+    public ObservableCollection<LatencyFlowStep> LatencyFlow { get; } = [];
+
+    private DateTimeOffset? _latencyRunStartedAt;
+
+    private string _latencyElapsed = string.Empty;
+
+    /// <summary>
+    /// How long the run has been going, in place of a progress percentage.
+    /// </summary>
+    /// <remarks>
+    /// A run has no predictable total - the number of candidates depends on the adapter,
+    /// and each cycle's length on how noisy the link is - so a percentage or a countdown
+    /// would be a made-up number. Elapsed time is measured, and it is what tells somebody
+    /// whether to keep waiting.
+    /// </remarks>
+    public string LatencyElapsed
+    {
+        get => _latencyElapsed;
+        private set => Set(ref _latencyElapsed, value);
+    }
+
+    /// <summary>Rebuilds the step list, leaving it alone when nothing visible changed.</summary>
+    private void RefreshLatencyFlow(LatencyStatusView status)
+    {
+        var steps = LatencyFlowSteps.From(status);
+
+        // An in-place update rather than clear-and-refill: emptying an ObservableCollection
+        // and putting the same rows back re-creates every container, which drops the
+        // selection and the scroll position for no visible change at all.
+        if (LatencyFlow.Count == steps.Count)
+        {
+            var identical = true;
+            for (var i = 0; i < steps.Count; i++)
+            {
+                if (LatencyFlow[i] != steps[i])
+                {
+                    LatencyFlow[i] = steps[i];
+                    identical = false;
+                }
+            }
+
+            if (identical)
+            {
+                return;
+            }
+
+            return;
+        }
+
+        LatencyFlow.Clear();
+        foreach (var step in steps)
+        {
+            LatencyFlow.Add(step);
+        }
+    }
+
+    /// <summary>Starts or stops the elapsed clock as a run begins and ends.</summary>
+    private void TrackLatencyElapsed(bool busy)
+    {
+        if (busy)
+        {
+            _latencyRunStartedAt ??= DateTimeOffset.UtcNow;
+            UpdateLatencyElapsed();
+            return;
+        }
+
+        _latencyRunStartedAt = null;
+        LatencyElapsed = string.Empty;
+    }
+
+    private void UpdateLatencyElapsed()
+    {
+        if (_latencyRunStartedAt is not { } started)
+        {
+            LatencyElapsed = string.Empty;
+            return;
+        }
+
+        var elapsed = DateTimeOffset.UtcNow - started;
+        LatencyElapsed = elapsed < TimeSpan.FromMinutes(1)
+            ? $"Geçen süre: {elapsed.TotalSeconds:F0} sn"
+            : $"Geçen süre: {(int)elapsed.TotalMinutes} dk {elapsed.Seconds:D2} sn";
+    }
 
     /// <summary>Everything the finished run measured, as the result panel prints it.</summary>
     public string LatencyResultSummary
@@ -1728,6 +1831,7 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>Copies one structured status into the properties the card binds to.</summary>
     private void ApplyLatencyStatus(LatencyStatusView status)
     {
+        RefreshLatencyFlow(status);
         LatencyHeadline = status.Headline;
         LatencyStatusSeverity = status.Severity;
         LatencyStatusLine = string.IsNullOrWhiteSpace(status.Detail) ? status.Headline : status.Detail;
@@ -2514,6 +2618,7 @@ public sealed class MainViewModel : ObservableObject
         };
 
         StatusDetail = _service.StatusDetail ?? string.Empty;
+        RefreshVerification();
         NetworkName = _service.Network.DisplayName;
         IspSummary = _service.Detection?.Summary ?? _service.Isp.DisplayName;
         StrategySummary = _service.State == ProtectionState.Stopped ? "-" : _service.Strategy.Name;
@@ -2721,6 +2826,89 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public event Action? StateChanged;
+
+    private string _verificationSummary = "Henüz doğrulanmadı.";
+
+    /// <summary>
+    /// Whether the target site is actually reachable, as its own fact.
+    /// </summary>
+    /// <remarks>
+    /// "Koruma etkin" means a driver handle is open and a strategy is installed. It says
+    /// nothing about whether discord.com answers, and showing the two as one green state
+    /// is how somebody ends up staring at a reassuring window while nothing loads. This
+    /// line is separate, and it carries the time of the last check that really got
+    /// through - so "verified" can be read as "verified a moment ago" or "verified twenty
+    /// minutes ago and not since".
+    /// </remarks>
+    public string VerificationSummary
+    {
+        get => _verificationSummary;
+        private set => Set(ref _verificationSummary, value);
+    }
+
+    private string _verificationSeverity = string.Empty;
+
+    /// <summary>"ok" / "warn" / "error" / "", alongside the wording rather than instead of it.</summary>
+    public string VerificationSeverity
+    {
+        get => _verificationSeverity;
+        private set => Set(ref _verificationSeverity, value);
+    }
+
+    private void RefreshVerification()
+    {
+        if (_service.State == ProtectionState.Stopped)
+        {
+            VerificationSummary = "Koruma kapalıyken doğrulama yapılmaz.";
+            VerificationSeverity = string.Empty;
+            return;
+        }
+
+        if (_service.LastProbe is not { } probe)
+        {
+            VerificationSummary = "discord.com henüz doğrulanmadı.";
+            VerificationSeverity = "warn";
+            return;
+        }
+
+        var verified = _service.LastVerifiedAt;
+
+        if (probe.Success)
+        {
+            VerificationSummary =
+                $"discord.com erişilebilir · {probe.Elapsed.TotalMilliseconds:F0} ms · "
+                + $"son başarılı kontrol {Ago(verified)}";
+            VerificationSeverity = "ok";
+            return;
+        }
+
+        // A failing check with an earlier success behind it is a different situation from
+        // one that has never worked, and the difference is what tells somebody whether
+        // this just broke or never started.
+        VerificationSummary = verified is null
+            ? $"discord.com doğrulanamadı · {ProtectionService.DescribeOutcome(probe.Outcome)} · bu oturumda hiç erişilemedi"
+            : $"discord.com şu anda erişilemiyor · {ProtectionService.DescribeOutcome(probe.Outcome)} · "
+                + $"son başarılı kontrol {Ago(verified)}";
+        VerificationSeverity = "error";
+    }
+
+    /// <summary>How long ago something happened, in words rather than a bare timestamp.</summary>
+    private static string Ago(DateTimeOffset? moment)
+    {
+        if (moment is not { } value)
+        {
+            return "yok";
+        }
+
+        var elapsed = DateTimeOffset.Now - value;
+        return elapsed switch
+        {
+            { TotalSeconds: < 60 } => $"az önce ({value:HH:mm:ss})",
+            { TotalMinutes: < 60 } => $"{(int)elapsed.TotalMinutes} dk önce ({value:HH:mm})",
+            { TotalHours: < 24 } => $"{(int)elapsed.TotalHours} sa önce ({value:HH:mm})",
+            _ => $"{value:dd.MM.yyyy HH:mm}",
+        };
+    }
 
     /// <summary>How often the counters are re-read while the window is on screen.</summary>
     private static readonly TimeSpan VisibleRefreshInterval = TimeSpan.FromSeconds(2);
