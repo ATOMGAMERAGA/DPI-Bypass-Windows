@@ -1,4 +1,5 @@
 using DpiBypass.Core.Network;
+using DpiBypass.Core.Vodafone;
 
 namespace DpiBypass.Core.MobileHotspot;
 
@@ -102,6 +103,30 @@ public sealed record HotspotStatusView
     /// <summary>One line saying what the mode is doing on this network.</summary>
     public required string Headline { get; init; }
 
+    /// <summary>Whether the TTL rewrite is installed on the adapter under us.</summary>
+    /// <remarks>
+    /// The card distinguishes this from <see cref="ModeEnabled"/> on purpose. A switch
+    /// that is on while nothing is running is the exact state this feature spent a
+    /// release in, and the only way a user can tell the difference is if the interface
+    /// says so.
+    /// </remarks>
+    public required bool RewriteActive { get; init; }
+
+    /// <summary>The TTL outgoing packets are being rewritten to.</summary>
+    public required int TtlValue { get; init; }
+
+    /// <summary>Packets the rule has actually changed.</summary>
+    public long RewrittenPackets { get; init; }
+
+    /// <summary>Outbound IPv6 packets dropped on the shared adapter.</summary>
+    public long DroppedIPv6Packets { get; init; }
+
+    /// <summary>One line about the rewrite itself, shown whether or not a check has run.</summary>
+    public required string RewriteLine { get; init; }
+
+    /// <summary>Colour for <see cref="RewriteLine"/>: same vocabulary as <see cref="Severity"/>.</summary>
+    public required string RewriteSeverity { get; init; }
+
     /// <summary>"off", "ok", "warn", "attention" or "info": colour only.</summary>
     public required string Severity { get; init; }
 
@@ -145,6 +170,10 @@ public sealed record HotspotStatusView
         Run = HotspotRunState.NotRun,
         Headline = "Kapalı",
         Severity = "off",
+        RewriteActive = false,
+        TtlValue = TtlFixSettings.DefaultTimeToLive,
+        RewriteLine = "TTL düzeltmesi kapalı.",
+        RewriteSeverity = "off",
         LegacyCleanupAvailable = false,
     };
 
@@ -176,12 +205,24 @@ public sealed record HotspotStatusView
             Run = run,
             CheckedAt = run == HotspotRunState.Completed ? result!.CompletedAt : null,
             Cards = run == HotspotRunState.Completed ? BuildCards(result!) : [],
-            TechnicalDetails = run == HotspotRunState.Completed ? BuildDetails(result!) : [],
+
+            // The rewrite row leads the technical details whether or not a check has run:
+            // it is the one line that answers "is this doing anything", and it is
+            // available the moment the mode is switched on.
+            TechnicalDetails = run == HotspotRunState.Completed
+                ? [RewriteCard(status), .. BuildDetails(result!)]
+                : [RewriteCard(status)],
             Findings = result?.Findings ?? [],
             Report = result?.ToReport() ?? string.Empty,
             Headline = DescribeHeadline(status, run, failure),
             Severity = DescribeSeverity(status, run, result),
             Suggestion = DescribeSuggestion(status, run, result, failure),
+            RewriteActive = status.TtlActive,
+            TtlValue = status.TtlValue,
+            RewrittenPackets = status.RewrittenPackets,
+            DroppedIPv6Packets = status.DroppedIPv6Packets,
+            RewriteLine = DescribeRewrite(status),
+            RewriteSeverity = DescribeRewriteSeverity(status),
             LegacyCleanupAvailable = legacyResidue,
         };
     }
@@ -363,9 +404,16 @@ public sealed record HotspotStatusView
         }
 
         var name = string.IsNullOrWhiteSpace(status.NetworkName) ? "bilinmeyen ağ" : status.NetworkName;
-        var lead = status.RegisteredHere
-            ? $"Aktif · {name}"
-            : $"Açık · {name} kayıtlı değil";
+        var lead = (status.RegisteredHere, status.TtlActive) switch
+        {
+            // "Aktif" means the rewrite is running. It is not a synonym for the switch
+            // being on: a rule that failed to install - no administrator rights, no
+            // driver - leaves the user with a mode that says it is working and is not.
+            (true, true) => $"Aktif · {name} · TTL {status.TtlValue}",
+            (true, false) when status.TtlFailure is { } reason => $"Açık · {name} · TTL kuralı kurulamadı ({reason})",
+            (true, false) => $"Açık · {name} · TTL kuralı kurulmadı",
+            _ => $"Açık · {name} kayıtlı değil",
+        };
 
         return run switch
         {
@@ -377,23 +425,103 @@ public sealed record HotspotStatusView
         };
     }
 
+    /// <summary>The rewrite in one sentence, with the counter that proves it.</summary>
+    /// <remarks>
+    /// The packet count is the difference between "the rule is installed" and "the rule
+    /// is doing something". An installed rule that has rewritten nothing means the wrong
+    /// adapter or no traffic, and both are worth seeing rather than inferring.
+    /// </remarks>
+    private static string DescribeRewrite(HotspotStatus status)
+    {
+        if (!status.VodafoneModeEnabled)
+        {
+            return "TTL düzeltmesi kapalı.";
+        }
+
+        if (!status.RegisteredHere)
+        {
+            return "Bu ağ kayıtlı değil; TTL düzeltmesi yalnızca kaydettiğiniz ağlarda çalışır.";
+        }
+
+        if (!status.TtlActive)
+        {
+            return status.TtlFailure is { } reason
+                ? $"TTL kuralı kurulamadı: {reason}"
+                : "TTL kuralı henüz kurulmadı.";
+        }
+
+        var ipv6 = status.DroppedIPv6Packets > 0
+            ? $" · {status.DroppedIPv6Packets:N0} IPv6 paketi düşürüldü"
+            : string.Empty;
+
+        return $"Giden paketler TTL {status.TtlValue} ile yollanıyor · "
+            + $"{status.RewrittenPackets:N0} paket düzeltildi{ipv6}";
+    }
+
+    private static string DescribeRewriteSeverity(HotspotStatus status) => status switch
+    {
+        { VodafoneModeEnabled: false } => "off",
+        { RegisteredHere: false } => "info",
+        { TtlActive: true } => "ok",
+        { TtlFailure: not null } => "attention",
+        _ => "warn",
+    };
+
+    /// <summary>The rewrite as a details row, so the state is readable as a value too.</summary>
+    private static HotspotCheckCard RewriteCard(HotspotStatus status) => new()
+    {
+        Title = "TTL düzeltmesi",
+        State = status switch
+        {
+            { VodafoneModeEnabled: false } => HotspotCheckState.NotUsed,
+            { RegisteredHere: false } => HotspotCheckState.NotUsed,
+            { TtlActive: true } => HotspotCheckState.Ok,
+            _ => HotspotCheckState.Failed,
+        },
+        Value = status switch
+        {
+            { VodafoneModeEnabled: false } => "Kapalı",
+            { RegisteredHere: false } => "Bu ağda kullanılmıyor",
+            { TtlActive: true } => $"TTL {status.TtlValue} · {status.RewrittenPackets:N0} paket",
+            _ => "Kurulamadı",
+        },
+        Detail = status is { VodafoneModeEnabled: true, RegisteredHere: true, TtlActive: true }
+            ? $"Telefon bir düşürdüğünde operatöre {status.TtlValue - 1} gider."
+            : status.TtlFailure,
+    };
+
     private static string DescribeSeverity(
         HotspotStatus status,
         HotspotRunState run,
-        HotspotDiagnosticResult? result) => (status.VodafoneModeEnabled, run, result) switch
+        HotspotDiagnosticResult? result)
     {
-        (false, _, _) => "off",
-        (_, HotspotRunState.Running, _) => "info",
-        (_, HotspotRunState.Failed, _) => "warn",
-        (_, HotspotRunState.Completed, { HasInternet: false }) => "warn",
-        (_, HotspotRunState.Completed, { DnsWorks: false }) => "warn",
-        (_, HotspotRunState.Completed, _) => "ok",
+        if (!status.VodafoneModeEnabled)
+        {
+            return "off";
+        }
 
-        // On, and sitting on a network the user registered: the mode is doing its job
-        // even before the first check has produced numbers.
-        (true, HotspotRunState.NotRun, _) when status.RegisteredHere => "ok",
-        _ => "info",
-    };
+        // Switched on for this network and not actually rewriting anything outranks
+        // whatever the connection checks found: the feature is not doing its job, and
+        // a green card over a dead rule is the fault this release is fixing.
+        if (status is { RegisteredHere: true, TtlActive: false })
+        {
+            return status.TtlFailure is null ? "warn" : "attention";
+        }
+
+        return (run, result) switch
+        {
+            (HotspotRunState.Running, _) => "info",
+            (HotspotRunState.Failed, _) => "warn",
+            (HotspotRunState.Completed, { HasInternet: false }) => "warn",
+            (HotspotRunState.Completed, { DnsWorks: false }) => "warn",
+            (HotspotRunState.Completed, _) => "ok",
+
+            // On, registered and rewriting: the mode is doing its job even before the
+            // first check has produced numbers.
+            (HotspotRunState.NotRun, _) when status.RegisteredHere => "ok",
+            _ => "info",
+        };
+    }
 
     private static string? DescribeSuggestion(
         HotspotStatus status,
@@ -404,6 +532,20 @@ public sealed record HotspotStatusView
         if (!status.VodafoneModeEnabled)
         {
             return "Bu bölümü açtığınızda bağlı olduğunuz ağı kontrol edebilirsiniz.";
+        }
+
+        // Before anything the connection checks found: the mode is on for this network
+        // and is not rewriting, so this is the only next step worth offering.
+        if (status is { RegisteredHere: true, TtlActive: false })
+        {
+            // The driver-specific half of the advice comes from the failure itself, which
+            // is written where the driver is opened. This file is part of a subsystem
+            // that must never touch the packet path, and naming the driver here would
+            // read as though it did.
+            return status.TtlFailure is null
+                ? "TTL kuralı henüz kurulmadı. Ağ değiştirdiyseniz \"Bu ağı kaydet\" ile "
+                    + "yeniden deneyebilirsiniz."
+                : $"{status.TtlFailure} Uygulamayı yönetici olarak çalıştırdığınızdan emin olun.";
         }
 
         if (run == HotspotRunState.Running)

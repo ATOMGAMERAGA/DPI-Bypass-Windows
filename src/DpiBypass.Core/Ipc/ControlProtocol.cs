@@ -57,12 +57,13 @@ public static class ControlProtocol
 
         public const string HotspotStatus = "hotspot.status";
 
-        /// <summary>Removes anything an older build's hotspot TTL mode left behind.</summary>
+        /// <summary>Folds a settings file written under the old field names into the current ones.</summary>
         public const string HotspotCleanup = "hotspot.cleanup";
 
-        // Compatibility names retained from the original Vodafone feature. They now
-        // control the safe diagnostics/compatibility mode; none installs the retired TTL
-        // rewrite. The generic hotspot commands remain aliases for diagnostic operations.
+        // The product spelling for the same feature. "on" registers the network under us
+        // and installs the TTL rewrite for it; "off" removes the rule and stops the
+        // automatic checks. The generic hotspot commands remain aliases for the
+        // read-only diagnostic operations.
         public const string VodafoneOn = "vodafone.on";
         public const string VodafoneOff = "vodafone.off";
         public const string VodafoneStatus = "vodafone.status";

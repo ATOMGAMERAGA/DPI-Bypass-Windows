@@ -222,6 +222,8 @@ public sealed class MainViewModel : ObservableObject
     private string _domainFilter = string.Empty;
     private VodafoneNetworkEntry? _selectedVodafoneNetwork;
     private string _vodafoneStatusLine = "Kapalı.";
+    private string _vodafoneRewriteLine = "TTL düzeltmesi kapalı.";
+    private string _vodafoneRewriteSeverity = "off";
     private string _hotspotStatusSeverity = "off";
     private string _hotspotSuggestion = string.Empty;
     private string _hotspotCheckedAt = string.Empty;
@@ -2149,9 +2151,14 @@ public sealed class MainViewModel : ObservableObject
     // --- Vodafone Sınırsız Modu / hotspot diagnostics ------------------------
 
     /// <summary>
-    /// The restored product feature controls safe per-network compatibility checks.
-    /// It never enables the retired TTL/accounting rewrite.
+    /// The mode's master switch: the TTL rewrite on registered networks, and the checks.
     /// </summary>
+    /// <remarks>
+    /// Switching it on here registers the network the machine is on and installs the
+    /// rewrite for it. Whether the rule actually went up is a separate question the card
+    /// answers in <see cref="VodafoneRewriteLine"/>, because on Windows it needs both
+    /// administrator rights and the WinDivert driver.
+    /// </remarks>
     public bool VodafoneModeEnabled
     {
         get => _service.Settings.VodafoneModeEnabled;
@@ -2231,6 +2238,44 @@ public sealed class MainViewModel : ObservableObject
     {
         get => _vodafoneStatusLine;
         private set => Set(ref _vodafoneStatusLine, value);
+    }
+
+    /// <summary>What the TTL rewrite is doing, in one line, with its packet counter.</summary>
+    public string VodafoneRewriteLine
+    {
+        get => _vodafoneRewriteLine;
+        private set => Set(ref _vodafoneRewriteLine, value);
+    }
+
+    /// <summary>Colour for <see cref="VodafoneRewriteLine"/>.</summary>
+    public string VodafoneRewriteSeverity
+    {
+        get => _vodafoneRewriteSeverity;
+        private set => Set(ref _vodafoneRewriteSeverity, value);
+    }
+
+    /// <summary>
+    /// Drop outbound IPv6 on the shared adapter while the mode is active.
+    /// </summary>
+    /// <remarks>
+    /// Reachable from the card because leaving it on is the right answer for the
+    /// connection this feature is about and the wrong one for anybody who actually needs
+    /// IPv6 on a tethered link. The Linux build exposes the same switch.
+    /// </remarks>
+    public bool VodafoneDropIPv6
+    {
+        get => _service.Settings.VodafoneDropIPv6;
+        set
+        {
+            if (_service.Settings.VodafoneDropIPv6 == value)
+            {
+                return;
+            }
+
+            _service.SetVodafoneDropIPv6(value);
+            Raise();
+            RefreshVodafoneModeStatus();
+        }
     }
 
     public VodafoneNetworkEntry? SelectedVodafoneNetwork
@@ -2316,6 +2361,8 @@ public sealed class MainViewModel : ObservableObject
         }
 
         VodafoneStatusLine = view.Headline;
+        VodafoneRewriteLine = view.RewriteLine;
+        VodafoneRewriteSeverity = view.RewriteSeverity;
         HotspotStatusSeverity = view.Severity;
         HotspotSuggestion = view.Suggestion ?? string.Empty;
         HotspotReport = view.Report;
@@ -2379,6 +2426,7 @@ public sealed class MainViewModel : ObservableObject
         var migration = _service.CleanUpLegacyHotspotConfiguration();
         Raise(nameof(HotspotDiagnostics));
         Raise(nameof(VodafoneModeEnabled));
+        Raise(nameof(VodafoneDropIPv6));
         RefreshVodafoneNetworks();
         HotspotSuggestion = migration.Summary;
     }
@@ -2660,6 +2708,7 @@ public sealed class MainViewModel : ObservableObject
 
         RefreshCounters();
         Raise(nameof(VodafoneModeEnabled));
+        Raise(nameof(VodafoneDropIPv6));
         Raise(nameof(HotspotDiagnostics));
         RefreshVodafoneNetworks();
         RefreshHotspotStatus();

@@ -451,7 +451,7 @@ internal static class CommandLineTasks
           DpiBypass.exe strategies          yöntem kataloğu
           DpiBypass.exe isps                operatör profilleri
           DpiBypass.exe enable | disable    korumayı aç / kapat
-          DpiBypass.exe vodafone [on|off]   Vodafone Sınırsız Modu (güvenli tanılama)
+          DpiBypass.exe vodafone [on|off]   Vodafone Sınırsız Modu (TTL düzeltmesi)
           DpiBypass.exe vodafone diagnose   Vodafone bağlantısını incele
           DpiBypass.exe hotspot diagnose    mobil paylaşım bağlantısını incele (hiçbir şeyi değiştirmez)
           DpiBypass.exe hotspot cleanup     yalnız eski TTL alt özelliğini temizle

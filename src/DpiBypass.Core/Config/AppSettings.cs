@@ -5,6 +5,7 @@ using DpiBypass.Core.Engine;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
+using DpiBypass.Core.Vodafone;
 
 namespace DpiBypass.Core.Config;
 
@@ -204,27 +205,49 @@ public sealed record AppSettings : IHotspotLegacyState
     // --- Vodafone Sınırsız Modu / mobile hotspot diagnostics ----------------------
 
     /// <summary>
-    /// Keeps the Vodafone-branded compatibility feature available without enabling the
-    /// retired TTL/accounting rewrite.
+    /// The master switch for Vodafone Sınırsız Modu: the TTL rewrite and the checks.
     /// </summary>
+    /// <remarks>
+    /// On, plus one of <see cref="VodafoneModeNetworks"/> under us, is what installs the
+    /// rewrite. The per-network gate is not decoration: rewriting TTLs on a home router,
+    /// where nothing is counting hops, is a change to the user's traffic that buys them
+    /// nothing.
+    /// </remarks>
     public bool VodafoneModeEnabled { get; set; }
 
-    /// <summary>Networks the user associated with the safe Vodafone mode, newest last.</summary>
+    /// <summary>Networks the user associated with Vodafone mode, newest last.</summary>
     public List<VodafoneModeNetwork> VodafoneModeNetworks { get; set; } = [];
+
+    /// <summary>
+    /// What outgoing packets leave with on a registered network.
+    /// </summary>
+    /// <remarks>
+    /// 65 so the phone's own decrement leaves 64 on the wire. Out-of-range values are
+    /// corrected on load rather than refused, so a hand-edited file cannot be the reason
+    /// the mode quietly does nothing. Same default and same guard as the Linux build's
+    /// <c>vodafone_ttl</c>.
+    /// </remarks>
+    public int VodafoneTtl { get; set; } = TtlFixSettings.DefaultTimeToLive;
+
+    /// <summary>Drop outbound IPv6 on the shared adapter while the mode is active.</summary>
+    /// <remarks>
+    /// Tethering gives the laptop its own global IPv6 address, so one subscriber shows up
+    /// as two sources whatever the hop limit says. The Linux build turns IPv6 off on the
+    /// interface for the same reason.
+    /// </remarks>
+    public bool VodafoneDropIPv6 { get; set; } = true;
 
     /// <summary>
     /// Run the read-only hotspot checks by themselves after a network change.
     /// </summary>
     /// <remarks>
-    /// The checks - addressing, reachability, DNS, MTU - are what replaced the TTL
-    /// rewrite, and they are always available on demand. This only decides whether
-    /// moving to a Vodafone-mode network also runs them and logs the answer. It is
-    /// switched on automatically for anyone who had the old mode enabled.
-    /// See <see cref="HotspotLegacyMigration"/>.
+    /// The checks - addressing, reachability, DNS, MTU - explain the connection; the
+    /// rewrite is what changes it. They are separate switches because they answer
+    /// separate questions, and the checks are always available on demand.
     /// </remarks>
     public bool HotspotDiagnostics { get; set; }
 
-    /// <summary>When the retired hotspot TTL configuration was cleaned out of this file.</summary>
+    /// <summary>When the old field names were folded into the ones above.</summary>
     public DateTimeOffset? HotspotLegacyMigratedAt { get; set; }
 
     /// <summary>
@@ -232,22 +255,21 @@ public sealed record AppSettings : IHotspotLegacyState
     /// </summary>
     public DateTimeOffset? VodafoneModeRestoredAt { get; set; }
 
-    // --- Retired: the hotspot TTL rewrite -------------------------------------------
-    // Kept as fields only so a settings file written by an older build is recognised and
-    // cleaned rather than silently carried forward. Nothing reads them for behaviour;
-    // ConfigStore runs the migration on every load, so an old file - or a restored
-    // backup, or a hand edit - can never switch the rewrite back on.
+    // --- Older field names for the same settings ------------------------------------
+    // A settings file written before the Vodafone* names existed carries these instead.
+    // ConfigStore folds them into the current fields on every load and then clears them,
+    // so nothing downstream has to know two names for one setting.
 
-    /// <summary>Legacy master switch. Always false after a load.</summary>
+    /// <summary>Legacy master switch. Folded into <see cref="VodafoneModeEnabled"/>.</summary>
     public bool HotspotTtlFix { get; set; }
 
-    /// <summary>Legacy per network list. Always empty after a load.</summary>
+    /// <summary>Legacy per network list. Folded into <see cref="VodafoneModeNetworks"/>.</summary>
     public List<LegacyHotspotNetwork> HotspotTtlNetworks { get; set; } = [];
 
-    /// <summary>Legacy rewrite value, recognized only so migration can remove it.</summary>
+    /// <summary>Legacy rewrite value. Folded into <see cref="VodafoneTtl"/>.</summary>
     public JsonElement? HotspotTtlValue { get; set; }
 
-    /// <summary>Legacy IPv6-drop option, recognized only so migration can remove it.</summary>
+    /// <summary>Legacy IPv6 option. Folded into <see cref="VodafoneDropIPv6"/>.</summary>
     public JsonElement? HotspotDropIPv6 { get; set; }
 
     public bool VodafoneNetworkRegistered(string key)
@@ -330,8 +352,7 @@ public sealed record AppSettings : IHotspotLegacyState
             AdapterName = adapterName,
         });
 
-        const int maximumRememberedNetworks = 10;
-        while (VodafoneModeNetworks.Count > maximumRememberedNetworks)
+        while (VodafoneModeNetworks.Count > TtlFixSettings.MaxNetworks)
         {
             VodafoneModeNetworks.RemoveAt(0);
         }
@@ -436,6 +457,18 @@ public sealed record AppSettings : IHotspotLegacyState
     {
         get => HotspotDiagnostics;
         set => HotspotDiagnostics = value;
+    }
+
+    int IHotspotLegacyState.VodafoneTtl
+    {
+        get => VodafoneTtl;
+        set => VodafoneTtl = value;
+    }
+
+    bool IHotspotLegacyState.VodafoneDropIpv6
+    {
+        get => VodafoneDropIPv6;
+        set => VodafoneDropIPv6 = value;
     }
 
     DateTimeOffset? IHotspotLegacyState.LegacyMigratedAt
@@ -606,15 +639,27 @@ public sealed class ConfigStore
             ? []
             : [.. settings.HotspotTtlNetworks.Where(network => network is not null)];
 
-        // Every load, not once from a marker: a restored backup or a hand edit must not
-        // be able to bring the retired TTL rewrite back. The pass is idempotent, so
-        // running it on a file it has already cleaned changes nothing.
+        // Every load, not once from a marker: a restored backup or a hand edit can carry
+        // the old field names, and the pass is idempotent, so running it on a file it has
+        // already folded changes nothing.
         var migration = HotspotLegacyMigration.Apply(settings, DateTimeOffset.UtcNow);
         settings.LegacyHotspotCleaned = migration.Changed;
 
         if (migration.Changed)
         {
-            AppLog.Info($"Eski hotspot yapılandırması bulundu ve temizlendi. {migration.Summary}");
+            AppLog.Info($"Eski hotspot yapılandırması taşındı. {migration.Summary}");
+        }
+
+        // After the migration, because that is one of the places the number comes from.
+        // A TTL under the guard would rewrite the engine's own low-TTL decoys and break
+        // every fake-packet strategy, so an unusable value becomes the default instead of
+        // becoming a silent fault the user cannot see.
+        var ttl = TtlFixSettings.CoerceTimeToLive(settings.VodafoneTtl);
+        if (ttl != settings.VodafoneTtl)
+        {
+            AppLog.Warning($"Vodafone TTL değeri geçersiz ({settings.VodafoneTtl}); {ttl} kullanılacak.");
+            settings.VodafoneTtl = ttl;
+            settings.LegacyHotspotCleaned = true;
         }
 
         settings.Networks = settings.Networks

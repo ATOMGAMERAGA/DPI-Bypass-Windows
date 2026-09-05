@@ -6,6 +6,7 @@ using DpiBypass.Core.Interop;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
+using DpiBypass.Core.Vodafone;
 
 namespace DpiBypass.Core;
 
@@ -21,6 +22,19 @@ public enum ProtectionState
 }
 
 /// <summary>What the mobile hotspot feature is doing right now.</summary>
+/// <param name="TtlActive">
+/// Whether the TTL rewrite is installed on the adapter under us. This is the difference
+/// between the mode being switched on and the mode doing anything, and the card says
+/// which of the two it is looking at.
+/// </param>
+/// <param name="TtlValue">The value outgoing packets are being rewritten to.</param>
+/// <param name="RewrittenPackets">
+/// Packets the rule has actually changed. A rule that is installed and has rewritten
+/// nothing is the shape of a fault - wrong adapter, or no traffic - so the number is
+/// carried rather than inferred.
+/// </param>
+/// <param name="DroppedIPv6Packets">Outbound IPv6 packets dropped on the shared adapter.</param>
+/// <param name="TtlFailure">Why the rule is not installed, when it should have been.</param>
 public sealed record HotspotStatus(
     bool VodafoneModeEnabled,
     bool DiagnosticsEnabled,
@@ -29,7 +43,12 @@ public sealed record HotspotStatus(
     string NetworkName,
     string AdapterName,
     DateTimeOffset? LegacyCleanedAt,
-    HotspotDiagnosticResult? LastResult);
+    HotspotDiagnosticResult? LastResult,
+    bool TtlActive = false,
+    int TtlValue = TtlFixSettings.DefaultTimeToLive,
+    long RewrittenPackets = 0,
+    long DroppedIPv6Packets = 0,
+    string? TtlFailure = null);
 
 /// <summary>
 /// The one object the UI talks to. Owns the engine, the encrypted resolver, the
@@ -44,6 +63,17 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly Lock _hotspotDiagnosticsGate = new();
     private readonly Lock _networkWatchGate = new();
     private readonly IMobileHotspotDiagnostics _hotspot;
+    private readonly IHotspotTtlFix _ttlFix;
+
+    /// <summary>One thread at a time deciding whether the TTL rule should be up.</summary>
+    /// <remarks>
+    /// The decision is reached from three directions at once - a network change on an
+    /// OS notification thread, the user's switch on the UI thread, and the startup pass -
+    /// and each one both reads the settings and opens or closes a driver handle. Without
+    /// the gate, two of them interleaving can leave the rule installed on the adapter the
+    /// machine has just left.
+    /// </remarks>
+    private readonly Lock _ttlFixGate = new();
     private readonly LatencyOptimizer _latencyOptimizer;
     private readonly LoadedLatencyLane _loadedLatency;
 
@@ -138,7 +168,8 @@ public sealed class ProtectionService : IAsyncDisposable
         LatencyOptimizer? latencyOptimizer = null,
         IMobileHotspotDiagnostics? hotspotDiagnostics = null,
         LoadedLatencyLane? loadedLatency = null,
-        IProcessFlowObserver? flowObserver = null)
+        IProcessFlowObserver? flowObserver = null,
+        IHotspotTtlFix? ttlFix = null)
     {
         _store = store ?? new ConfigStore();
         _learned = learnedDomains ?? new LearnedDomainStore();
@@ -156,6 +187,7 @@ public sealed class ProtectionService : IAsyncDisposable
             flows: _flowObserver,
             stages: new DelegateStageReporter(PublishLatencyStage));
         _hotspot = hotspotDiagnostics ?? new MobileHotspotDiagnostics(log: AppLog.InfoSink);
+        _ttlFix = ttlFix ?? new HotspotTtlFix(AppLog.InfoSink);
 
         _strategies = new StrategyCoordinator(
             read: () => _engine?.Strategy ?? StrategyLibrary.Default,
@@ -321,10 +353,26 @@ public sealed class ProtectionService : IAsyncDisposable
         NetworkName: Network.DisplayName,
         AdapterName: Network.AdapterName ?? "-",
         LegacyCleanedAt: Settings.HotspotLegacyMigratedAt,
-        LastResult: LastHotspotDiagnostics);
+        LastResult: LastHotspotDiagnostics,
+        TtlActive: _ttlFix.IsActive,
+        TtlValue: _ttlFix.IsActive ? _ttlFix.Settings.TimeToLive : Settings.VodafoneTtl,
+        RewrittenPackets: _ttlFix.RewrittenPackets,
+        DroppedIPv6Packets: _ttlFix.DroppedIPv6Packets,
+        TtlFailure: LastVodafoneFailure);
 
     /// <summary>The most recent diagnostics pass, if one has run this session.</summary>
     public HotspotDiagnosticResult? LastHotspotDiagnostics { get; private set; }
+
+    /// <summary>
+    /// Why the TTL rule is not up when the settings say it should be.
+    /// </summary>
+    /// <remarks>
+    /// The two ways this feature fails on a user's machine - the app is not elevated, and
+    /// the WinDivert driver is missing from the install - are both invisible from the
+    /// switch itself. Keeping the reason means the card can say which one happened
+    /// instead of showing the mode as on while nothing is running.
+    /// </remarks>
+    public string? LastVodafoneFailure { get; private set; }
 
     /// <summary>Whether a check is running now, so the card does not show a stale line.</summary>
     public bool IsHotspotBusy => _hotspotDiagnosticsCancellation is { IsCancellationRequested: false };
@@ -484,29 +532,39 @@ public sealed class ProtectionService : IAsyncDisposable
             _dnsProxy?.OnNetworkChanged();
         }
 
-        if (Settings.VodafoneModeNetworks.Count == 0
-            || !network.IsOnline
-            || !Settings.RefreshVodafoneNetworkIdentity(network))
+        if (Settings.VodafoneModeNetworks.Count > 0
+            && network.IsOnline
+            && Settings.RefreshVodafoneNetworkIdentity(network))
         {
-            return;
+            ReportSave(_store.Save(Settings), "ayarlar");
+            AppLog.Info($"vodafone: '{network.DisplayName}' kayıtlı ağ olarak tanındı.");
         }
 
-        ReportSave(_store.Save(Settings), "ayarlar");
-        AppLog.Info($"vodafone: '{network.DisplayName}' kayıtlı ağ olarak tanındı.");
+        // Last, and unconditionally: the rule is scoped to one adapter index, so a
+        // network change either moves it or takes it down. Leaving early on any of the
+        // conditions above would leave the previous link's rule installed.
+        ApplyVodafoneMode();
     }
 
     /// <summary>
-    /// Runs the safe checks once for a launch that starts on a remembered network.
+    /// Brings Vodafone Sınırsız Modu up for a launch that starts on a remembered network,
+    /// and runs the checks once.
     /// </summary>
     /// <remarks>
     /// Without this the card only ever filled in after a network transition, so the
     /// common case - the machine boots already connected to the hotspot - showed
-    /// "henüz kontrol edilmedi" until the user pressed the button. Nothing here changes
-    /// any network state; it is the same read-only pass the button runs.
+    /// "henüz kontrol edilmedi" until the user pressed the button, and the mode did not
+    /// start rewriting until the user moved networks.
     /// </remarks>
     public async Task RunStartupHotspotCheckAsync(CancellationToken cancellationToken = default)
     {
         StartNetworkWatch();
+
+        // StartNetworkWatch adopts the network - and with it applies the mode - only on
+        // the first call, and does nothing at all if the monitor refused to start. This
+        // is idempotent, so it costs nothing and covers both.
+        ApplyVodafoneMode();
+        Changed?.Invoke();
 
         var network = Network;
         if (!ShouldRunHotspotDiagnostics(Settings, network)
@@ -1414,12 +1472,90 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Enables Vodafone Sınırsız Modu's safe diagnostics for the current network.
+    /// Brings the TTL rule into line with the settings and the network under us.
     /// </summary>
     /// <remarks>
-    /// This deliberately records only the network identity and enables diagnostic
-    /// checks. It does not install a packet filter, change TTL/hop-limit values, block
-    /// IPv6 or attempt to influence carrier accounting.
+    /// <para>
+    /// The one place that decides whether the rule is up. Every path that can change the
+    /// answer - the switch, a network change, registering or forgetting a network, a
+    /// settings edit, startup - ends here rather than opening or closing the driver
+    /// handle itself, so there is a single description of when Vodafone Sınırsız Modu is
+    /// actually doing something. This is the Windows counterpart of the Linux daemon's
+    /// <c>_apply_vodafone</c>.
+    /// </para>
+    /// <para>
+    /// Deliberately not gated on the engine: the rewrite has nothing to do with DPI
+    /// evasion, and somebody looking at this card with protection stopped is exactly the
+    /// person who wants to know whether their hotspot connection is being counted.
+    /// </para>
+    /// </remarks>
+    private void ApplyVodafoneMode()
+    {
+        lock (_ttlFixGate)
+        {
+            var network = Network;
+            var wanted = Settings.VodafoneModeEnabled
+                && network.IsOnline
+                && Settings.VodafoneNetworkRegistered(network);
+
+            if (!wanted)
+            {
+                if (_ttlFix.IsActive)
+                {
+                    _ttlFix.Clear();
+                    AppLog.Info("vodafone: TTL kuralı kaldırıldı.");
+                }
+
+                LastVodafoneFailure = null;
+                return;
+            }
+
+            var rule = new TtlFixSettings
+            {
+                TimeToLive = TtlFixSettings.CoerceTimeToLive(Settings.VodafoneTtl),
+                DropIPv6 = Settings.VodafoneDropIPv6,
+            };
+
+            // Exactly this rule on exactly this adapter is already up. Re-applying would
+            // close and reopen the driver handle - a gap in which packets leave with the
+            // wrong TTL - to arrive at the state we are already in.
+            if (_ttlFix.IsActive
+                && _ttlFix.InterfaceIndex == network.InterfaceIndex
+                && _ttlFix.Settings == rule)
+            {
+                return;
+            }
+
+            try
+            {
+                _ttlFix.Apply(network.InterfaceIndex, rule);
+                LastVodafoneFailure = null;
+                AppLog.Info($"vodafone: TTL kuralı '{network.DisplayName}' ağında etkin "
+                    + $"(bağdaştırıcı {network.InterfaceIndex}, TTL={rule.TimeToLive}, "
+                    + $"IPv6 {(rule.DropIPv6 ? "kapalı" : "açık")}).");
+            }
+            catch (Exception ex)
+            {
+                // Kept rather than thrown, and deliberately not narrowed to
+                // TtlFixException: the caller is often a network-change notification on a
+                // thread nobody owns, where an escaping exception ends the process. The
+                // card has to be able to say why the mode is on but nothing is running,
+                // which is what the message is for.
+                LastVodafoneFailure = ex.Message;
+                AppLog.Error("Vodafone modu uygulanamadı", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Enables Vodafone Sınırsız Modu for the current network.
+    /// </summary>
+    /// <remarks>
+    /// Registers the network and installs the TTL rewrite on it: outgoing packets leave
+    /// at <see cref="AppSettings.VodafoneTtl"/> so the phone's own decrement puts them on
+    /// the wire at 64, the value the phone's own traffic carries. The rule is scoped to
+    /// the one adapter and to the networks the user registered, and it is removed when
+    /// either stops being true.
     /// </remarks>
     public void EnableVodafoneModeHere()
         => EnableVodafoneMode(NetworkFingerprint.Capture());
@@ -1438,24 +1574,67 @@ public sealed class ProtectionService : IAsyncDisposable
         Settings.VodafoneModeEnabled = true;
         Settings.HotspotDiagnostics = true;
         ReportSave(_store.Save(Settings), "ayarlar");
+        ApplyVodafoneMode();
         Changed?.Invoke();
     }
 
     /// <summary>
-    /// Disables the mode and its automatic runs without erasing remembered networks or
-    /// removing the always-available manual diagnostics.
+    /// Turns the mode off without erasing remembered networks or removing the
+    /// always-available manual diagnostics.
     /// </summary>
     public void DisableVodafoneMode()
     {
         if (!Settings.VodafoneModeEnabled && !Settings.HotspotDiagnostics)
         {
+            // The switch is already off, but a rule can still be up: a failed save, or a
+            // settings file replaced underneath us. Off has to mean the adapter is clean.
+            ApplyVodafoneMode();
             return;
         }
 
         Settings.VodafoneModeEnabled = false;
         Settings.HotspotDiagnostics = false;
         ReportSave(_store.Save(Settings), "ayarlar");
+        ApplyVodafoneMode();
         CancelHotspotDiagnostics();
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Changes what outgoing packets are rewritten to, and re-applies the rule.
+    /// </summary>
+    /// <remarks>
+    /// A value at or below the guard is refused rather than stored: it would rewrite the
+    /// engine's own low-TTL decoy packets, which is how every fake-packet strategy in the
+    /// library stops working without anything reporting a failure.
+    /// </remarks>
+    /// <exception cref="TtlFixException">The value is outside the usable range.</exception>
+    public void SetVodafoneTtl(int ttl)
+    {
+        TtlFixSettings.ValidateTimeToLive(ttl);
+
+        if (Settings.VodafoneTtl == ttl)
+        {
+            return;
+        }
+
+        Settings.VodafoneTtl = ttl;
+        ReportSave(_store.Save(Settings), "ayarlar");
+        ApplyVodafoneMode();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Whether outbound IPv6 is dropped on the shared adapter while active.</summary>
+    public void SetVodafoneDropIPv6(bool drop)
+    {
+        if (Settings.VodafoneDropIPv6 == drop)
+        {
+            return;
+        }
+
+        Settings.VodafoneDropIPv6 = drop;
+        ReportSave(_store.Save(Settings), "ayarlar");
+        ApplyVodafoneMode();
         Changed?.Invoke();
     }
 
@@ -1486,20 +1665,27 @@ public sealed class ProtectionService : IAsyncDisposable
             if (Settings.RefreshVodafoneNetworkIdentity(network))
             {
                 ReportSave(_store.Save(Settings), "ayarlar");
-                Changed?.Invoke();
             }
 
+            // Whether or not the identity moved: this is also the button somebody
+            // presses when the mode is on and the rule is not up, so it re-tries.
+            ApplyVodafoneMode();
+            Changed?.Invoke();
             return false;
         }
 
         Settings.RememberVodafoneNetwork(network);
 
         ReportSave(_store.Save(Settings), "ayarlar");
+
+        // Registering the network we are on is what makes the mode apply here, so the
+        // rule goes up now rather than on the next network change.
+        ApplyVodafoneMode();
         Changed?.Invoke();
         return true;
     }
 
-    /// <summary>Forgets one safe per-network registration.</summary>
+    /// <summary>Forgets one per-network registration.</summary>
     public void ForgetVodafoneNetwork(string key)
     {
         if (!Settings.ForgetVodafoneNetwork(key))
@@ -1508,6 +1694,9 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         ReportSave(_store.Save(Settings), "ayarlar");
+
+        // Forgetting the network under us un-gates the rule, so it comes down here.
+        ApplyVodafoneMode();
         Changed?.Invoke();
     }
 
@@ -1527,12 +1716,16 @@ public sealed class ProtectionService : IAsyncDisposable
 
         if (migration.Changed)
         {
-            AppLog.Info($"Eski hotspot yapılandırması temizlendi. {migration.Summary}");
+            AppLog.Info($"Eski hotspot yapılandırması taşındı. {migration.Summary}");
         }
 
-        // Saved either way: the switch is forced off on every pass, and persisting that
-        // is the whole point of an explicit cleanup call.
+        // Saved either way: the legacy fields are cleared on every pass, and persisting
+        // that is the whole point of an explicit cleanup call.
         ReportSave(_store.Save(Settings), "ayarlar");
+
+        // The pass can switch the mode on, for a file written before the current field
+        // names existed. Whatever it decided has to reach the adapter.
+        ApplyVodafoneMode();
         Changed?.Invoke();
 
         return migration;
@@ -2559,6 +2752,11 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         CancelHotspotDiagnostics();
         StopNetworkWatch();
+
+        // Before anything that can throw. A WinDivert rule outlives the process that
+        // installed it only as far as the handle, and leaving the adapter diverting into
+        // a queue nobody drains would black-hole it.
+        _ttlFix.Dispose();
 
         try
         {
