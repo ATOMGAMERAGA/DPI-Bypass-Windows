@@ -21,8 +21,11 @@
     <Geometry x:Key="IconChevronDownGeometry">M 6,9 L 12,15 L 18,9</Geometry>
     <Geometry x:Key="IconCheckGeometry">M 5,12.5 L 10,17.5 L 19,7</Geometry>
     <Geometry x:Key="IconWarningGeometry">M 12,4 L 21,19 L 3,19 Z M 12,10 L 12,14.5 M 11.3,17 A 0.7,0.7 0 1 0 12.7,17 A 0.7,0.7 0 1 0 11.3,17</Geometry>
-    <Geometry x:Key="IconSearchGeometry">M 10.5,4 A 6.5,6.5 0 1 0 10.51,4 Z M 15.3,15.3 L 20,20</Geometry>
+    <Geometry x:Key="IconSearchGeometry">M 10.5,4 A 6.5,6.5 0 1 0 10.5,17 A 6.5,6.5 0 1 0 10.5,4 M 15.3,15.3 L 20,20</Geometry>
     <Geometry x:Key="IconCloseGeometry">M 6,6 L 18,18 M 18,6 L 6,18</Geometry>
+
+    <Geometry x:Key="IconPlusGeometry">M 12,5 L 12,19 M 5,12 L 19,12</Geometry>
+    <Geometry x:Key="IconRefreshGeometry">M 19,8 A 8,8 0 1 0 20,15 M 19,3 L 19,8 L 14,8</Geometry>
 
     <!-- Stroke icon defaults: uniform scale, round joins, theme-driven colour. -->
     <Style x:Key="StrokeIconStyle" TargetType="Path">
@@ -433,75 +436,59 @@
 
     <!-- ======== Buttons ======== -->
 
-    <Style x:Key="PrimaryActionButtonStyle" TargetType="Button">
-        <Setter Property="Foreground" Value="{DynamicResource AppOnAccentTextBrush}" />
-        <Setter Property="FontSize" Value="14" />
-        <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Padding" Value="22,10" />
-        <Setter Property="MinHeight" Value="36" />
-        <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Border x:Name="Chrome"
-                            Background="{DynamicResource AppAccentBrush}"
-                            BorderBrush="Transparent"
-                            BorderThickness="1"
-                            CornerRadius="6"
-                            Padding="{TemplateBinding Padding}"
-                            SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
-                    </Border>
-                    <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentHoverBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentPressedBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppNeutralBrush}" />
-                            <Setter TargetName="Chrome" Property="Opacity" Value="0.55" />
-                        </Trigger>
-                    </ControlTemplate.Triggers>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
-    </Style>
-
+    <!-- One template keeps padding, icons, focus and disabled states consistent. -->
     <Style x:Key="SecondaryActionButtonStyle" TargetType="Button">
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Setter Property="Background" Value="{DynamicResource AppCardBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
         <Setter Property="FontSize" Value="13" />
-        <Setter Property="Padding" Value="16,8" />
-        <Setter Property="MinHeight" Value="34" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Padding" Value="14,7" />
+        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="HorizontalAlignment" Value="Left" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border x:Name="Chrome"
-                            Background="{DynamicResource AppCardBackgroundBrush}"
-                            BorderBrush="{DynamicResource AppCardBorderBrush}"
-                            BorderThickness="1"
-                            CornerRadius="6"
-                            Padding="{TemplateBinding Padding}"
-                            SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
-                    </Border>
+                    <Grid>
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <Grid HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Path x:Name="ActionIcon"
+                                      Style="{StaticResource StrokeIconStyle}"
+                                      Width="16" Height="16" Margin="0,0,8,0"
+                                      Data="{TemplateBinding infra:ActionButton.Icon}"
+                                      Stroke="{TemplateBinding Foreground}" />
+                                <ContentPresenter Grid.Column="1" RecognizesAccessKey="True"
+                                                  VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                        <Border x:Name="FocusRing" Margin="-3" CornerRadius="10"
+                                BorderThickness="2" IsHitTestVisible="False"
+                                BorderBrush="{DynamicResource AppFocusStrokeBrush}"
+                                Visibility="Collapsed" />
+                    </Grid>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppCardHoverBorderBrush}" />
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
+                        <Trigger Property="infra:ActionButton.Icon" Value="{x:Null}">
+                            <Setter TargetName="ActionIcon" Property="Visibility" Value="Collapsed" />
                         </Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource AppFocusStrokeBrush}" />
+                            <Setter TargetName="FocusRing" Property="Visibility" Value="Visible" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Chrome" Property="Opacity" Value="0.5" />
@@ -510,6 +497,35 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="BorderBrush" Value="{DynamicResource AppCardHoverBorderBrush}" />
+                <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Cursor" Value="Arrow" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="PrimaryActionButtonStyle" TargetType="Button" BasedOn="{StaticResource SecondaryActionButtonStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppOnAccentTextBrush}" />
+        <Setter Property="Background" Value="{DynamicResource AppAccentBrush}" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="Padding" Value="16,8" />
+        <Setter Property="MinHeight" Value="38" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{DynamicResource AppAccentHoverBrush}" />
+                <Setter Property="BorderBrush" Value="Transparent" />
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{DynamicResource AppAccentPressedBrush}" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- Small square button for a single glyph. Its whole job is one icon, so the

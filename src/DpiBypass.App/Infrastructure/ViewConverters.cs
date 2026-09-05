@@ -16,6 +16,16 @@ public sealed class EmptyStringToCollapsedConverter : IValueConverter
         => throw new NotSupportedException();
 }
 
+/// <summary>Preserves the progress slot when work is idle, preventing layout jumps.</summary>
+public sealed class BooleanToHiddenConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is true ? Visibility.Visible : Visibility.Hidden;
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
 /// <summary>The inverse of <see cref="BooleanToVisibilityConverter"/>, for empty states.</summary>
 public sealed class InverseBooleanToVisibilityConverter : IValueConverter
 {

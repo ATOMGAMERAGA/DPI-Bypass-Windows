@@ -1500,6 +1500,19 @@ public partial class App : Application
 
         _selfTest = false;
 
+        if (success && _window is not null)
+        {
+            try
+            {
+                UiLayoutSelfTest.Run(_window);
+            }
+            catch (Exception ex)
+            {
+                success = false;
+                AppLog.Error("Arayüz yerleşim sınaması başarısız", ex);
+            }
+        }
+
         AppLog.Info(
             $"Arayüz sınaması {(success ? "BAŞARILI" : "BAŞARISIZ")} · {report} · {DescribeWindow(observation)}");
 

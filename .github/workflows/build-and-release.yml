@@ -151,6 +151,15 @@ jobs:
 
           Write-Host 'Published WPF window rendered successfully.'
 
+      - name: Upload UI layout captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-layout-${{ steps.version.outputs.full }}
+          path: artifacts/ui-selftest/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress --yes

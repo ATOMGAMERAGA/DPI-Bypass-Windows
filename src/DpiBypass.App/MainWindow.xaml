@@ -18,6 +18,7 @@
 
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <infra:BooleanToHiddenConverter x:Key="BoolToHiddenConverter" />
         <infra:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibilityConverter" />
         <infra:EmptyStringToCollapsedConverter x:Key="EmptyToCollapsedConverter" />
         <infra:SeverityToBrushConverter x:Key="SeverityBrushConverter" />
@@ -81,6 +82,7 @@
                         <Path Style="{StaticResource StatusPillIconStyle}" />
                         <TextBlock Text="{Binding StatusHeadline}"
                                    FontSize="12.5"
+                                   MaxWidth="180" TextTrimming="CharacterEllipsis"
                                    FontWeight="SemiBold"
                                    Margin="7,0,0,0"
                                    VerticalAlignment="Center"
@@ -91,8 +93,9 @@
                 <!-- The primary action is reachable from every page. -->
                 <Button Grid.Column="3"
                         Style="{StaticResource PrimaryActionButtonStyle}"
-                        MinWidth="170"
+                        Width="190"
                         VerticalAlignment="Center"
+                        infra:ActionButton.Icon="{StaticResource IconShieldGeometry}"
                         Command="{Binding ToggleCommand}"
                         Content="{Binding ToggleCaption}" />
             </Grid>
@@ -169,6 +172,7 @@
                                             MinWidth="190"
                                             MinHeight="40"
                                             HorizontalAlignment="Stretch"
+                                            infra:ActionButton.Icon="{StaticResource IconShieldGeometry}"
                                             Command="{Binding ToggleCommand}"
                                             Content="{Binding ToggleCaption}" />
                                     <!-- Real busy state: visible only while the
@@ -176,7 +180,7 @@
                                     <ProgressBar Height="3"
                                                  Margin="0,10,0,0"
                                                  IsIndeterminate="{Binding IsBusy}"
-                                                 Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                 Visibility="{Binding IsBusy, Converter={StaticResource BoolToHiddenConverter}}"
                                                  Background="{DynamicResource AppSubtleBackgroundBrush}"
                                                  Foreground="{DynamicResource AppAccentBrush}" />
                                 </StackPanel>
@@ -198,13 +202,14 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <Path Grid.Column="0"
+                                      Style="{StaticResource StrokeIconStyle}"
                                       Data="{StaticResource IconWarningGeometry}"
                                       Width="18"
                                       Height="18"
                                       Stretch="Uniform"
                                       Margin="0,0,12,0"
                                       VerticalAlignment="Center"
-                                      Fill="{DynamicResource AppWarningBrush}" />
+                                      Stroke="{DynamicResource AppWarningBrush}" />
                                 <TextBlock Grid.Column="1"
                                            Style="{StaticResource NoticeTextStyle}"
                                            VerticalAlignment="Center"
@@ -267,17 +272,17 @@
                                 <TextBlock Style="{StaticResource CaptionStyle}"
                                            Text="Gerçek bir TLS el sıkışması yapılır ve sertifika doğrulanır. Yalnızca bağlantı kurulması değil, araya girilmediği de kontrol edilir." />
 
-                                <StackPanel Orientation="Horizontal" Margin="0,12,0,10">
+                                <WrapPanel Margin="0,12,0,2">
                                     <Button Content="discord.com testi"
                                             MinWidth="150"
-                                            Margin="0,0,8,0"
+                                            Margin="0,0,8,8"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             Command="{Binding TestCommand}" />
                                     <Button Content="Tüm Discord adresleri"
-                                            MinWidth="180"
+                                            MinWidth="180" Margin="0,0,0,8"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             Command="{Binding TestAllCommand}" />
-                                </StackPanel>
+                                </WrapPanel>
 
                                 <Border Style="{StaticResource MonoPanelStyle}">
                                     <TextBlock Text="{Binding ProbeSummary}" Style="{StaticResource MonospaceStyle}" />
@@ -411,6 +416,7 @@
                                         MinWidth="100"
                                         Margin="8,0,0,0"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
+                                        infra:ActionButton.Icon="{StaticResource IconPlusGeometry}"
                                         Command="{Binding AddDomainCommand}" />
                                 <Button Grid.Column="2"
                                         Content="Seçileni çıkar"
@@ -607,6 +613,7 @@
                                     <Button Content="Yeniden tara"
                                             MinWidth="150"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
+                                            infra:ActionButton.Icon="{StaticResource IconRefreshGeometry}"
                                             Command="{Binding RetuneCommand}" />
                                     <!-- Real tuning progress: only while the sweep runs. -->
                                     <ProgressBar Width="90"
@@ -617,11 +624,10 @@
                                                  Visibility="{Binding IsTuning, Converter={StaticResource BoolToVisibilityConverter}}"
                                                  Background="{DynamicResource AppSubtleBackgroundBrush}"
                                                  Foreground="{DynamicResource AppAccentBrush}" />
-                                    <TextBlock Text="{Binding TuningStatus}"
-                                               Style="{StaticResource CaptionStyle}"
-                                               VerticalAlignment="Center"
-                                               Margin="12,0,0,0" />
                                 </StackPanel>
+                                <TextBlock Text="{Binding TuningStatus}"
+                                           Style="{StaticResource CaptionStyle}"
+                                           TextWrapping="Wrap" Margin="0,8,0,0" />
                             </StackPanel>
                         </Border>
 
@@ -810,7 +816,8 @@
                                 <StackPanel Margin="0,10,0,0"
                                             Visibility="{Binding IsCustomLatencyTarget, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <TextBox MinHeight="34"
-                                             MaxWidth="420"
+                                             Width="420"
+                                             MaxWidth="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=StackPanel}}"
                                              HorizontalAlignment="Left"
                                              VerticalContentAlignment="Center"
                                              AutomationProperties.Name="Sunucu adresi"
@@ -839,6 +846,7 @@
                                             MinWidth="90"
                                             Margin="8,0,0,0"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
+                                            infra:ActionButton.Icon="{StaticResource IconRefreshGeometry}"
                                             Command="{Binding RefreshLatencyProcessesCommand}" />
                                 </Grid>
 
@@ -855,27 +863,71 @@
                                 <!-- 3. One button. Its label is the next step the engine
                                      itself worked out, so there is never a row of five
                                      equally weighted actions to choose between. -->
-                                <Button Content="{Binding LatencyPrimaryAction}"
-                                        MinWidth="220"
+                                <Button x:Name="LatencyPrimaryButton" Content="{Binding LatencyPrimaryAction}"
+                                        Width="240"
                                         MinHeight="38"
                                         Margin="0,16,0,0"
                                         HorizontalAlignment="Left"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
-                                        IsDefault="True"
+                                        infra:ActionButton.Icon="{StaticResource IconSignalGeometry}"
                                         Command="{Binding LatencyPrimaryCommand}" />
+
+                                <!-- This slot stays in the layout while idle: starting a run
+                                     must not push the results and actions out of view. -->
+                                <Grid x:Name="LatencyProgressSlot" Height="80" Margin="0,8,0,0">
+                                    <Border x:Name="LatencyProgressPanel" Style="{StaticResource StatusPanelStyle}"
+                                            Padding="12,8"
+                                            Visibility="{Binding IsLatencyProgressVisible, Converter={StaticResource BoolToHiddenConverter}}">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="3" />
+                                            </Grid.RowDefinitions>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="LatencyProgressLabel" Text="{Binding LatencyProgressTitle}"
+                                                       Style="{StaticResource BodyStyle}" FontWeight="SemiBold"
+                                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                                       ToolTip="{Binding LatencyProgressTitle}" VerticalAlignment="Center"
+                                                       AutomationProperties.LiveSetting="Polite" />
+                                            <Button Grid.Column="1" Grid.RowSpan="3" Content="İptal et"
+                                                    Margin="8,0,0,0" Style="{StaticResource SecondaryActionButtonStyle}"
+                                                    Command="{Binding LatencyCancelCommand}" />
+                                            <TextBlock Grid.Row="1" Text="{Binding LatencyStageInstruction}"
+                                                       Style="{StaticResource HintStyle}"
+                                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                                       ToolTip="{Binding LatencyStageInstruction}" />
+                                            <TextBlock Grid.Row="2" Text="{Binding LatencyElapsed}"
+                                                       Style="{StaticResource HintStyle}" VerticalAlignment="Center"
+                                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                            <ProgressBar Grid.Row="3" Grid.ColumnSpan="2" Height="3"
+                                                         IsIndeterminate="{Binding IsLatencyProgressVisible}"
+                                                         Background="{DynamicResource AppSubtleBackgroundBrush}"
+                                                         Foreground="{DynamicResource AppAccentBrush}" />
+                                        </Grid>
+                                    </Border>
+                                    <TextBlock x:Name="LatencyIdleHint" Text="Hazır olduğunuzda ölçümü başlatın. Sonuçlar aşağıda görünür."
+                                               Style="{StaticResource HintStyle}" TextWrapping="Wrap"
+                                               VerticalAlignment="Center"
+                                               Visibility="{Binding IsLatencyProgressVisible, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
+                                </Grid>
 
                                 <!-- 4. The numbers. A card with nothing behind it says so
                                      and dims; it never prints a zero nobody measured. -->
-                                <ItemsControl ItemsSource="{Binding LatencyCards}" Margin="0,16,0,0">
+                                <ItemsControl x:Name="LatencyResultCards" ItemsSource="{Binding LatencyCards}" Margin="0,16,0,0">
                                     <ItemsControl.ItemsPanel>
                                         <ItemsPanelTemplate>
-                                            <WrapPanel />
+                                            <UniformGrid Columns="2" />
                                         </ItemsPanelTemplate>
                                     </ItemsControl.ItemsPanel>
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
                                             <Border Style="{StaticResource InfoTileStyle}"
-                                                    MinWidth="150"
+                                                    MinHeight="108"
                                                     Margin="0,0,8,8"
                                                     Opacity="{Binding Measured, Converter={StaticResource MeasuredOpacityConverter}}">
                                                 <StackPanel>
@@ -887,7 +939,6 @@
                                                     <TextBlock Text="{Binding Note}"
                                                                Style="{StaticResource HintStyle}"
                                                                Margin="0,2,0,0"
-                                                               MaxWidth="260"
                                                                TextWrapping="Wrap"
                                                                Visibility="{Binding Note, Converter={StaticResource EmptyToCollapsedConverter}}" />
                                                 </StackPanel>
@@ -910,115 +961,6 @@
                                            TextWrapping="Wrap"
                                            AutomationProperties.LiveSetting="Polite"
                                            Visibility="{Binding LatencySuggestion, Converter={StaticResource EmptyToCollapsedConverter}}" />
-
-                                <!-- 6. Progress, for every run and not only the deep test,
-                                     with a stop button that is live throughout. -->
-                                <Border Style="{StaticResource StatusPanelStyle}"
-                                        Margin="0,14,0,0"
-                                        Visibility="{Binding IsLatencyProgressVisible, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <StackPanel>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0"
-                                                       Text="{Binding LatencyProgressTitle}"
-                                                       Style="{StaticResource LatencyHeadlineStyle}"
-                                                       TextWrapping="Wrap"
-                                                       VerticalAlignment="Center" />
-                                            <Button Grid.Column="1"
-                                                    Content="İptal et"
-                                                    MinWidth="110"
-                                                    Margin="8,0,0,0"
-                                                    VerticalAlignment="Center"
-                                                    Style="{StaticResource SecondaryActionButtonStyle}"
-                                                    Command="{Binding LatencyCancelCommand}" />
-                                        </Grid>
-
-                                        <!-- Indeterminate on purpose: the run has no
-                                             predictable total, and a percentage with no
-                                             data behind it is a made-up number. -->
-                                        <ProgressBar Height="3"
-                                                     Margin="0,10,0,0"
-                                                     IsIndeterminate="True"
-                                                     Background="{DynamicResource AppSubtleBackgroundBrush}"
-                                                     Foreground="{DynamicResource AppAccentBrush}" />
-
-                                        <TextBlock Text="{Binding LatencyStageInstruction}"
-                                                   Style="{StaticResource CaptionStyle}"
-                                                   Margin="0,8,0,0"
-                                                   TextWrapping="Wrap"
-                                                   Visibility="{Binding LatencyStageInstruction, Converter={StaticResource EmptyToCollapsedConverter}}" />
-                                        <TextBlock Text="{Binding LatencyStageRate}"
-                                                   Style="{StaticResource HintStyle}"
-                                                   Margin="0,4,0,0"
-                                                   TextWrapping="Wrap"
-                                                   Visibility="{Binding LatencyStageRate, Converter={StaticResource EmptyToCollapsedConverter}}" />
-                                        <TextBlock Text="{Binding LatencyStageRemaining}"
-                                                   Style="{StaticResource HintStyle}"
-                                                   Margin="0,2,0,0"
-                                                   Visibility="{Binding LatencyStageRemaining, Converter={StaticResource EmptyToCollapsedConverter}}" />
-                                        <TextBlock Text="{Binding LatencyStageData}"
-                                                   Style="{StaticResource HintStyle}"
-                                                   Margin="0,2,0,0"
-                                                   Visibility="{Binding LatencyStageData, Converter={StaticResource EmptyToCollapsedConverter}}" />
-
-                                        <!-- Measured, unlike a percentage: a run's total
-                                             depends on the adapter and on how noisy the
-                                             link is, so elapsed time is the only honest
-                                             answer to "how long has this been going". -->
-                                        <TextBlock Text="{Binding LatencyElapsed}"
-                                                   Style="{StaticResource HintStyle}"
-                                                   Margin="0,2,0,0"
-                                                   AutomationProperties.LiveSetting="Polite"
-                                                   Visibility="{Binding LatencyElapsed, Converter={StaticResource EmptyToCollapsedConverter}}" />
-                                    </StackPanel>
-                                </Border>
-
-                                <!-- Where the run has got to. Each row carries a word for
-                                     its state as well as a colour, so the sequence reads
-                                     the same with colour vision differences or in a
-                                     screen reader. -->
-                                <Border Style="{StaticResource StatusPanelStyle}" Margin="0,12,0,0">
-                                    <StackPanel>
-                                        <TextBlock Text="Ölçüm adımları"
-                                                   Style="{StaticResource FieldLabelStyle}"
-                                                   Margin="0,0,0,6" />
-                                        <ItemsControl ItemsSource="{Binding LatencyFlow}"
-                                                      AutomationProperties.Name="Ölçüm adımları">
-                                            <ItemsControl.ItemTemplate>
-                                                <DataTemplate>
-                                                    <Grid Margin="0,3,0,3">
-                                                        <Grid.ColumnDefinitions>
-                                                            <ColumnDefinition Width="Auto" />
-                                                            <ColumnDefinition Width="Auto" />
-                                                            <ColumnDefinition Width="*" />
-                                                        </Grid.ColumnDefinitions>
-                                                        <TextBlock Grid.Column="0"
-                                                                   Text="{Binding Ordinal}"
-                                                                   Style="{StaticResource HintStyle}"
-                                                                   MinWidth="18"
-                                                                   VerticalAlignment="Top" />
-                                                        <TextBlock Grid.Column="1"
-                                                                   Text="{Binding StateLabel}"
-                                                                   Style="{StaticResource SeverityStatusLineStyle}"
-                                                                   Tag="{Binding Severity}"
-                                                                   MinWidth="96"
-                                                                   VerticalAlignment="Top" />
-                                                        <TextBlock Grid.Column="2"
-                                                                   Style="{StaticResource CaptionStyle}"
-                                                                   TextWrapping="Wrap">
-                                                            <Run Text="{Binding Title, Mode=OneWay}" FontWeight="SemiBold" />
-                                                            <Run Text=" · " />
-                                                            <Run Text="{Binding Detail, Mode=OneWay}" />
-                                                        </TextBlock>
-                                                    </Grid>
-                                                </DataTemplate>
-                                            </ItemsControl.ItemTemplate>
-                                        </ItemsControl>
-                                    </StackPanel>
-                                </Border>
 
                                 <!-- 7. Secondary actions. Undo is easy to find; everything
                                      else is one level down. -->
@@ -1070,6 +1012,70 @@
                                                    Margin="0" />
                                     </Expander.Header>
                                     <StackPanel>
+                                        <TextBlock Text="{Binding LatencyStageInstruction}"
+                                                   Style="{StaticResource CaptionStyle}"
+                                                   Margin="0,8,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding LatencyStageInstruction, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                        <TextBlock Text="{Binding LatencyStageRate}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,4,0,0"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding LatencyStageRate, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                        <TextBlock Text="{Binding LatencyStageRemaining}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding LatencyStageRemaining, Converter={StaticResource EmptyToCollapsedConverter}}" />
+                                        <TextBlock Text="{Binding LatencyStageData}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding LatencyStageData, Converter={StaticResource EmptyToCollapsedConverter}}" />
+
+                                        <!-- Where the run has got to. Each row carries a word for
+                                             its state as well as a colour, so the sequence reads
+                                             the same with colour vision differences or in a
+                                             screen reader. -->
+                                        <Border Style="{StaticResource StatusPanelStyle}" Margin="0,12,0,0">
+                                            <StackPanel>
+                                                <TextBlock Text="Ölçüm adımları"
+                                                           Style="{StaticResource FieldLabelStyle}"
+                                                           Margin="0,0,0,6" />
+                                                <ItemsControl ItemsSource="{Binding LatencyFlow}"
+                                                              AutomationProperties.Name="Ölçüm adımları">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Grid Margin="0,3,0,3">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="Auto" />
+                                                                    <ColumnDefinition Width="Auto" />
+                                                                    <ColumnDefinition Width="*" />
+                                                                </Grid.ColumnDefinitions>
+                                                                <TextBlock Grid.Column="0"
+                                                                           Text="{Binding Ordinal}"
+                                                                           Style="{StaticResource HintStyle}"
+                                                                           MinWidth="18"
+                                                                           VerticalAlignment="Top" />
+                                                                <TextBlock Grid.Column="1"
+                                                                           Text="{Binding StateLabel}"
+                                                                           Style="{StaticResource SeverityStatusLineStyle}"
+                                                                           Tag="{Binding Severity}"
+                                                                           MinWidth="96"
+                                                                           VerticalAlignment="Top" />
+                                                                <TextBlock Grid.Column="2"
+                                                                           Style="{StaticResource CaptionStyle}"
+                                                                           TextWrapping="Wrap">
+                                                                    <Run Text="{Binding Title, Mode=OneWay}" FontWeight="SemiBold" />
+                                                                    <Run Text=" · " />
+                                                                    <Run Text="{Binding Detail, Mode=OneWay}" />
+                                                                </TextBlock>
+                                                            </Grid>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </StackPanel>
+                                        </Border>
+
+
                                         <TextBlock Style="{StaticResource CaptionStyle}"
                                                    TextWrapping="Wrap"
                                                    Text="Her ayar tek tek, dönüşümlü A/B turlarıyla ölçülür: ayarsız ölç, ayarı uygula, bekle, tekrar ölç, geri al — ve sıra her turda değişir. Bir ayar yalnızca kazanç turlar boyunca tekrarlandığında ve güven aralığı sıfırı dışladığında kalır. Kabul edilenlerin tamamı en sonda birlikte yeniden ölçülür; kazanç yoksa özgün değerler anında geri yüklenir." />
@@ -1327,6 +1333,7 @@
                                         Margin="0,14,0,0"
                                         HorizontalAlignment="Left"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
+                                        infra:ActionButton.Icon="{StaticResource IconSearchGeometry}"
                                         Command="{Binding HotspotDiagnoseCommand}" />
 
                                 <ProgressBar Height="3"
