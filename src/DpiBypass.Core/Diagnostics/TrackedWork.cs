@@ -18,18 +18,6 @@ public sealed class TrackedWork
     private readonly Lock _gate = new();
     private readonly HashSet<Task> _tasks = [];
 
-    /// <summary>How many tasks are still running.</summary>
-    public int Count
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _tasks.Count;
-            }
-        }
-    }
-
     /// <summary>Registers a task and removes it again when it finishes, however it finishes.</summary>
     public Task Track(Task task)
     {

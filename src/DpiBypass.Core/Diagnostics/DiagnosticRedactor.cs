@@ -11,9 +11,7 @@ public enum RedactionKind
     Mac = 2,
     Address = 3,
     Host = 4,
-    Path = 5,
-    User = 6,
-    Adapter = 7,
+    Adapter = 5,
 }
 
 /// <summary>
@@ -188,8 +186,6 @@ public sealed partial class DiagnosticRedactor
         RedactionKind.Mac => "donanim-adresi",
         RedactionKind.Address => "adres",
         RedactionKind.Host => "hedef",
-        RedactionKind.Path => "yol",
-        RedactionKind.User => "kullanici",
         _ => "baglanti-noktasi",
     };
 

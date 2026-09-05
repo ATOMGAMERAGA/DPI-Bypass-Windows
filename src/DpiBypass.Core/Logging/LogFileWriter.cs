@@ -139,18 +139,6 @@ public sealed class LogFileWriter : IDisposable
     /// <summary>Entries queued but not yet written.</summary>
     public int Pending => Volatile.Read(ref _pendingCount);
 
-    /// <summary>The file the next entry would go to, for the diagnostics report.</summary>
-    public string? CurrentFile
-    {
-        get
-        {
-            lock (_fileGate)
-            {
-                return _filePath;
-            }
-        }
-    }
-
     /// <summary>Queues an entry. Never blocks, never throws.</summary>
     public void Enqueue(LogEntry entry)
     {

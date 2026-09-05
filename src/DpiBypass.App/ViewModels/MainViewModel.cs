@@ -2995,6 +2995,9 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception)
         {
+            // The dispatcher is shutting down. This runs on the packet path, and throwing
+            // from there over a list of hostnames nobody will read again would take the
+            // engine thread down with it.
             Interlocked.Exchange(ref _hostDrainQueued, 0);
         }
     }
@@ -3040,6 +3043,7 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception)
         {
+            // Shutting down; the remaining hostnames are a display backlog.
             Interlocked.Exchange(ref _hostDrainQueued, 0);
         }
     }
@@ -3135,6 +3139,8 @@ public sealed class MainViewModel : ObservableObject
             }
             catch (Exception)
             {
+                // Shutting down. The lines are already in the file; what is left in the
+                // queue is a display backlog nobody will see.
                 Interlocked.Exchange(ref _logDrainQueued, 0);
             }
         }

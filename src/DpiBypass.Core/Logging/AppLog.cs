@@ -41,9 +41,6 @@ public static class AppLog
     /// <summary>Entries the file writer could not keep up with, for the diagnostics report.</summary>
     public static long DroppedFileEntries => _file?.Dropped ?? 0;
 
-    /// <summary>The log file being written to now, or null when logging is memory only.</summary>
-    public static string? CurrentFile => _file?.CurrentFile;
-
     public static IReadOnlyList<LogEntry> Snapshot() => [.. Buffer];
 
     public static void Initialise()

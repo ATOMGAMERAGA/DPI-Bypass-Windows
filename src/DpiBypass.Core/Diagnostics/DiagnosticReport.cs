@@ -8,23 +8,13 @@ using DpiBypass.Core.Logging;
 namespace DpiBypass.Core.Diagnostics;
 
 /// <summary>
-/// One measurement, or the honest absence of one.
+/// One block of the report: a heading and its rows, all already masked.
 /// </summary>
 /// <remarks>
-/// <c>Measured</c> false with a reason is a first class answer. A report that showed a
-/// zero for a probe that never ran would be worse than one that says nothing at all,
-/// because a zero is a number somebody will reason about.
+/// A row with nothing behind it carries the string "ölçülmedi" rather than a zero. A
+/// report showing a zero for a probe that never ran would be worse than one that says
+/// nothing at all, because a zero is a number somebody will reason about.
 /// </remarks>
-public sealed record ReportValue(bool Measured, string? Reason = null)
-{
-    public static readonly ReportValue NotMeasured = new(false, "ölçülmedi");
-
-    public static ReportValue Failed(string reason) => new(false, reason);
-
-    public static readonly ReportValue Ok = new(true);
-}
-
-/// <summary>What was measured about the machine's connection, already masked.</summary>
 public sealed record ReportSection(string Title, IReadOnlyList<KeyValuePair<string, string>> Rows);
 
 /// <summary>
