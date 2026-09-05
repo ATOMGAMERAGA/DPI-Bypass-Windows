@@ -2144,6 +2144,250 @@ public sealed class ProtectionService : IAsyncDisposable
         return result.Succeeded;
     }
 
+    /// <summary>
+    /// Takes a consistent, masked picture of the app as it is right now.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Reads state that already exists and starts nothing: no probe, no load test, no
+    /// connection change. A user asking what their machine looks like must be answered
+    /// about the machine they asked about, not about one the question disturbed.
+    /// </para>
+    /// <para>
+    /// Every identifying value goes through the redactor here, at the one point where the
+    /// snapshot is assembled, so nothing downstream can leak one by forgetting to call it.
+    /// Where there is no measurement the row says "ölçülmedi" rather than a zero.
+    /// </para>
+    /// </remarks>
+    public DiagnosticSnapshot CaptureDiagnostics()
+    {
+        var redactor = new DiagnosticRedactor();
+        var network = Network;
+
+        // Registered first so these values are already aliased when the log tail and the
+        // free-text rows below are masked.
+        redactor.Register(RedactionKind.Network, network.Ssid, network.DisplayName, network.Key);
+        redactor.Register(RedactionKind.Bssid, network.Bssid);
+        redactor.Register(RedactionKind.Mac, network.GatewayMac);
+        redactor.Register(RedactionKind.Address, network.GatewayAddress);
+        redactor.Register(RedactionKind.Adapter, network.AdapterName, network.AdapterId);
+        redactor.Register(RedactionKind.Host, Settings.Latency.TargetHost, Settings.Latency.PinnedEndpoint);
+        redactor.Register(RedactionKind.Host, [.. Settings.ExtraDomains]);
+        redactor.Register(RedactionKind.Host, [.. Settings.ExcludedDomains]);
+        redactor.Register(RedactionKind.Network, [.. Settings.VodafoneModeNetworks.Select(n => n.Ssid)]);
+        redactor.Register(RedactionKind.Network, [.. Settings.VodafoneModeNetworks.Select(n => n.DisplayName)]);
+
+        var networkAlias = redactor.Alias(RedactionKind.Network, network.Key) ?? "ölçülmedi";
+
+        return new DiagnosticSnapshot
+        {
+            GeneratedAt = DateTimeOffset.Now,
+            AppVersion = BuildVersion(),
+            OperatingSystem = Environment.OSVersion.VersionString,
+            Architecture = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString(),
+            Elevated = Elevation.IsElevated,
+            RemoteSession = SessionKind.IsRemoteSession(),
+            EngineSession = _strategies.Session,
+            NetworkAlias = networkAlias,
+            Sections =
+            [
+                ProtectionSection(redactor),
+                NetworkSection(redactor, network),
+                DnsSection(redactor),
+                LatencySection(redactor),
+                HotspotSection(redactor),
+            ],
+            LogExcerpt = DiagnosticReportWriter.MaskedLogTail(redactor, AppLog.Snapshot()),
+            MaskedValues = redactor.MaskedValues,
+            DroppedLogLines = AppLog.DroppedFileEntries,
+        };
+    }
+
+    private static string BuildVersion()
+        => typeof(ProtectionService).Assembly.GetName().Version?.ToString() ?? "bilinmiyor";
+
+    private static string Measured(string? value) => string.IsNullOrWhiteSpace(value) ? "ölçülmedi" : value;
+
+    private ReportSection ProtectionSection(DiagnosticRedactor redactor) => new(
+        "Koruma",
+        [
+            new("Durum", State.ToString()),
+            new("Ayrıntı", Measured(redactor.Redact(StatusDetail))),
+            new("Kapsam", DescribeScope(Settings.Scope)),
+            new("Etkin yöntem", State == ProtectionState.Stopped ? "ölçülmedi" : Strategy.Name),
+            new("Yöntem elle seçildi", Settings.ManualStrategyId is { Length: > 0 } ? "evet" : "hayır"),
+            new("Operatör", Isp.DisplayName),
+            new("Operatör algılandı", Detection?.WasAutomatic == true ? "otomatik" : "elle seçildi"),
+            new("QUIC engelleme", Settings.BlockQuicHandshakes ? "açık" : "kapalı"),
+            // Invariant formatting throughout the report: it is a file the user sends on,
+            // and a decimal comma that depends on the machine that wrote it makes two
+            // reports of the same fault impossible to line up.
+            new("Son doğrulama", LastProbe is null
+                ? "ölçülmedi"
+                : FormattableString.Invariant(
+                    $"{DescribeOutcome(LastProbe.Outcome)} · {LastProbe.Elapsed.TotalMilliseconds:F0} ms")),
+            new("Motor sayaçları", Stats is { } stats
+                ? FormattableString.Invariant(
+                    $"incelendi {stats.Inspected}, yeniden yazıldı {stats.Rewritten}, hata {stats.Errors}")
+                : "ölçülmedi"),
+            new("Korunan alan adı sayısı", ProtectedDomainCount.ToString()),
+            new("Ayar kaydı", LastSaveFailure is { } failure ? failure.Describe() : "sorunsuz"),
+            new("Bekleyen DNS geri yükleme", Measured(DnsRestorePending)),
+        ]);
+
+    private static ReportSection NetworkSection(DiagnosticRedactor redactor, NetworkFingerprint network) => new(
+        "Ağ",
+        [
+            new("Ağ", redactor.Alias(RedactionKind.Network, network.Key) ?? "ölçülmedi"),
+            new("Görünen ad", redactor.Alias(RedactionKind.Network, network.DisplayName) ?? "ölçülmedi"),
+            new("Bağdaştırıcı", redactor.Alias(RedactionKind.Adapter, network.AdapterName) ?? "ölçülmedi"),
+            new("Bağdaştırıcı türü", network.AdapterType.ToString()),
+            new("Ağ geçidi", redactor.Alias(RedactionKind.Address, network.GatewayAddress) ?? "ölçülmedi"),
+            new("Çevrim içi", network.IsOnline ? "evet" : "hayır"),
+        ]);
+
+    private ReportSection DnsSection(DiagnosticRedactor redactor)
+    {
+        var rows = new List<KeyValuePair<string, string>>
+        {
+            new("Seçilen mod", Settings.DnsMode.ToString()),
+            new("Etkin mod", ActiveDnsMode.ToString()),
+            new("Son cevaplayan sağlayıcı", Measured(DnsProviderInUse)),
+            new("Doğrulanmış sağlıklı sağlayıcı", Measured(_resolver?.VerifiedProvider)),
+            new("Sunulan sorgu", _dnsProxy is null ? "ölçülmedi" : DnsQueriesServed.ToString()),
+            new("Önbellek isabeti", _dnsProxy is null ? "ölçülmedi" : DnsCacheHits.ToString()),
+            new("Kesilen yanıt", _dnsProxy is null ? "ölçülmedi" : _dnsProxy.TruncatedAnswers.ToString()),
+            new("Ağ değişiminde atılan yanıt", _dnsProxy is null ? "ölçülmedi" : _dnsProxy.CrossNetworkDrops.ToString()),
+            new("Birleştirilen sorgu", _resolver is null ? "ölçülmedi" : _resolver.CoalescedQueries.ToString()),
+        };
+
+        if (_resolver is null)
+        {
+            rows.Add(new("Sağlayıcı sağlığı", "ölçülmedi"));
+            return new ReportSection("Ad çözümleme", rows);
+        }
+
+        foreach (var endpoint in _resolver.EndpointStatus())
+        {
+            var state = endpoint.LastFailure is null
+                ? FormattableString.Invariant($"sağlıklı · {endpoint.LastLatencyMs} ms")
+                : endpoint.PenaltyRemaining is { } remaining
+                    ? FormattableString.Invariant(
+                        $"{redactor.Redact(endpoint.LastFailure)} · {remaining.TotalSeconds:F0} sn sonra yeniden denenir")
+                    : redactor.Redact(endpoint.LastFailure);
+
+            rows.Add(new($"Sağlayıcı: {endpoint.Provider}", state));
+        }
+
+        return new ReportSection("Ad çözümleme", rows);
+    }
+
+    private ReportSection LatencySection(DiagnosticRedactor redactor)
+    {
+        var status = LatencyStatus;
+        var rows = new List<KeyValuePair<string, string>>
+        {
+            new("Mod", status.ModeEnabled ? "açık" : "kapalı"),
+            new("Durum", status.State.ToString()),
+            new("Özet", Measured(redactor.Redact(status.Headline))),
+            new("Hedef", Measured(redactor.Redact(status.Target))),
+            new("Ölçüm aracı", Measured(status.Protocol)),
+            new("Yalnızca yol referansı", status.RouteReferenceOnly ? "evet" : "hayır"),
+            new("Bağdaştırıcı", redactor.Alias(RedactionKind.Adapter, status.AdapterName) ?? "ölçülmedi"),
+        };
+
+        AppendMeasurement(rows, "Boştayken (önce)", redactor, status.IdleBefore ?? status.Idle);
+        AppendMeasurement(rows, "Boştayken (sonra)", redactor, status.IdleAfter);
+        AppendMeasurement(rows, "Yük altında (yükleme)", redactor, status.UploadLoaded);
+        AppendMeasurement(rows, "Yük altında (yükleme, sonra)", redactor, status.UploadLoadedAfter);
+        AppendMeasurement(rows, "Yük altında (indirme)", redactor, status.DownloadLoaded);
+
+        rows.Add(new("Doğrulanmış kazanç", status.Improvement is { } gain
+            ? FormattableString.Invariant($"{status.ImprovedMetric ?? "ortanca"} · ortanca {gain.MedianMs:F1} ms, ")
+                + FormattableString.Invariant($"p95 {gain.P95Ms:F1} ms, p99 {gain.P99Ms:F1} ms, ")
+                + FormattableString.Invariant($"dalgalanma {gain.JitterMs:F1} ms")
+                + (gain.LossPercent is { } loss
+                    ? FormattableString.Invariant($", kayıp {loss:F1}%")
+                    : ", kayıp ölçülmedi")
+            : "ölçülmedi"));
+        rows.Add(new("Ham başlangıç-son farkı (nedensel değil)", status.BaselineComparison is { } raw
+            ? FormattableString.Invariant($"ortanca {raw.MedianMs:F1} ms")
+            : "ölçülmedi"));
+        rows.Add(new("Uygulanan değişiklikler", status.Applied.Count == 0
+            ? "yok"
+            : string.Join(" · ", status.Applied.Select(redactor.Redact))));
+        rows.Add(new("Elenen adaylar", status.Rejected.Count == 0
+            ? "yok"
+            : string.Join(" · ", status.Rejected.Select(r => redactor.Redact(r.ToString())))));
+        rows.Add(new("Notlar", status.Notices.Count == 0
+            ? "yok"
+            : string.Join(" · ", status.Notices.Select(redactor.Redact))));
+        rows.Add(new("Trafik Koruması", status.TrafficGuard is null
+            ? "ölçülmedi"
+            : redactor.Redact(status.TrafficGuard.ToString())));
+        rows.Add(new("Bir sonraki adım", Measured(redactor.Redact(status.Suggestion))));
+
+        return new ReportSection("Gecikme", rows);
+    }
+
+    private static void AppendMeasurement(
+        List<KeyValuePair<string, string>> rows,
+        string label,
+        DiagnosticRedactor redactor,
+        LatencyMeasurement? measurement)
+    {
+        if (measurement is null)
+        {
+            rows.Add(new(label, "ölçülmedi"));
+            return;
+        }
+
+        // Loss is only ever printed when the instrument could measure it. Writing a zero
+        // for an instrument that does not count attempts would be inventing a result.
+        var loss = measurement.PacketLossPercent is { } percent
+            ? FormattableString.Invariant($", kayıp {percent:F1}%")
+            : ", kayıp ölçülmedi";
+
+        rows.Add(new(
+            label,
+            FormattableString.Invariant($"{measurement.MedianRttMs:F1} ms ortanca, {measurement.P95RttMs:F1} ms p95, ")
+                + FormattableString.Invariant($"{measurement.P99RttMs:F1} ms p99, {measurement.JitterMs:F1} ms dalgalanma{loss} ")
+                + FormattableString.Invariant($"· {measurement.RemoteReplies}/{measurement.RemoteAttempts} örnek ")
+                + $"· {measurement.Source} · {redactor.Alias(RedactionKind.Host, measurement.RemoteEndpoint)} "
+                + FormattableString.Invariant($"· {measurement.MeasuredAt:yyyy-MM-dd HH:mm:ss zzz}")));
+    }
+
+    private ReportSection HotspotSection(DiagnosticRedactor redactor)
+    {
+        var rows = new List<KeyValuePair<string, string>>
+        {
+            new("Vodafone modu", Settings.VodafoneModeEnabled ? "açık" : "kapalı"),
+            new("Otomatik tanılama", Settings.HotspotDiagnostics ? "açık" : "kapalı"),
+            new("Kayıtlı ağ sayısı", Settings.VodafoneModeNetworks.Count.ToString()),
+            new("Bu ağ kayıtlı", Settings.VodafoneNetworkRegistered(Network) ? "evet" : "hayır"),
+        };
+
+        if (LastHotspotDiagnostics is not { } result)
+        {
+            rows.Add(new("Son tanılama", Measured(redactor.Redact(LastHotspotFailure)) is { } failure && failure != "ölçülmedi"
+                ? $"başarısız: {failure}"
+                : "ölçülmedi"));
+            return new ReportSection("Mobil bağlantı", rows);
+        }
+
+        rows.Add(new("Son tanılama", FormattableString.Invariant($"{result.CompletedAt:yyyy-MM-dd HH:mm:ss zzz}")));
+        rows.Add(new("Ölçülen ağ", redactor.Alias(RedactionKind.Network, result.NetworkKey) ?? "ölçülmedi"));
+        rows.Add(new("İnternet", result.HasInternet ? "var" : "yok"));
+        rows.Add(new("DNS", result.DnsWorks ? "çalışıyor" : "çalışmıyor"));
+        rows.Add(new("IPv4", result.Ipv4Works ? "çalışıyor" : "çalışmıyor"));
+        rows.Add(new("IPv6", result.Ipv6Works ? "çalışıyor" : result.HasIpv6 ? "adres var, çalışmıyor" : "yok"));
+        rows.Add(new("Ortanca RTT", result.MedianRttMs is { } rtt
+            ? FormattableString.Invariant($"{rtt:F1} ms")
+            : "ölçülmedi"));
+
+        return new ReportSection("Mobil bağlantı", rows);
+    }
+
     /// <summary>Adds a domain the user typed in. Returns false when it was already covered.</summary>
     public bool AddDomain(string domain)
     {

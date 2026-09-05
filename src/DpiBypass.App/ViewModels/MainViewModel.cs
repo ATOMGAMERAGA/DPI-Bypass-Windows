@@ -390,6 +390,7 @@ public sealed class MainViewModel : ObservableObject
             () => _selectedVodafoneNetwork is not null);
         ClearDomainFilterCommand = new RelayCommand(() => DomainFilter = string.Empty, () => HasFilter);
         RetrySaveCommand = new RelayCommand(RetrySettingsSave, () => SettingsSaveFailed);
+        SaveDiagnosticReportCommand = new AsyncRelayCommand(SaveDiagnosticReportAsync);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
 
@@ -593,6 +594,9 @@ public sealed class MainViewModel : ObservableObject
 
     /// <summary>Re-attempts a settings write the app already told the user about.</summary>
     public RelayCommand RetrySaveCommand { get; }
+
+    /// <summary>Writes a masked diagnostics archive the user can attach to a message.</summary>
+    public AsyncRelayCommand SaveDiagnosticReportCommand { get; }
 
     public RelayCommand CopyLogCommand { get; }
 
@@ -2612,6 +2616,95 @@ public sealed class MainViewModel : ObservableObject
 
         SettingsSaveWarning = _service.LastSaveFailure?.Describe()
             ?? "Ayarlar hâlâ kaydedilemiyor.";
+    }
+
+    private string _diagnosticReportStatus = string.Empty;
+
+    /// <summary>What the last "save a report" attempt did, or empty before the first one.</summary>
+    public string DiagnosticReportStatus
+    {
+        get => _diagnosticReportStatus;
+        private set => Set(ref _diagnosticReportStatus, value);
+    }
+
+    private string _diagnosticReportSeverity = string.Empty;
+
+    /// <summary>"ok", "warn" or empty. Never the only thing carrying the meaning.</summary>
+    public string DiagnosticReportSeverity
+    {
+        get => _diagnosticReportSeverity;
+        private set => Set(ref _diagnosticReportSeverity, value);
+    }
+
+    /// <summary>
+    /// Collects everything a support conversation needs into one archive.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The snapshot is taken the moment the button is pressed, before the file dialog
+    /// opens, so the report describes the state the user was looking at when they decided
+    /// to save it rather than whatever it had drifted to while they chose a folder.
+    /// </para>
+    /// <para>
+    /// Nothing is measured. No probe, no load test, no connection change: this reads what
+    /// is already known. And nothing is uploaded - the archive is written where the user
+    /// put it and goes no further.
+    /// </para>
+    /// </remarks>
+    private async Task SaveDiagnosticReportAsync()
+    {
+        DiagnosticReportSeverity = string.Empty;
+        DiagnosticReportStatus = "Anlık durum toplanıyor…";
+
+        DiagnosticSnapshot snapshot;
+        try
+        {
+            snapshot = _service.CaptureDiagnostics();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Tanı raporu hazırlanamadı", ex);
+            DiagnosticReportSeverity = "error";
+            DiagnosticReportStatus = $"Rapor hazırlanamadı: {ex.Message}";
+            return;
+        }
+
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Tanı raporunu kaydet",
+            FileName = $"dpibypass-tani-{DateTime.Now:yyyyMMdd-HHmm}.zip",
+            DefaultExt = ".zip",
+            Filter = "Sıkıştırılmış arşiv (*.zip)|*.zip",
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            OverwritePrompt = true,
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            // The user's own decision, not a failure.
+            DiagnosticReportSeverity = string.Empty;
+            DiagnosticReportStatus = "Kaydetme iptal edildi.";
+            return;
+        }
+
+        DiagnosticReportStatus = "Rapor yazılıyor…";
+        var result = await DiagnosticReportWriter
+            .WriteAsync(dialog.FileName, snapshot)
+            .ConfigureAwait(true);
+
+        if (!result.Saved)
+        {
+            DiagnosticReportSeverity = "error";
+            DiagnosticReportStatus = result.Failure ?? "Rapor kaydedilemedi.";
+            AppLog.Warning($"Tanı raporu kaydedilemedi: {result.Failure}");
+            return;
+        }
+
+        DiagnosticReportSeverity = "ok";
+        DiagnosticReportStatus =
+            $"Rapor kaydedildi: {System.IO.Path.GetFileName(result.Path)} · {snapshot.MaskedValues} tanımlayıcı değer maskelendi. "
+            + "Dosya yalnızca bu bilgisayarda; hiçbir yere gönderilmedi.";
+        AppLog.Info($"Tanı raporu kaydedildi ({snapshot.MaskedValues} değer maskelendi).");
     }
 
     private void OnDomainLearned(string domain)

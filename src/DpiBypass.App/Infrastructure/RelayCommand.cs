@@ -61,6 +61,13 @@ public sealed class AsyncRelayCommand : ICommand
         {
             await _execute().ConfigureAwait(true);
         }
+        catch (OperationCanceledException)
+        {
+            // The user asked for this, or the app is closing. Colouring somebody's own
+            // decision red - and filing it in the log next to real failures - is how a
+            // cancel button ends up looking like something went wrong.
+            DpiBypass.Core.Logging.AppLog.Info("İşlem iptal edildi.");
+        }
         catch (Exception ex)
         {
             DpiBypass.Core.Logging.AppLog.Error("Komut başarısız", ex);

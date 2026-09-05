@@ -242,6 +242,29 @@
         </Style.Triggers>
     </Style>
 
+    <!-- The same "one transient line" idea, but taking its severity from its own Tag
+         rather than from one named view-model property. A shared style that hard-codes
+         a member name can only ever colour that one line correctly; anything else reusing
+         it silently follows the wrong property. The wording still carries the meaning -
+         the colour is a hint on top of it, never the only signal. -->
+    <Style x:Key="SeverityStatusLineStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+        <Style.Triggers>
+            <Trigger Property="Text" Value="">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+            <Trigger Property="Tag" Value="ok">
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
+            </Trigger>
+            <Trigger Property="Tag" Value="warn">
+                <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
+            </Trigger>
+            <Trigger Property="Tag" Value="error">
+                <Setter Property="Foreground" Value="{DynamicResource AppDangerBrush}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
     <!-- ======== Navigation rail ======== -->
 
     <!-- The latency headline carries the state, so it is coloured the same way the
