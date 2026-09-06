@@ -671,7 +671,11 @@ public sealed class TrafficGuard
                 WaitingStage = waiting,
                 MeasuringStage = measuring,
                 Instruction = instruction,
-                RequireSaturation = true,
+                // The unthrottled baseline must establish a full queue. A successful
+                // cap should then put the fresh transfer below saturation, so candidate
+                // and confirmation rounds remain comparable without demanding that the
+                // queue stay full after it has been fixed.
+                RequireSaturation = measuring == LoadedLaneStage.MeasuringUploadBaseline,
             },
             cancellationToken);
 

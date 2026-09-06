@@ -252,7 +252,14 @@ public static class LatencyReport
         builder.AppendLine($"  p95    : {measurement.P95RttMs,6:F1} ms");
         builder.AppendLine($"  p99    : {measurement.P99RttMs,6:F1} ms");
         builder.AppendLine($"  Jitter : {measurement.JitterMs,6:F1} ms");
-        builder.AppendLine($"  Kayıp  : {measurement.PacketLossPercent,6:F1} %  ({measurement.RemoteReplies}/{measurement.RemoteAttempts} yanıt)");
+        builder.AppendLine(measurement.PacketLossPercent is { } loss
+            ? $"  Kayıp  : {loss,6:F1} %  ({measurement.RemoteReplies}/{measurement.RemoteAttempts} yanıt)"
+            : $"  Kayıp  : ölçülmedi  ({measurement.RemoteReplies} geçerli örnek)");
+
+        if (measurement.Source == LatencySampleSource.GameDisplay)
+        {
+            builder.AppendLine($"  Kaynak : oyun içi RTT · geçerli kare %{measurement.ValidSampleShare * 100:F0}");
+        }
 
         if (measurement.Load.IsLoaded)
         {

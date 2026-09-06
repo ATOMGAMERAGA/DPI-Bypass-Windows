@@ -80,8 +80,19 @@ public sealed record LoadExperimentResult
     /// </remarks>
     public bool ProvesQueueing => Succeeded && Classification == LinkLoadClassification.Saturated;
 
+    /// <summary>
+    /// Whether this window may be compared with a saturated baseline after a deliberate cap.
+    /// </summary>
+    /// <remarks>
+    /// A working cap is supposed to move the transfer below saturation. Requiring the
+    /// candidate itself to remain saturated rejects the exact outcome Traffic Guard is
+    /// trying to create. This flag is only set by an experiment explicitly run as a
+    /// capped comparison; ordinary load measurements still require saturation.
+    /// </remarks>
+    public bool QueueingComparable { get; init; }
+
     /// <summary>Added median delay under load, only when the link was genuinely full.</summary>
-    public double? QueueingMs => ProvesQueueing
+    public double? QueueingMs => (ProvesQueueing || QueueingComparable)
         ? LatencyPathAnalysis.Describe(
             Idle!,
             Direction == LoadDirection.Upload ? Loaded : null,
@@ -318,6 +329,8 @@ public sealed class ObservedLoadExperiment : ILoadExperiment
             Loaded = loaded,
             ObservedLoad = loaded.Load,
             Classification = classification,
+            QueueingComparable = !request.RequireSaturation
+                && loaded.Load.State is not (LatencyLoadState.Idle or LatencyLoadState.Unknown),
             Capacity = capacity,
             DataUsedBytes = dataUsed,
         };

@@ -371,7 +371,7 @@ public sealed record LatencyEvaluationOptions
     /// </remarks>
     public int MinimumRepliesForP99 { get; init; } = 100;
 
-    public double ConfidenceLevel { get; init; } = 0.90;
+    public double ConfidenceLevel { get; init; } = 0.95;
 
     public int BootstrapIterations { get; init; } = 2000;
 
@@ -610,7 +610,10 @@ public static class LatencyComparison
 
         // --- is there a gain at all, and in which metric ----------------------------
 
-        var scale = (candidate.CpuSensitive ? CpuSensitiveMultiplier : 1.0)
+        var gameDisplay = usable.All(pair =>
+            pair.Baseline.Source == LatencySampleSource.GameDisplay
+            && pair.Candidate.Source == LatencySampleSource.GameDisplay);
+        var scale = (gameDisplay ? 1.0 : candidate.CpuSensitive ? CpuSensitiveMultiplier : 1.0)
             * (usingUnknownLoad ? UnknownLoadMultiplier : 1.0);
 
         // A p99 is only a percentile once there are enough replies for the hundredth of
@@ -626,16 +629,22 @@ public static class LatencyComparison
         var resolution = usable.Max(pair =>
             Math.Max(pair.Baseline.ClockResolutionMs, pair.Candidate.ClockResolutionMs));
 
+        var medianFloor = gameDisplay ? 2.0 : MedianGainFloorMs;
+        var medianShare = gameDisplay ? 0.05 : MedianGainShare;
+        var p95Floor = gameDisplay ? 2.0 : P95GainFloorMs;
+        var p95Share = gameDisplay ? 0.05 : P95GainShare;
+
         var gains = new (string Name, double Value, double Threshold, Func<LatencyDelta, double> Select)[]
         {
-            ("median", mean.MedianMs, Floor(Limit(baselineMean.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale, resolution), delta => delta.MedianMs),
-            ("p95", mean.P95Ms, Floor(Limit(baselineMean.P95RttMs, P95GainFloorMs, P95GainShare) * scale, resolution), delta => delta.P95Ms),
+            ("median", mean.MedianMs, Floor(Limit(baselineMean.MedianRttMs, medianFloor, medianShare) * scale, resolution), delta => delta.MedianMs),
+            ("p95", mean.P95Ms, Floor(Limit(baselineMean.P95RttMs, p95Floor, p95Share) * scale, resolution), delta => delta.P95Ms),
             ("p99", mean.P99Ms, Floor(Limit(baselineMean.P99RttMs, P99GainFloorMs, P99GainShare) * scale, resolution), delta => delta.P99Ms),
             ("jitter", mean.JitterMs, Floor(Limit(baselineMean.JitterMs, JitterGainFloorMs, JitterGainShare) * scale, resolution), delta => delta.JitterMs),
         };
 
         var winner = gains
             .Where(gain => tailIsDecisive || gain.Name != "p99")
+            .Where(gain => !gameDisplay || gain.Name is "median" or "p95")
             .Where(gain => gain.Value >= gain.Threshold)
             .OrderByDescending(gain => gain.Value / Math.Max(gain.Threshold, 0.001))
             .Select(gain => (gain.Name, gain.Value, gain.Threshold, gain.Select))
@@ -867,7 +876,7 @@ public static class LatencyComparison
 
     private static bool HasValidCounts(LatencyMeasurement measurement)
     {
-        if (measurement.Source == LatencySampleSource.PassiveObservation)
+        if (measurement.Source != LatencySampleSource.ActiveProbe)
         {
             return measurement.PacketLossPercent is null;
         }

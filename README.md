@@ -301,7 +301,7 @@ dosyasında kaynak bağlantılarıyla yazılıdır.
 | Hedef | Ne ölçülür | Ne ölçülmez |
 | --- | --- | --- |
 | **Genel internet referansı** | 1.1.1.1 / 8.8.8.8 / 9.9.9.9 ICMP RTT'si | Oyun sunucunuzun rotası. Bu hedef genel bağlantı sağlığıdır, **oyun sunucusu değildir** |
-| **Çalışan oyun / uygulama** | Programın **TCP ve UDP** uç noktaları. UDP oturumları WinDivert'in FLOW katmanından (yalnız gözlem) bulunur; birden fazla aday varsa hangisini ölçeceğinizi siz seçersiniz | Gözlem başlamadan **önce** kurulmuş bağlantılar — WinDivert bu olayları göremez, bu yüzden oyuna yeniden bağlanmanız istenir |
+| **Çalışan oyun / uygulama** | Programın **TCP ve UDP** uç noktaları. UDP oturumları WinDivert'in FLOW katmanından (yalnız gözlem) bulunur; birden fazla aday varsa hangisini ölçeceğinizi siz seçersiniz. VALORANT seçildiğinde oyun içindeki sayısal **Network RTT** alanı ekrandan okunur | Gözlem başlamadan **önce** kurulmuş UDP bağlantıları — WinDivert bu olayları göremez, bu yüzden oyuna yeniden bağlanmanız istenir |
 | **Özel sunucu** | `host`, `host:port`, `tcp://host:port`; port 25565 ise Minecraft Java durum sorgusunun **gerçek Ping/Pong süresi** | `udp://host:port` verilirse aynı adrese **rota referansı** ölçülür ve arayüz bunu böyle etiketler |
 
 Bir uç nokta için ölçülen sayının ne olduğu her zaman yazılıdır:
@@ -312,10 +312,16 @@ Bir uç nokta için ölçülen sayının ne olduğu her zaman yazılıdır:
 | `TCP/443 (el sıkışma süresi)` | Bağlantı kurma süresi — oturum içi RTT **değildir** |
 | `TCP/… (EStats)` | Uygulamanın **zaten açık** olan bağlantısının, yığının kendi ölçtüğü RTT'si. Hiç paket gönderilmez |
 | `Minecraft/25565` | Sunucunun kendi yanıt süresi (Server List Ping) |
+| `VALORANT Network RTT (ekran)` | Oyunun kendi Network RTT sayacı. Pencereli Tam Ekran modunda kullanıcı yalnız sayı alanını bir kez seçer; ölçüm oyunu öne alır, saniyede bir OCR örneği alınır, görüntüler bellekte işlenip hemen silinir |
 
 Hedef deney başında bir kez çözülür ve **sabitlenir**. A ve B kolları aynı IP,
 aynı protokol ve aynı portu kullanır — RFC 2681'in Type-P kuralı budur; farklı
 uçları ölçen iki sayı birbirinden çıkarılamaz.
+
+Çok bağlantılı makinelerde değiştirilecek kart, geçmişte en çok bayt taşıyan
+karttan seçilmez. Açık TCP bağlantısının yerel adresi veya Windows'un hedef IP
+için seçtiği rota kullanılır; Ethernet, Wi-Fi, mobil veri ve telefon hotspot'u
+aynı anda açık olsa da deney oyun trafiğini taşıyan arayüzde yapılır.
 
 ### Ölçüm
 
@@ -372,6 +378,12 @@ gerileme, sürücünün değeri canlı uygulamaması, geri alınamayan bir yazma
 maliyeti olan bir ayar (Interrupt Moderation, RSC, LSO) **iki kat** büyük bir
 kazanç göstermek zorundadır.
 
+VALORANT'ın bir piksel hassasiyetindeki sayacı için kabul eşiği en az **2 ms
+veya başlangıç RTT'sinin %5'i**, güven düzeyi %95 ve geçerli kare oranı en az
+%80'dir. Oyun içi sayaç paket adedi vermediği için bu kaynaktan paket kaybı
+üretilmez; arayüzde “ölçülmedi” yazılır. Son paket doğrulaması dört eşli tur ve
+60'ar geçerli RTT örneği kullanır.
+
 **Tam paket doğrulaması:** adaylar tek tek kabul edildikten sonra tek bir son
 ölçüm alınmaz. Kabul edilen ayarların **tamamı**, yine dönüşümlü sırayla,
 özgün duruma karşı yeniden ölçülür. Yalnız bu eşli doğrulama da kazanç
@@ -427,6 +439,12 @@ ve yeni bir bağlantı görülmeden hiçbir sonuç üretilmez. Sınırlanan, **o
 değil** adını verdiğiniz toplu aktarım uygulamasıdır; uygulama çalışan süreçler
 arasından doğrulanır.
 
+Başlangıç gönderimi hattın gerçekten doyduğunu kanıtlamak zorundadır. Hız sınırı
+uygulandıktan sonraki turda aynı şart aranmaz: çalışan bir sınırın amacı zaten
+aktarımı doygunluğun altına indirip kuyruğu boşaltmaktır. Aday tur yine etkin
+gönderim, ölçülen hız sınırına uyum, korunan throughput ve ayrı doğrulama turuyla
+kanıtlanır.
+
 - İlke yalnız **`DPIBypass.Latency.`** ön ekiyle oluşturulur; başka hiçbir ad
   oluşturulmaz, değiştirilmez veya silinmez.
 - Sizin veya yöneticinizin (GPO) mevcut QoS ilkelerine **dokunulmaz**. Rakip bir
@@ -470,6 +488,10 @@ keyword'üyle eşleşir, yerelleştirilmiş görünen ad **hiç okunmaz**):
   çalışıyorsa)
 - `*RSS` → 1 (yalnız kablolu, ≥4 mantıksal işlemci, şu anda kapalıysa)
 - `*EEE` → 0
+- Wi-Fi'da Native WLAN **media streaming mode** → açık (yalnız prizde ve
+  mevcut değer kapalıysa)
+- etkin güç planının Wi-Fi **AC güç tasarrufu** → maksimum performans (yalnız
+  prizde ve mevcut değer farklıysa)
 - `*LsoV2IPv4` / `*LsoV2IPv6` → 0 — **şu anda hiçbir tur tarafından denenmiyor.** LSO
   yalnız toplu gönderimi etkiler ve boştaki gecikme turunda parçalanacak büyük bir
   blok yoktur; yük altındaki lane ise NIC ayarı değil hat ve QoS ölçer. Katalogda
@@ -499,8 +521,10 @@ yükünde açık kalmasını önerir ve RSS, RSC, LSO bunlara bağımlıdır.
 
 MTU, TCP autotuning, ECN, Nagle/registry hack'leri, `NetworkThrottlingIndex`,
 `SystemResponsiveness`, HPET/timer ayarları, DNS, IPv6, route/metric, firewall,
-güvenlik servisleri, güç planı ve işlem önceliği değiştirilmez. Bağdaştırıcı
-kapatılıp açılmaz ve yeniden başlatılmaz. VPN, TAP/TUN, Hyper-V, Docker ve WSL
+güvenlik servisleri, güç planının kendisi ve işlem önceliği değiştirilmez. Wi-Fi
+için yalnız etkin planın prizdeki kablosuz alt ayarı A/B deneyine alınabilir.
+Bağdaştırıcı yalnız kullanıcı kontrollü yeniden başlatmaya izin verdiyse ve ayar
+başka türlü operasyonel olarak doğrulanamıyorsa yeniden başlatılır. VPN, TAP/TUN, Hyper-V, Docker ve WSL
 sanal bağdaştırıcıları atlanır. Paket yoluna hiç dokunulmaz: bu özellik tek bir
 WinDivert tanıtıcısı açmaz, oyun ve ses trafiği normal Windows ağ yolunda kalır.
 

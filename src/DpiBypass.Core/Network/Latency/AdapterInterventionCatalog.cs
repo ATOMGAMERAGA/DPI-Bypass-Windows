@@ -47,6 +47,8 @@ public static class AdapterInterventionCatalog
     public const string EeeKeyword = "*EEE";
     public const string LsoIPv4Keyword = "*LsoV2IPv4";
     public const string LsoIPv6Keyword = "*LsoV2IPv6";
+    public const string WlanMediaStreamingProperty = "WlanMediaStreamingMode";
+    public const string WirelessPowerSavingProperty = "WirelessPowerSavingAc";
 
     public const string SelectiveSuspendProperty = "SelectiveSuspend";
     public const string D0PacketCoalescingProperty = "D0PacketCoalescing";
@@ -65,21 +67,21 @@ public static class AdapterInterventionCatalog
     ];
 
     /// <summary>
-    /// Power-management properties this build is allowed to write: none.
+    /// Power-management properties this build may benchmark on a wireless adapter.
     /// </summary>
     /// <remarks>
-    /// Both keywords this build once wrote fail the only test that matters for a
-    /// steady-state round-trip experiment - whether the experiment could see the change
-    /// at all. NDIS selective suspend puts an idle adapter into a low-power state after a
-    /// documented idle threshold, so its effect lands on the first packet after a long
-    /// gap, and a probe series that never stops producing traffic never produces one. D0
-    /// packet coalescing batches broadcast and multicast receive indications, which is
-    /// not the path a unicast game packet takes at all. Keeping either on the strength of
-    /// a steady-state A/B result would be keeping it on the strength of noise, so neither
-    /// is offered. <see cref="RestorablePowerProperties"/> is deliberately wider so a
-    /// machine carrying an older snapshot still gets its original values back.
+    /// Media streaming mode and the active plan's AC wireless power mode are documented,
+    /// queryable settings with direct radio latency mechanisms. Selective suspend and D0
+    /// packet coalescing remain excluded because this steady-state experiment cannot
+    /// observe the former's idle transition and the latter does not govern unicast game
+    /// traffic. <see cref="RestorablePowerProperties"/> stays wider so an older snapshot
+    /// can still be repaired.
     /// </remarks>
-    public static readonly IReadOnlyList<string> WritablePowerProperties = [];
+    public static readonly IReadOnlyList<string> WritablePowerProperties =
+    [
+        WlanMediaStreamingProperty,
+        WirelessPowerSavingProperty,
+    ];
 
     /// <summary>
     /// Power-management properties this build is allowed to put back.
@@ -96,6 +98,8 @@ public static class AdapterInterventionCatalog
         SelectiveSuspendProperty,
         D0PacketCoalescingProperty,
         DeviceSleepOnDisconnectProperty,
+        WlanMediaStreamingProperty,
+        WirelessPowerSavingProperty,
     ];
 
     private static readonly Dictionary<string, InterventionDescriptor> Descriptors = new(StringComparer.OrdinalIgnoreCase)
@@ -214,6 +218,28 @@ public static class AdapterInterventionCatalog
             SettlingTime = TimeSpan.FromMilliseconds(1000),
             Reference = "learn.microsoft.com/powershell/module/netadapter/set-netadapterpowermanagement",
         },
+        [WlanMediaStreamingProperty] = new InterventionDescriptor
+        {
+            Id = "wlan.media-streaming.on",
+            Title = "Wi-Fi düşük gecikme akış modu açık",
+            Mechanism = "Windows'un medya akışı modu, sürücüye gerçek zamanlı trafik sırasında tarama ve güç tasarrufu gecikmesini azaltma sinyali verir.",
+            Scope = LatencyTrafficScope.All,
+            Risk = InterventionRisk.Low,
+            Cost = InterventionCost.Power,
+            SettlingTime = TimeSpan.FromSeconds(1),
+            Reference = "learn.microsoft.com/windows/win32/api/wlanapi/nf-wlanapi-wlansetinterface",
+        },
+        [WirelessPowerSavingProperty] = new InterventionDescriptor
+        {
+            Id = "wlan.power.maximum-performance.ac",
+            Title = "Wi-Fi güç modu maksimum performans",
+            Mechanism = "Etkin güç planının prizdeki kablosuz güç tasarrufunu kapatır; radyo uyku geçişlerinin eklediği gecikmeyi önleyebilir.",
+            Scope = LatencyTrafficScope.All,
+            Risk = InterventionRisk.Low,
+            Cost = InterventionCost.Power,
+            SettlingTime = TimeSpan.FromSeconds(1),
+            Reference = "support.microsoft.com/windows/fix-wi-fi-connection-issues-in-windows",
+        },
     };
 
     /// <summary>The metadata for one property, or a neutral default for an unknown one.</summary>
@@ -269,6 +295,22 @@ public static class AdapterInterventionCatalog
         }
 
         AddKeyword(candidates, adapter, context, EeeKeyword, "0");
+
+        if (context.IsWireless && adapter.WlanMediaStreamingEnabled == false && context.AllowPowerCost)
+        {
+            AddPower(candidates, adapter, context, WlanMediaStreamingProperty, 0, 1);
+        }
+
+        if (context.IsWireless && adapter.WirelessPowerSavingAcMode is > 0 and <= int.MaxValue && context.AllowPowerCost)
+        {
+            AddPower(
+                candidates,
+                adapter,
+                context,
+                WirelessPowerSavingProperty,
+                checked((int)adapter.WirelessPowerSavingAcMode.Value),
+                0);
+        }
 
         // RSS is only worth turning on where it has processors to spread work across,
         // and only on a wired card: a wireless driver exposing the keyword is not a
@@ -338,6 +380,31 @@ public static class AdapterInterventionCatalog
             PropertyName = property.RegistryKeyword,
             OriginalValues = [.. property.RegistryValues],
             DesiredValues = [desiredValue],
+            Descriptor = descriptor,
+            Description = descriptor.Title,
+        });
+    }
+
+    private static void AddPower(
+        List<LatencyOptimizationCandidate> candidates,
+        AdapterLatencyCapability adapter,
+        LatencyCandidateContext context,
+        string propertyName,
+        int original,
+        int desired)
+    {
+        var descriptor = DescriptorFor(propertyName);
+        if (!IsRelevant(descriptor, context))
+        {
+            return;
+        }
+
+        candidates.Add(new LatencyOptimizationCandidate
+        {
+            Kind = LatencySettingKind.PowerManagement,
+            PropertyName = propertyName,
+            OriginalPowerValue = original,
+            DesiredPowerValue = desired,
             Descriptor = descriptor,
             Description = descriptor.Title,
         });

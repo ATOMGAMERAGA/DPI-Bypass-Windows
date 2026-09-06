@@ -292,20 +292,24 @@ public sealed record LatencyEndpoint
     /// <summary>The host name the target was resolved from, when there was one.</summary>
     public string Host { get; init; } = string.Empty;
 
-    /// <summary>Type-P identity: two measurements are only comparable if these match.</summary>
-    public string Key => $"{Address}|{Protocol}|{Port?.ToString(CultureInfo.InvariantCulture) ?? "-"}";
+    /// <summary>The instrument name shown when an application supplies its own RTT.</summary>
+    public string? ProtocolLabelOverride { get; init; }
 
-    public string ProtocolLabel => Protocol switch
+    /// <summary>Type-P identity: two measurements are only comparable if these match.</summary>
+    public string Key => $"{Address}|{Protocol}|{Port?.ToString(CultureInfo.InvariantCulture) ?? "-"}|{ProtocolLabelOverride ?? "-"}";
+
+    public string ProtocolLabel => ProtocolLabelOverride ?? (Protocol switch
     {
         LatencyProtocol.Tcp => Port is { } port ? $"TCP/{port}" : "TCP",
         LatencyProtocol.Udp => Port is { } udpPort ? $"UDP/{udpPort}" : "UDP",
         LatencyProtocol.TcpEStats => Port is { } estatsPort ? $"TCP/{estatsPort} (EStats)" : "TCP (EStats)",
         LatencyProtocol.MinecraftStatus => Port is { } mcPort ? $"Minecraft/{mcPort}" : "Minecraft",
         _ => "ICMP",
-    };
+    });
 
     /// <summary>Whether the number this endpoint produces is the application's own RTT.</summary>
-    public bool MeasuresApplicationRoundTrip => Protocol.IsApplicationRoundTrip();
+    public bool MeasuresApplicationRoundTrip => !RouteReferenceOnly
+        && (Protocol.IsApplicationRoundTrip() || ProtocolLabelOverride is not null);
 
     public static LatencyEndpoint Icmp(IPAddress address, string label, LatencyTargetKind kind = LatencyTargetKind.Reference) => new()
     {

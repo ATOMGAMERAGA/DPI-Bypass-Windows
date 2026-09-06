@@ -911,6 +911,7 @@ public sealed class MainViewModel : ObservableObject
                 RaiseLatencyCommandStates();
                 Raise(nameof(IsLatencyProgressVisible));
                 Raise(nameof(LatencyProgressTitle));
+                Raise(nameof(CanSelectValorantRttRegion));
                 TrackLatencyElapsed(value);
             }
         }
@@ -1225,6 +1226,8 @@ public sealed class MainViewModel : ObservableObject
 
             Raise(nameof(IsCustomLatencyTarget));
             Raise(nameof(IsApplicationLatencyTarget));
+            Raise(nameof(IsValorantLatencyTarget));
+            Raise(nameof(CanSelectValorantRttRegion));
 
             if (value.Kind == LatencyTargetKind.Application)
             {
@@ -1242,6 +1245,15 @@ public sealed class MainViewModel : ObservableObject
     public bool IsCustomLatencyTarget => _selectedLatencyTarget.Kind == LatencyTargetKind.Custom;
 
     public bool IsApplicationLatencyTarget => _selectedLatencyTarget.Kind == LatencyTargetKind.Application;
+
+    public bool IsValorantLatencyTarget => IsApplicationLatencyTarget
+        && (_selectedLatencyProcess?.Contains("VALORANT", StringComparison.OrdinalIgnoreCase) ?? false);
+
+    public bool CanSelectValorantRttRegion => IsValorantLatencyTarget && !IsLatencyBusy;
+
+    public string ValorantRttRegionSummary => _service.Settings.Latency.ValorantRttRegion is { IsValid: true } region
+        ? $"Network RTT alanı: {region}"
+        : "Önce VALORANT'ta Network RTT (Text Only) seçeneğini açın ve görüntü modunu Pencereli Tam Ekran yapın.";
 
     public string LatencyCustomTarget
     {
@@ -1262,9 +1274,17 @@ public sealed class MainViewModel : ObservableObject
         {
             if (Set(ref _selectedLatencyProcess, value))
             {
+                Raise(nameof(IsValorantLatencyTarget));
+                Raise(nameof(CanSelectValorantRttRegion));
                 PersistLatencyPreferences();
             }
         }
+    }
+
+    public void SetValorantCaptureRegion(ScreenCaptureRegion region)
+    {
+        _service.SetValorantCaptureRegion(region);
+        Raise(nameof(ValorantRttRegionSummary));
     }
 
     /// <summary>

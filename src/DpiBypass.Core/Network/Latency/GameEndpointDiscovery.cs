@@ -181,23 +181,7 @@ public static class GameEndpointDiscovery
                 Label = label,
                 RouteReferenceOnly = true,
                 ApplicationProtocol = LatencyProtocol.Udp,
-            };
-        }
-
-        // Minecraft Java is the one protocol here whose own round trip is public, stable
-        // and cheap to time, so where it is plainly what we are looking at, it is measured
-        // properly rather than approximated.
-        if (port == MinecraftStatusProbe.DefaultPort)
-        {
-            return new LatencyEndpoint
-            {
-                Address = address,
-                Port = port,
-                Protocol = LatencyProtocol.MinecraftStatus,
-                Kind = LatencyTargetKind.Application,
-                Label = label,
-                ApplicationProtocol = LatencyProtocol.Tcp,
-                Host = address.ToString(),
+                LocalEndpoint = local,
             };
         }
 

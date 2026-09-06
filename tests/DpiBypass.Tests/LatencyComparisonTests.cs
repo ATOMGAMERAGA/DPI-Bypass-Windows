@@ -74,6 +74,37 @@ public sealed class LatencyComparisonTests
     }
 
     [Fact]
+    public void GameDisplayRequiresARealMedianOrP95Reduction()
+    {
+        LatencyMeasurement Game(double median, double jitter) => Fake.Measurement(
+            median,
+            jitter,
+            attempts: 60) with
+        {
+            Source = LatencySampleSource.GameDisplay,
+            Protocol = "VALORANT Network RTT (ekran)",
+            RemoteAttempts = 0,
+            RemoteReplies = 60,
+            PacketLossPercent = null,
+            ValidSampleShare = 1,
+        };
+
+        var jitterOnly = new[]
+        {
+            Pair(Game(30, 8), Game(30, 2)),
+            Pair(Game(30, 7.5), Game(30, 2.2)),
+        };
+        var subPixelScaleGain = new[]
+        {
+            Pair(Game(30, 3), Game(28.5, 3)),
+            Pair(Game(30, 3), Game(28.5, 3)),
+        };
+
+        Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(jitterOnly).Outcome);
+        Assert.Equal(LatencyVerdictOutcome.Rejected, Evaluate(subPixelScaleGain).Outcome);
+    }
+
+    [Fact]
     public void AConsistentP95GainIsAccepted()
         => Assert.Equal(LatencyVerdictOutcome.Accepted, Evaluate(P95Pairs(8, 7, 9)).Outcome);
 

@@ -68,13 +68,39 @@ public sealed record NetworkFingerprint
 
     public static NetworkFingerprint Capture()
     {
-        var wlan = WlanApi.TryGetCurrentConnection();
         var adapter = PickPrimaryAdapter();
 
-        if (adapter is null)
-        {
-            return new NetworkFingerprint { Ssid = wlan?.Ssid, Bssid = wlan?.Bssid };
-        }
+        return adapter is null
+            ? new NetworkFingerprint()
+            : Capture(adapter);
+    }
+
+    /// <summary>
+    /// Captures the adapter that owns an existing flow, or that Windows routes a target through.
+    /// </summary>
+    public static NetworkFingerprint CaptureFor(IPAddress destination, IPAddress? sourceAddress = null)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+
+        var adapters = NetworkInterface.GetAllNetworkInterfaces();
+        var adapter = sourceAddress is null
+            ? null
+            : adapters.FirstOrDefault(candidate => Owns(candidate, sourceAddress));
+
+        var interfaceIndex = adapter is null ? IpRouteApi.TryGetInterfaceIndex(destination) : 0;
+        adapter ??= adapters.FirstOrDefault(candidate => InterfaceIndexOf(candidate) == interfaceIndex);
+        adapter ??= PickPrimaryAdapter();
+
+        return adapter is null
+            ? new NetworkFingerprint()
+            : Capture(adapter);
+    }
+
+    private static NetworkFingerprint Capture(NetworkInterface adapter)
+    {
+        var wlan = adapter.NetworkInterfaceType == NetworkInterfaceType.Wireless80211
+            ? WlanApi.TryGetCurrentConnection(adapter.Id)
+            : null;
 
         var properties = adapter.GetIPProperties();
         var gateway = properties.GatewayAddresses
@@ -93,6 +119,30 @@ public sealed record NetworkFingerprint
             GatewayAddress = gateway?.ToString(),
             GatewayMac = gateway is null ? null : ArpTable.TryGetMac(gateway),
         };
+    }
+
+    private static bool Owns(NetworkInterface adapter, IPAddress address)
+    {
+        try
+        {
+            return adapter.GetIPProperties().UnicastAddresses.Any(entry => entry.Address.Equals(address));
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static int InterfaceIndexOf(NetworkInterface adapter)
+    {
+        try
+        {
+            return ReadInterfaceIndex(adapter.GetIPProperties());
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
     }
 
     private static int ReadInterfaceIndex(IPInterfaceProperties properties)

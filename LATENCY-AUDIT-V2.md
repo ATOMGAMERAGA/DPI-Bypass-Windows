@@ -1,5 +1,11 @@
 # Gecikme denetimi V2 — bulgular, kanıtlar ve sınırlar
 
+> **6 Eylül 2026 notu:** Bu dosya V2'nin tarihsel denetim kaydıdır. Güncel kod,
+> `SelectiveSuspend` ve `D0PacketCoalescing` anahtarlarını hâlâ aday yapmaz;
+> `WritablePowerProperties` listesine yalnız sorgulanıp geri okunabilen Wi-Fi
+> media-streaming ve AC kablosuz güç alt ayarları eklenmiştir. Güncel davranış
+> `README.md` ve `LATENCY-RESEARCH.md` içinde açıklanır.
+
 Bu belge, "Ping düşürme (Beta)" özelliğinin ikinci denetimidir. Her bulgu
 **CONFIRMED**, **FIXED**, **NOT REPRODUCED**, **NOT RUN** veya **OUT OF SCOPE**
 olarak işaretlidir ve kanıtı yanında yazılıdır.

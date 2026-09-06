@@ -136,7 +136,7 @@ public enum LatencyNextAction
 /// </remarks>
 public sealed record LatencyStatusView
 {
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
 
     public required LatencyModeState State { get; init; }
 
@@ -667,6 +667,7 @@ public sealed record LatencyStatusView
             // Passive observations send nothing, so their attempt count is zero and their
             // loss is null rather than a plausible-looking zero percent.
             ["source"] = measurement.Source.ToString(),
+            ["validSampleShare"] = Round(measurement.ValidSampleShare),
             ["minimumMs"] = Round(measurement.MinimumRttMs),
             ["medianMs"] = Round(measurement.MedianRttMs),
             ["p95Ms"] = Round(measurement.P95RttMs),

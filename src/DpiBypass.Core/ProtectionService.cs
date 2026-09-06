@@ -76,6 +76,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly Lock _ttlFixGate = new();
     private readonly LatencyOptimizer _latencyOptimizer;
     private readonly LoadedLatencyLane _loadedLatency;
+    private readonly ValorantHudLatencySource? _valorantLatency;
 
     /// <summary>
     /// One latency operation at a time, across both lanes.
@@ -178,11 +179,23 @@ public sealed class ProtectionService : IAsyncDisposable
         // Both lanes resolve application targets, so both need the observer: without it
         // the idle lane would still be unable to find a UDP game's server, which is the
         // thing the observer exists for.
-        _latencyOptimizer = latencyOptimizer ?? new LatencyOptimizer(
-            log: AppLog.InfoSink,
-            targets: new LatencyTargetResolver(log: AppLog.InfoSink, flows: _flowObserver));
+        ILatencyProbe? defaultLatencyProbe = null;
+        if (latencyOptimizer is null)
+        {
+            _valorantLatency = new ValorantHudLatencySource();
+            defaultLatencyProbe = new GameAwareLatencyProbe(new LatencyProbe(), _valorantLatency);
+            _latencyOptimizer = new LatencyOptimizer(
+                probe: defaultLatencyProbe,
+                log: AppLog.InfoSink,
+                targets: new LatencyTargetResolver(log: AppLog.InfoSink, flows: _flowObserver));
+        }
+        else
+        {
+            _latencyOptimizer = latencyOptimizer;
+        }
         _latencyOptimizer.Changed += OnLatencyChanged;
         _loadedLatency = loadedLatency ?? new LoadedLatencyLane(
+            probe: defaultLatencyProbe,
             log: AppLog.InfoSink,
             flows: _flowObserver,
             stages: new DelegateStageReporter(PublishLatencyStage));
@@ -629,6 +642,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
         finally
         {
+            await ReleaseFlowObserverAsync().ConfigureAwait(false);
             EndLatencyRun(run);
             _latencyGate.Release();
         }
@@ -684,6 +698,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
         finally
         {
+            await ReleaseFlowObserverAsync().ConfigureAwait(false);
             EndLatencyRun(run);
             _latencyGate.Release();
         }
@@ -842,9 +857,41 @@ public sealed class ProtectionService : IAsyncDisposable
     /// be noticed on a UI thread, so it is deliberately asynchronous.
     /// </remarks>
     public Task<IReadOnlyList<string>> ListConnectedProcessesAsync(CancellationToken cancellationToken = default)
-        => Task.Run<IReadOnlyList<string>>(
-            () => new WindowsProcessEndpointProvider(AppLog.InfoSink).ConnectedProcesses(),
-            cancellationToken);
+        => Task.Run<IReadOnlyList<string>>(() =>
+        {
+            var names = new SortedSet<string>(
+                new WindowsProcessEndpointProvider(AppLog.InfoSink).ConnectedProcesses(),
+                StringComparer.OrdinalIgnoreCase);
+
+            AddRunning(names, "VALORANT-Win64-Shipping");
+            AddRunning(names, "javaw");
+            AddRunning(names, "java");
+            return [.. names];
+        }, cancellationToken);
+
+    private static void AddRunning(ISet<string> names, string processName)
+    {
+        System.Diagnostics.Process[] processes = [];
+        try
+        {
+            processes = System.Diagnostics.Process.GetProcessesByName(processName);
+            if (processes.Length > 0)
+            {
+                names.Add(processName);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
+        {
+            // A process can exit while the list is being read.
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
+        }
+    }
 
     private LatencyOptimizationResult Working(LatencyOptimizationStatus status, string line) => new()
     {
@@ -875,6 +922,11 @@ public sealed class ProtectionService : IAsyncDisposable
 
         try
         {
+            if (Settings.Latency.TargetKind == LatencyTargetKind.Application)
+            {
+                await StartFlowObserverAsync(run.Token).ConfigureAwait(false);
+            }
+
             var result = await _latencyOptimizer
                 .RetestAsync(NetworkFingerprint.Capture(), run.Token)
                 .ConfigureAwait(false);
@@ -883,6 +935,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
         finally
         {
+            await ReleaseFlowObserverAsync().ConfigureAwait(false);
             EndLatencyRun(run);
             _latencyGate.Release();
         }
@@ -896,7 +949,8 @@ public sealed class ProtectionService : IAsyncDisposable
         var targetChanged = !string.Equals(
             Settings.Latency.ToSpec().CacheKey,
             preferences.ToSpec().CacheKey,
-            StringComparison.Ordinal);
+            StringComparison.Ordinal)
+            || Settings.Latency.ValorantRttRegion != preferences.ValorantRttRegion;
 
         Settings.Latency = preferences;
         ReportSave(_store.Save(Settings), "ayarlar");
@@ -924,6 +978,24 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         _latencyOptimizer.Target = Settings.Latency.ToSpec();
         _latencyOptimizer.Restart = Settings.Latency.ToRestartPolicy();
+        if (_valorantLatency is not null)
+        {
+            _valorantLatency.Region = Settings.Latency.ValorantRttRegion is { IsValid: true } region
+                ? region
+                : null;
+        }
+    }
+
+    public void SetValorantCaptureRegion(ScreenCaptureRegion region)
+    {
+        ArgumentNullException.ThrowIfNull(region);
+        if (!region.IsValid)
+        {
+            throw new ArgumentOutOfRangeException(nameof(region));
+        }
+
+        SetLatencyPreferences(Settings.Latency with { ValorantRttRegion = region });
+        ClearLatencyProfiles();
     }
 
     /// <summary>
@@ -2780,6 +2852,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         _latencyOptimizer.Changed -= OnLatencyChanged;
         await _latencyOptimizer.DisposeAsync().ConfigureAwait(false);
+        _valorantLatency?.Dispose();
         _latencyGate.Dispose();
         _strategies.Dispose();
         _lifetime?.Dispose();

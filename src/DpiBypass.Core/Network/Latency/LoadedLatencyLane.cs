@@ -1,3 +1,4 @@
+using System.Net;
 using DpiBypass.Core.Logging;
 
 namespace DpiBypass.Core.Network;
@@ -69,6 +70,8 @@ public sealed class LoadedLatencyLane
     private readonly IBulkApplicationResolver _applications;
     private readonly ILatencyStageReporter _stages;
     private readonly Func<NetworkFingerprint> _capture;
+    private readonly Func<IPAddress, IPAddress?, NetworkFingerprint> _captureRoute;
+    private readonly bool _routeLookupAvailable;
     private readonly Func<DateTimeOffset> _now;
     private readonly Action<string>? _log;
 
@@ -83,7 +86,8 @@ public sealed class LoadedLatencyLane
         Action<string>? log = null,
         IProcessFlowObserver? flows = null,
         IBulkApplicationResolver? applications = null,
-        ILatencyStageReporter? stages = null)
+        ILatencyStageReporter? stages = null,
+        Func<IPAddress, IPAddress?, NetworkFingerprint>? captureRoute = null)
     {
         _log = log ?? AppLog.InfoSink;
         _stages = stages ?? NullStageReporter.Instance;
@@ -95,6 +99,8 @@ public sealed class LoadedLatencyLane
         _snapshots = snapshots ?? new LatencySnapshotStore();
         _applications = applications ?? new WindowsBulkApplicationResolver(_log);
         _capture = capture ?? NetworkFingerprint.Capture;
+        _captureRoute = captureRoute ?? NetworkFingerprint.CaptureFor;
+        _routeLookupAvailable = captureRoute is not null || OperatingSystem.IsWindows();
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
@@ -161,6 +167,10 @@ public sealed class LoadedLatencyLane
         }
 
         var resolution = await _targets.ResolveAsync(request.Target, cancellationToken).ConfigureAwait(false);
+        if (_probe is GameAwareLatencyProbe game)
+        {
+            resolution = game.PrepareResolution(resolution);
+        }
         if (!resolution.Succeeded)
         {
             return Failed(request, resolution.Failure ?? "Ölçüm hedefi çözümlenemedi.", network.Key);
@@ -176,6 +186,7 @@ public sealed class LoadedLatencyLane
             cancellationToken).ConfigureAwait(false);
 
         var endpoint = choice.Endpoint;
+        network = RouteNetworkFor(endpoint, network);
         var probe = request.Probe.For(endpoint);
 
         if (choice.Notice is not null)
@@ -335,6 +346,25 @@ public sealed class LoadedLatencyLane
             Candidates = resolution.Candidates,
             Notices = notices,
         };
+    }
+
+    private NetworkFingerprint RouteNetworkFor(LatencyEndpoint endpoint, NetworkFingerprint fallback)
+    {
+        if (!_routeLookupAvailable)
+        {
+            return fallback;
+        }
+
+        try
+        {
+            var routed = _captureRoute(endpoint.Address, endpoint.LocalEndpoint?.Address);
+            return routed.IsOnline ? routed : fallback;
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"latency.loaded.route: hedef bağdaştırıcısı çözülemedi ({ex.Message}); mevcut bağdaştırıcı kullanılıyor.");
+            return fallback;
+        }
     }
 
     /// <summary>

@@ -40,3 +40,13 @@ alır.
 
 Yalnızca kurulum paketini üretmek için derleme sırasında kullanılır; uygulamayla
 birlikte dağıtılmaz.
+
+## Tesseract OCR ve İngilizce dil modeli
+
+- Proje: <https://github.com/tesseract-ocr/tesseract>
+- .NET bağlayıcısı: <https://github.com/charlesw/tesseract>
+- Dil verisi: <https://github.com/tesseract-ocr/tessdata_fast>
+- Lisans: Apache License 2.0
+
+Yalnız kullanıcının seçtiği VALORANT Network RTT sayı alanını bellekte okumak
+için kullanılır. Yakalanan görüntüler dosyaya yazılmaz.

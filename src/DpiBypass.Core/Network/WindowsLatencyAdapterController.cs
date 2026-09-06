@@ -120,6 +120,13 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
             RssMaxProcessors = dto.Rss?.MaxProcessors,
             LsoV2IPv4Enabled = dto.Lso?.V2IPv4Enabled,
             LsoV2IPv6Enabled = dto.Lso?.V2IPv6Enabled,
+            WlanMediaStreamingEnabled = network.IsWireless
+                ? WlanApi.TryGetMediaStreamingMode(network.AdapterId)
+                : null,
+            WirelessPowerSavingAcMode = network.IsWireless
+                && WindowsPowerApi.TryReadAcWirelessPowerSaving(out var wirelessPower)
+                    ? wirelessPower
+                    : null,
         };
     }
 
@@ -155,6 +162,11 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
         ArgumentNullException.ThrowIfNull(adapter);
         ArgumentNullException.ThrowIfNull(candidate);
         ArgumentNullException.ThrowIfNull(restart);
+
+        if (candidate.Kind == LatencySettingKind.PowerManagement)
+        {
+            return ApplyPowerSetting(adapter, candidate);
+        }
 
         if (candidate.Kind != LatencySettingKind.AdvancedProperty)
         {
@@ -214,6 +226,11 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
         LatencySettingSnapshot setting,
         CancellationToken cancellationToken = default)
     {
+        if (setting.Kind == LatencySettingKind.PowerManagement)
+        {
+            return RestorePowerSetting(setting);
+        }
+
         var environment = BuildEnvironment(setting.AdapterId, setting.PropertyName);
         environment["DPI_BYPASS_SETTING_KIND"] = setting.Kind.ToString();
         environment["DPI_BYPASS_POWER_VALUE"] = setting.OriginalPowerValue?.ToString(CultureInfo.InvariantCulture);
@@ -242,6 +259,48 @@ public sealed class WindowsLatencyAdapterController : ILatencyAdapterController
         }
 
         return outcome;
+    }
+
+    private static LatencyApplyResult ApplyPowerSetting(
+        AdapterLatencyCapability adapter,
+        LatencyOptimizationCandidate candidate)
+    {
+        if (candidate.DesiredPowerValue is not { } desired)
+        {
+            return LatencyApplyResult.Refused("Uygulanacak güç değeri bulunamadı.");
+        }
+
+        var applied = candidate.PropertyName switch
+        {
+            AdapterInterventionCatalog.WlanMediaStreamingProperty =>
+                WlanApi.TrySetMediaStreamingMode(adapter.AdapterId, desired != 0),
+            AdapterInterventionCatalog.WirelessPowerSavingProperty =>
+                WindowsPowerApi.TrySetAcWirelessPowerSaving(checked((uint)desired)),
+            _ => false,
+        };
+
+        return applied
+            ? new LatencyApplyResult { State = LatencyApplyState.OperationallyVerified }
+            : LatencyApplyResult.Refused("Windows ayarı uygulamadı veya geri okunan değer eşleşmedi.");
+    }
+
+    private static LatencyRestoreOutcome RestorePowerSetting(LatencySettingSnapshot setting)
+    {
+        if (setting.OriginalPowerValue is not { } original)
+        {
+            return LatencyRestoreOutcome.Failed;
+        }
+
+        var restored = setting.PropertyName switch
+        {
+            AdapterInterventionCatalog.WlanMediaStreamingProperty =>
+                WlanApi.TrySetMediaStreamingMode(setting.AdapterId, original != 0),
+            AdapterInterventionCatalog.WirelessPowerSavingProperty =>
+                WindowsPowerApi.TrySetAcWirelessPowerSaving(checked((uint)original)),
+            _ => false,
+        };
+
+        return restored ? LatencyRestoreOutcome.Restored : LatencyRestoreOutcome.Failed;
     }
 
     /// <summary>

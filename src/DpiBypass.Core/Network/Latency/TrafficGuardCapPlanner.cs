@@ -165,7 +165,7 @@ public static class TrafficGuardCapPlanner
 
         var floor = ThroughputFloor(mode);
         var qualifying = trials
-            .Where(trial => trial.RateHonoured && trial.Result.ProvesQueueing)
+            .Where(trial => trial.RateHonoured && Comparable(trial))
             .Where(trial => Removed(queueingBefore, trial) >= MinimumQueueingReductionMs)
             .Where(trial => Removed(queueingBefore, trial) >= queueingBefore * MinimumQueueingReductionShare)
             .Where(trial => trial.ThroughputKbps >= baseline.ThroughputKbps * floor)
@@ -237,14 +237,14 @@ public static class TrafficGuardCapPlanner
             return "oluşturulan ilke ölçülen bayt hızını sınırlamadı; QoS bu trafiğe uygulanmıyor";
         }
 
-        if (trials.All(trial => !trial.Result.ProvesQueueing))
+        if (trials.All(trial => !Comparable(trial)))
         {
-            return "sınır altındaki turlarda hat doygunluğa ulaşmadı; karşılaştırma yapılamadı";
+            return "sınır altındaki turlarda karşılaştırılabilir etkin gönderim penceresi oluşmadı";
         }
 
         var queueingBefore = baseline.QueueingMs ?? 0;
         var best = trials
-            .Where(trial => trial.RateHonoured && trial.Result.ProvesQueueing)
+            .Where(trial => trial.RateHonoured && Comparable(trial))
             .OrderByDescending(trial => Removed(queueingBefore, trial))
             .FirstOrDefault();
 
@@ -270,6 +270,9 @@ public static class TrafficGuardCapPlanner
 
         return "sınır kabul ölçütlerini geçemedi";
     }
+
+    private static bool Comparable(TrafficGuardCapTrial trial)
+        => trial.Result.ProvesQueueing || trial.Result.QueueingComparable;
 
     private static double Removed(double queueingBefore, TrafficGuardCapTrial trial)
         => queueingBefore - (trial.QueueingMs ?? queueingBefore);

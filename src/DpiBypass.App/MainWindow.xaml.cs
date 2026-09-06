@@ -9,6 +9,7 @@ using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.App.ViewModels;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.Network;
 using DpiBypass.Core.Startup;
 
 namespace DpiBypass.App;
@@ -64,6 +65,35 @@ public partial class MainWindow : Window
 
     /// <summary>Raised on the UI thread the first time a frame reaches the screen.</summary>
     public event Action? FirstFrameRendered;
+
+    private void SelectValorantRttRegion_Click(object sender, RoutedEventArgs e)
+    {
+        Hide();
+        try
+        {
+            if (!ValorantHudLatencySource.TryBringGameToForeground())
+            {
+                MessageBox.Show(
+                    "VALORANT penceresi bulunamadı. Oyunu açıp Network RTT sayacını görünür yaptıktan sonra yeniden deneyin.",
+                    "Network RTT alanı",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var selector = new LatencyRegionSelectorWindow();
+
+            if (selector.ShowDialog() == true && selector.SelectedRegion is { IsValid: true } region)
+            {
+                _viewModel.SetValorantCaptureRegion(region);
+            }
+        }
+        finally
+        {
+            Show();
+            Activate();
+        }
+    }
 
     /// <summary>
     /// How far this window has actually got. The only value that means the user can

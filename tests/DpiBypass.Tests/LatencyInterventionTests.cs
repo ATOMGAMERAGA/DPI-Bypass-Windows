@@ -317,7 +317,7 @@ public sealed class AdapterInterventionCatalogTests
     }
 
     /// <summary>
-    /// The two power keywords an earlier build wrote are not candidates any more.
+    /// Legacy power keywords remain excluded while the two measurable Wi-Fi controls are allowed.
     /// </summary>
     /// <remarks>
     /// Selective suspend acts on the first packet after an idle threshold and D0 packet
@@ -328,7 +328,12 @@ public sealed class AdapterInterventionCatalogTests
     [Fact]
     public void ThePowerKeywordsAsteadyStateExperimentCannotSeeAreNoLongerOffered()
     {
-        Assert.Empty(AdapterInterventionCatalog.WritablePowerProperties);
+        Assert.Equal(
+            [
+                AdapterInterventionCatalog.WlanMediaStreamingProperty,
+                AdapterInterventionCatalog.WirelessPowerSavingProperty,
+            ],
+            AdapterInterventionCatalog.WritablePowerProperties);
 
         Assert.Contains(
             AdapterInterventionCatalog.SelectiveSuspendProperty,
@@ -354,6 +359,39 @@ public sealed class AdapterInterventionCatalogTests
         Assert.DoesNotContain(
             adapter.BuildSafeCandidates(),
             candidate => candidate.Kind == LatencySettingKind.PowerManagement);
+    }
+
+    [Fact]
+    public void WirelessStreamingAndAcPowerSettingsAreOfferedOnlyWhenTheyCanChange()
+    {
+        var adapter = Capability() with
+        {
+            AdapterType = NetworkInterfaceType.Wireless80211,
+            WlanMediaStreamingEnabled = false,
+            WirelessPowerSavingAcMode = 2,
+        };
+        var context = new LatencyCandidateContext
+        {
+            IsWireless = true,
+            AllowPowerCost = true,
+        };
+
+        var candidates = adapter.BuildSafeCandidates(context);
+
+        Assert.Contains(candidates, candidate =>
+            candidate.PropertyName == AdapterInterventionCatalog.WlanMediaStreamingProperty
+            && candidate.DesiredPowerValue == 1);
+        Assert.Contains(candidates, candidate =>
+            candidate.PropertyName == AdapterInterventionCatalog.WirelessPowerSavingProperty
+            && candidate.DesiredPowerValue == 0);
+        Assert.All(candidates, candidate => Assert.Equal(LatencySettingKind.PowerManagement, candidate.Kind));
+
+        Assert.Empty(adapter.BuildSafeCandidates(context with { AllowPowerCost = false }));
+        Assert.Empty((adapter with
+        {
+            WlanMediaStreamingEnabled = true,
+            WirelessPowerSavingAcMode = 0,
+        }).BuildSafeCandidates(context));
     }
 
     private static AdapterAdvancedPropertyCapability Property(

@@ -5,8 +5,8 @@ denetlenebilir kaydıdır. Her satır resmî bir kaynağa dayanır. Blog yazıla
 forum "gaming tweak" listeleri ve kaynağı belirsiz registry paketleri kaynak
 olarak kullanılmamıştır.
 
-Erişim tarihi: **30 Ağustos 2026**; V2 kaynakları **31 Ağustos 2026** tarihinde
-yeniden açılıp doğrulandı. Sürümler değiştiğinde bu belge de güncellenmelidir;
+Erişim tarihi: **30 Ağustos 2026**; V2 kaynakları **31 Ağustos 2026**, rota ve
+Wi-Fi kaynakları **6 Eylül 2026** tarihinde yeniden açılıp doğrulandı. Sürümler değiştiğinde bu belge de güncellenmelidir;
 kod, burada yazılmayan hiçbir ayarı değiştirmez.
 
 V2'de değişen kararlar `LATENCY-AUDIT-V2.md` içinde bulgu bazında işaretlidir.
@@ -40,6 +40,10 @@ V2'de değişen kararlar `LATENCY-AUDIT-V2.md` içinde bulgu bazında işaretlid
 | R21 | <https://learn.microsoft.com/windows-server/networking/technologies/qos/qos-policy-architecture> | QoS Inspection Module ↔ Pacer.sys mimarisi |
 | R22 | <https://reqrypt.org/windivert-doc.html> | WinDivert 2.2 `WINDIVERT_LAYER_FLOW`, `SNIFF｜RECV_ONLY`, kısıtlar |
 | R23 | <https://learn.microsoft.com/windows/win32/winmsg/getsystemmetrics> | `SM_REMOTESESSION` — uzak oturum tespiti |
+| R24 | <https://learn.microsoft.com/windows/win32/api/iphlpapi/nf-iphlpapi-getbestroute2> | Hedef IP için Windows'un seçtiği arayüz ve kaynak adres |
+| R25 | <https://learn.microsoft.com/windows/win32/api/wlanapi/nf-wlanapi-wlansetinterface> | Native Wi-Fi arayüz ayarı yazma ve yetki kuralları |
+| R26 | <https://learn.microsoft.com/windows/win32/api/wlanapi/ne-wlanapi-wlan_intf_opcode> | `wlan_intf_opcode_media_streaming_mode` sorgusu |
+| R27 | <https://learn.microsoft.com/windows/win32/api/powrprof/nf-powrprof-powerreadacvalueindex> | Etkin planın AC kablosuz güç değeri |
 
 ---
 
@@ -179,7 +183,7 @@ deneyiyle ölçüyordu — yani deneyin göremeyeceği bir şeyi ölçmek için 
 çalışıyor, sonra "kazanç yok" diyordu. Bu doğru sonucun pahalı yoluydu.
 
 **V2:** aday listesinden çıkarıldı (`AdapterInterventionCatalog.WritablePowerProperties`
-artık boş). Ayrı bir *first-packet* deneyi yazılmadı; görev tanımı bu iki
+bu anahtarı içermez). Ayrı bir *first-packet* deneyi yazılmadı; görev tanımı bu iki
 seçenekten birini istiyordu ve çıkarmak, ölçülmemiş bir ayarı "optimize edildi"
 diye raporlamama kuralıyla daha uyumludur. Eski snapshot'lar için
 `RestorablePowerProperties` içinde kalır.
@@ -195,7 +199,19 @@ genel bir oyun RTT müdahalesi olarak sunuyordu.
 
 **V2:** aday listesinden çıkarıldı, `RestorablePowerProperties` içinde kaldı.
 
-### 3.7.1 Bir ayarın gerçekten etkinleşmesi (R15, R16, R17, R18)
+### 3.7.1 Wi-Fi medya akışı ve AC güç modu
+
+Windows Native Wi-Fi `wlan_intf_opcode_media_streaming_mode` değerini hem sorgular
+hem yazar. Bu sinyal gerçek zamanlı akış sırasında tarama ve güç tasarrufu
+davranışını etkileyebildiği için yalnız Wi-Fi arayüzünde, prizde ve mevcut değer
+kapalıysa eşli A/B deneyine alınır.
+
+Etkin güç planının `Wireless Adapter Settings / Power Saving Mode` AC değeri de
+Power API üzerinden okunur. Yalnız mevcut değer maksimum performans değilse aday
+olur; bütün güç planı değiştirilmez. İki değer de yazılmadan önce snapshot'a
+alınır, geri okunarak doğrulanır ve aday kabul edilmezse özgün değerine döner.
+
+### 3.7.2 Bir ayarın gerçekten etkinleşmesi (R15, R16, R17, R18)
 
 R15, `-NoRestart` için açık: *"Indicates that the cmdlet does not restart the
 network adapter after completing the operation. **Many advanced properties

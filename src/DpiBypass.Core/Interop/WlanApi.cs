@@ -31,6 +31,7 @@ public readonly record struct WlanConnection(
 public static class WlanApi
 {
     private const uint ClientVersion = 2;
+    private const uint OpcodeMediaStreamingMode = 3;
     private const uint OpcodeCurrentConnection = 7;
 
     // Offsets inside WLAN_CONNECTION_ATTRIBUTES.
@@ -46,7 +47,7 @@ public static class WlanApi
     private const int RxRateOffset = SignalQualityOffset + 4;
     private const int TxRateOffset = RxRateOffset + 4;
 
-    public static WlanConnection? TryGetCurrentConnection()
+    public static WlanConnection? TryGetCurrentConnection(string? interfaceId = null)
     {
         nint client = 0;
         nint interfaceList = 0;
@@ -78,6 +79,11 @@ public static class WlanApi
                 Marshal.Copy(entry, guidBytes, 0, 16);
                 var guid = new Guid(guidBytes);
 
+                if (Guid.TryParse(interfaceId, out var requested) && guid != requested)
+                {
+                    continue;
+                }
+
                 var connection = QueryConnection(client, guid);
                 if (connection is not null)
                 {
@@ -102,6 +108,85 @@ public static class WlanApi
                 WlanFreeMemory(interfaceList);
             }
 
+            if (client != 0)
+            {
+                WlanCloseHandle(client, 0);
+            }
+        }
+    }
+
+    public static bool? TryGetMediaStreamingMode(string interfaceId)
+    {
+        if (!OperatingSystem.IsWindows() || !Guid.TryParse(interfaceId, out var guid))
+        {
+            return null;
+        }
+
+        nint client = 0;
+        nint data = 0;
+        try
+        {
+            if (WlanOpenHandle(ClientVersion, 0, out _, out client) != 0
+                || WlanQueryInterface(client, ref guid, OpcodeMediaStreamingMode, 0, out var size, out data, 0) != 0
+                || data == 0
+                || size < sizeof(int))
+            {
+                return null;
+            }
+
+            return Marshal.ReadInt32(data) != 0;
+        }
+        catch (DllNotFoundException)
+        {
+            return null;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (data != 0)
+            {
+                WlanFreeMemory(data);
+            }
+
+            if (client != 0)
+            {
+                WlanCloseHandle(client, 0);
+            }
+        }
+    }
+
+    public static bool TrySetMediaStreamingMode(string interfaceId, bool enabled)
+    {
+        if (!OperatingSystem.IsWindows() || !Guid.TryParse(interfaceId, out var guid))
+        {
+            return false;
+        }
+
+        nint client = 0;
+        try
+        {
+            if (WlanOpenHandle(ClientVersion, 0, out _, out client) != 0)
+            {
+                return false;
+            }
+
+            var value = enabled ? 1 : 0;
+            return WlanSetInterface(client, ref guid, OpcodeMediaStreamingMode, sizeof(int), ref value, 0) == 0
+                && TryGetMediaStreamingMode(interfaceId) == enabled;
+        }
+        catch (DllNotFoundException)
+        {
+            return false;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return false;
+        }
+        finally
+        {
             if (client != 0)
             {
                 WlanCloseHandle(client, 0);
@@ -182,6 +267,15 @@ public static class WlanApi
         out uint dataSize,
         out nint data,
         nint opcodeValueType);
+
+    [DllImport("wlanapi.dll")]
+    private static extern uint WlanSetInterface(
+        nint clientHandle,
+        ref Guid interfaceGuid,
+        uint opCode,
+        uint dataSize,
+        ref int data,
+        nint reserved);
 
     [DllImport("wlanapi.dll")]
     private static extern void WlanFreeMemory(nint memory);

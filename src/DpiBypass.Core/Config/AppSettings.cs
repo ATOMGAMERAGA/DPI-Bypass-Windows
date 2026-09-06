@@ -52,6 +52,15 @@ public sealed record LatencyPreferences
     public string? TargetProcess { get; set; }
 
     /// <summary>
+    /// Screen pixels containing VALORANT's numeric Network RTT counter.
+    /// </summary>
+    /// <remarks>
+    /// Only the rectangle is persisted. Captured frames stay in memory and are discarded
+    /// immediately after OCR; no screenshot is written to disk.
+    /// </remarks>
+    public ScreenCaptureRegion? ValorantRttRegion { get; set; }
+
+    /// <summary>
     /// Whether the loaded-latency lane may create a send-rate limit.
     /// </summary>
     /// <remarks>

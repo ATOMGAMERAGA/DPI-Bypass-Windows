@@ -160,8 +160,14 @@ public sealed record LatencyProfile
     /// cannot be repaired - the file does not say which entries were measured - so the
     /// version bump retires them wholesale rather than replaying a wrong answer. Nothing
     /// is lost but one re-measurement.
+    /// </para>
+    /// <para>
+    /// Version 4 pins the adapter from the target route and can use a game's own RTT
+    /// source. Older profiles measured a potentially different interface or instrument,
+    /// so they are deliberately re-earned.
+    /// </para>
     /// </remarks>
-    public const int CurrentMethodologyVersion = 3;
+    public const int CurrentMethodologyVersion = 4;
 
     /// <summary>Beyond this a profile is re-measured rather than trusted.</summary>
     public static readonly TimeSpan MaximumAge = TimeSpan.FromDays(30);

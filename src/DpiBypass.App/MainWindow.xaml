@@ -864,6 +864,21 @@
                                             Command="{Binding RefreshLatencyProcessesCommand}" />
                                 </Grid>
 
+                                <StackPanel Margin="0,8,0,0"
+                                            Visibility="{Binding IsValorantLatencyTarget, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <Button Content="VALORANT Network RTT alanını seç"
+                                            MinWidth="250"
+                                            MinHeight="34"
+                                            HorizontalAlignment="Left"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            IsEnabled="{Binding CanSelectValorantRttRegion}"
+                                            Click="SelectValorantRttRegion_Click" />
+                                    <TextBlock Text="{Binding ValorantRttRegionSummary}"
+                                               Style="{StaticResource HintStyle}"
+                                               Margin="0,5,0,0"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+
                                 <!-- The error belongs to the field above it, and the
                                      buttons below are disabled while it is showing. -->
                                 <TextBlock Text="{Binding LatencyTargetError}"

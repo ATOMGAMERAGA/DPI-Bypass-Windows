@@ -11,6 +11,19 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
+    <PackageReference Include="Tesseract" Version="5.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="tessdata/eng.traineddata">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>tessdata/eng.traineddata</Link>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- So the tests can pin implementation details that must not drift, such as the
          exact kernel filter the TTL fix installs. -->
     <InternalsVisibleTo Include="DpiBypass.Tests" />

@@ -1,3 +1,4 @@
+using System.Net;
 using DpiBypass.Core.Logging;
 
 namespace DpiBypass.Core.Network;
@@ -41,7 +42,7 @@ public sealed record LatencyOptimizerOptions
     /// simply not measured this time; the run still commits whatever it did verify, and
     /// the rest are tried again on the next pass.
     /// </remarks>
-    public TimeSpan TotalBudget { get; init; } = TimeSpan.FromMinutes(12);
+    public TimeSpan TotalBudget { get; init; } = TimeSpan.FromMinutes(30);
 
     /// <summary>Sample size an inconclusive experiment grows to before giving up.</summary>
     public int AdaptiveProbeCount { get; init; } = LatencyProbeRequest.Deep.ProbeCount;
@@ -99,6 +100,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private readonly Func<NetworkMonitor> _monitorFactory;
     private readonly LatencyOptimizerOptions _options;
     private readonly Func<DateTimeOffset> _now;
+    private readonly Func<IPAddress, IPAddress?, NetworkFingerprint> _captureRoute;
+    private readonly bool _routeLookupAvailable;
     private readonly Action<string>? _log;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private readonly Lock _cancellationGate = new();
@@ -124,7 +127,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         ILatencyEnvironmentSampler? environmentSampler = null,
         ILatencyExperimentRunner? runner = null,
         IReadOnlyList<ILatencyResourceRestorer>? resourceRestorers = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        Func<IPAddress, IPAddress?, NetworkFingerprint>? captureRoute = null)
     {
         _log = log ?? AppLog.InfoSink;
         _controller = controller ?? new WindowsLatencyAdapterController(_log);
@@ -142,6 +146,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         _monitorFactory = monitorFactory ?? (() => new NetworkMonitor(log: _log));
         _options = options ?? LatencyOptimizerOptions.Default;
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        _captureRoute = captureRoute ?? NetworkFingerprint.CaptureFor;
+        _routeLookupAvailable = captureRoute is not null || OperatingSystem.IsWindows();
         Target = _options.Target;
         Restart = _options.Restart;
     }
@@ -420,6 +426,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         var spec = target ?? Target;
         var resolution = await _targets.ResolveAsync(spec, cancellationToken).ConfigureAwait(false);
+        resolution = PrepareResolution(resolution);
         if (!resolution.Succeeded)
         {
             return new LatencyOptimizationResult
@@ -433,6 +440,12 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         var (measurement, endpoint) = await MeasureTargetAsync(network, resolution, cancellationToken)
             .ConfigureAwait(false);
+        network = RouteNetworkFor(endpoint, network);
+        if (measurement.HasRemoteConnectivity)
+        {
+            measurement = await _probe.MeasureAsync(network, _options.Benchmark.For(endpoint), cancellationToken)
+                .ConfigureAwait(false);
+        }
         var path = LatencyPathAnalysis.Describe(measurement);
 
         return new LatencyOptimizationResult
@@ -467,8 +480,9 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         LatencyMeasurement? best = null;
         LatencyEndpoint? chosen = null;
 
-        foreach (var candidate in resolution.Endpoints)
+        foreach (var unresolvedCandidate in resolution.Endpoints)
         {
+            var candidate = PrepareEndpoint(unresolvedCandidate);
             var survey = await _probe
                 .MeasureAsync(network, _options.Survey.For(candidate), cancellationToken)
                 .ConfigureAwait(false);
@@ -497,6 +511,14 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         return (measurement, endpoint);
     }
+
+    private LatencyEndpoint PrepareEndpoint(LatencyEndpoint endpoint)
+    {
+        return _probe is GameAwareLatencyProbe game ? game.PrepareEndpoint(endpoint) : endpoint;
+    }
+
+    private LatencyTargetResolution PrepareResolution(LatencyTargetResolution resolution)
+        => _probe is GameAwareLatencyProbe game ? game.PrepareResolution(resolution) : resolution;
 
     private async Task<LatencyOptimizationResult> RunForNetworkAsync(
         NetworkFingerprint network,
@@ -611,18 +633,15 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         // an earlier build did - threw away the connection measurement, the path split
         // and the loaded-lane suggestion, none of which need a driver candidate to be
         // useful, and told the user the feature was unsupported when only one part was.
-        var adapter = await _controller.DetectAsync(network, token).ConfigureAwait(false);
-        var adapterUsable = adapter is not null && adapter.IsEligible;
-        var adapterName = adapter?.AdapterName ?? network.AdapterName ?? network.DisplayName;
-
         var resolution = await _targets.ResolveAsync(Target, token).ConfigureAwait(false);
+        resolution = PrepareResolution(resolution);
         if (!resolution.Succeeded)
         {
             return Publish(new LatencyOptimizationResult
             {
                 Status = LatencyOptimizationStatus.Offline,
                 StatusLine = resolution.Failure ?? "Ölçüm hedefi çözümlenemedi; hiçbir NIC ayarı değiştirilmedi.",
-                AdapterName = adapterName,
+                AdapterName = network.AdapterName ?? network.DisplayName,
                 NetworkKey = network.Key,
                 TargetLabel = Target.Describe(),
                 Lanes =
@@ -635,8 +654,18 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         // One short pass settles which endpoint answers here; every later measurement in
         // this run uses that same pinned endpoint so the numbers can be subtracted.
-        _log?.Invoke($"latency.baseline.started: {adapterName} · ağ {network.Key}");
+        _log?.Invoke($"latency.baseline.started: {network.AdapterName ?? network.DisplayName} · ağ {network.Key}");
         var (baseline, endpoint) = await MeasureTargetAsync(network, resolution, token).ConfigureAwait(false);
+        var routed = RouteNetworkFor(endpoint, network);
+        if (!string.Equals(routed.AdapterId, network.AdapterId, StringComparison.OrdinalIgnoreCase))
+        {
+            network = routed;
+            baseline = await _probe.MeasureAsync(network, _options.Benchmark.For(endpoint), token).ConfigureAwait(false);
+        }
+
+        var adapter = await _controller.DetectAsync(network, token).ConfigureAwait(false);
+        var adapterUsable = adapter is not null && adapter.IsEligible;
+        var adapterName = adapter?.AdapterName ?? network.AdapterName ?? network.DisplayName;
         var benchmark = _options.Benchmark.For(endpoint);
 
         if (!baseline.HasRemoteConnectivity)
@@ -716,7 +745,13 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             await RemoveProfileSafelyAsync(network, adapter!).ConfigureAwait(false);
         }
 
-        var profile = ignoreCache
+        var gameDisplay = endpoint.ProtocolLabelOverride is not null;
+        if (gameDisplay)
+        {
+            _log?.Invoke("latency.profile: oyun içi RTT kaynağı her çalışmada tam eşli deneyle yeniden ölçülüyor.");
+        }
+
+        var profile = ignoreCache || gameDisplay
             ? null
             : await LoadUsableProfileAsync(network, adapter!, context, token).ConfigureAwait(false);
 
@@ -1102,15 +1137,25 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             },
         };
 
+        var finalProbe = endpoint.ProtocolLabelOverride is null
+            ? benchmark
+            : benchmark.Widened(60);
+
         var plan = new LatencyExperimentPlan
         {
             Network = network,
             Candidate = bundle,
-            Probe = benchmark,
-            MinimumCycles = _options.MinimumCycles,
-            MaximumCycles = _options.MaximumCycles,
+            Probe = finalProbe,
+            MinimumCycles = endpoint.ProtocolLabelOverride is null
+                ? _options.MinimumCycles
+                : Math.Max(4, _options.MinimumCycles),
+            MaximumCycles = endpoint.ProtocolLabelOverride is null
+                ? _options.MaximumCycles
+                : Math.Max(4, _options.MaximumCycles),
             MaximumDiscardedCycles = _options.MaximumLoadRetries,
-            Budget = _options.CandidateBudget,
+            Budget = endpoint.ProtocolLabelOverride is null
+                ? _options.CandidateBudget
+                : TimeSpan.FromMinutes(12),
             Seed = _options.Seed,
             Evaluation = _options.Evaluation,
             AdaptiveProbeCount = _options.AdaptiveProbeCount,
@@ -1486,15 +1531,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         LatencyEnvironment environment,
         LatencyProfileContext context)
     {
-        var candidates = adapter.BuildSafeCandidates(new LatencyCandidateContext
-        {
-            Scope = ScopeOf(endpoint.Protocol),
-            ApplicationScope = ScopeOf(endpoint.ApplicationProtocol ?? endpoint.Protocol),
-            Power = environment.Power,
-            IsWireless = adapter.AdapterType == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211,
-            AllowPowerCost = environment.Power != PowerSource.Battery,
-            IncludeThroughputSensitive = false,
-        });
+        var candidates = adapter.BuildSafeCandidates(CandidateContextFor(adapter, endpoint, environment));
 
         if (candidates.Count == 0 || profile is null)
         {
@@ -1521,12 +1558,44 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         return remaining;
     }
 
+    private static LatencyCandidateContext CandidateContextFor(
+        AdapterLatencyCapability adapter,
+        LatencyEndpoint endpoint,
+        LatencyEnvironment environment) => new()
+        {
+            Scope = ScopeOf(endpoint.Protocol),
+            ApplicationScope = ScopeOf(endpoint.ApplicationProtocol ?? endpoint.Protocol),
+            Power = environment.Power,
+            IsWireless = adapter.AdapterType == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211,
+            AllowPowerCost = environment.Power != PowerSource.Battery,
+            IncludeThroughputSensitive = false,
+        };
+
     private static LatencyTrafficScope ScopeOf(LatencyProtocol protocol) => protocol switch
     {
-        LatencyProtocol.Tcp => LatencyTrafficScope.Tcp,
+        LatencyProtocol.Tcp or LatencyProtocol.TcpEStats or LatencyProtocol.MinecraftStatus => LatencyTrafficScope.Tcp,
         LatencyProtocol.Udp => LatencyTrafficScope.Udp,
         _ => LatencyTrafficScope.Icmp,
     };
+
+    private NetworkFingerprint RouteNetworkFor(LatencyEndpoint endpoint, NetworkFingerprint fallback)
+    {
+        if (!_routeLookupAvailable)
+        {
+            return fallback;
+        }
+
+        try
+        {
+            var routed = _captureRoute(endpoint.Address, endpoint.LocalEndpoint?.Address);
+            return routed.IsOnline ? routed : fallback;
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"latency.route: oyun hedefinin bağdaştırıcısı çözülemedi ({ex.Message}); mevcut bağdaştırıcı kullanılıyor.");
+            return fallback;
+        }
+    }
 
     /// <summary>
     /// Re-applies a previously verified profile and freshly proves it is still beneficial.
@@ -1544,7 +1613,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         CancellationToken token)
     {
         var wanted = new HashSet<string>(profile.AcceptedProperties, StringComparer.OrdinalIgnoreCase);
-        var candidates = adapter.BuildSafeCandidates()
+        var candidates = adapter.BuildSafeCandidates(CandidateContextFor(adapter, endpoint, environment))
             .Where(candidate => wanted.Contains(candidate.PropertyName))
             .ToArray();
 

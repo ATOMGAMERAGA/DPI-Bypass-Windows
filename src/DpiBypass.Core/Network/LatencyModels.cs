@@ -132,6 +132,9 @@ public enum LatencySampleSource
 
     /// <summary>Readings of a counter the operating system maintains. Nothing was sent.</summary>
     PassiveObservation = 1,
+
+    /// <summary>Read from the game's own on-screen RTT counter; no network probe was sent.</summary>
+    GameDisplay = 2,
 }
 
 /// <summary>A statistically useful latency sample; every number comes from real I/O.</summary>
@@ -209,6 +212,9 @@ public sealed record LatencyMeasurement
     /// </remarks>
     public double ClockResolutionMs { get; init; } = 1.0;
 
+    /// <summary>Share of requested observations that produced a usable value.</summary>
+    public double ValidSampleShare { get; init; } = 1;
+
     /// <summary>Whether loss is a number this measurement can report at all.</summary>
     public bool LossMeasured => PacketLossPercent is not null;
 
@@ -233,7 +239,8 @@ public sealed record LatencyMeasurement
         NetworkLoadSample? load = null,
         DateTimeOffset? measuredAt = null,
         double clockResolutionMs = 1.0,
-        LatencySampleSource source = LatencySampleSource.ActiveProbe)
+        LatencySampleSource source = LatencySampleSource.ActiveProbe,
+        double validSampleShare = 1)
     {
         // Sorted for the order statistics; the delay variation needs the samples in the
         // order they arrived, so it is computed from the original list.
@@ -247,7 +254,7 @@ public sealed record LatencyMeasurement
             Protocol = protocol,
             // A passive series records no attempts at all: what it collected are readings,
             // and calling them attempts is what turned polling frequency into packet loss.
-            RemoteAttempts = source == LatencySampleSource.PassiveObservation ? 0 : remoteAttempts,
+            RemoteAttempts = source == LatencySampleSource.ActiveProbe ? remoteAttempts : 0,
             RemoteReplies = ordered.Length,
             Source = source,
             GatewayAttempts = gatewayAttempts,
@@ -257,9 +264,9 @@ public sealed record LatencyMeasurement
             P95RttMs = LatencyStatistics.PercentileOfSorted(ordered, 0.95),
             P99RttMs = LatencyStatistics.PercentileOfSorted(ordered, 0.99),
             JitterMs = LatencyStatistics.DelayVariation(remoteSamples),
-            PacketLossPercent = source == LatencySampleSource.PassiveObservation
-                ? null
-                : LatencyStatistics.PacketLossPercent(remoteAttempts, ordered.Length),
+            PacketLossPercent = source == LatencySampleSource.ActiveProbe
+                ? LatencyStatistics.PacketLossPercent(remoteAttempts, ordered.Length)
+                : null,
             GatewayMedianRttMs = orderedGateway.Length == 0
                 ? null
                 : LatencyStatistics.PercentileOfSorted(orderedGateway, 0.50),
@@ -268,6 +275,7 @@ public sealed record LatencyMeasurement
                 : LatencyStatistics.PercentileOfSorted(orderedGateway, 0.95),
             Load = load ?? NetworkLoadSample.Unknown,
             ClockResolutionMs = clockResolutionMs,
+            ValidSampleShare = Math.Clamp(validSampleShare, 0, 1),
         };
     }
 }
@@ -549,6 +557,10 @@ public sealed record AdapterLatencyCapability
 
     public bool? LsoV2IPv6Enabled { get; init; }
 
+    public bool? WlanMediaStreamingEnabled { get; init; }
+
+    public uint? WirelessPowerSavingAcMode { get; init; }
+
     public bool IsEligible => IsPhysical && !IsVirtual && IsUp
         && AdapterType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211;
 
@@ -573,6 +585,8 @@ public sealed record AdapterLatencyCapability
                 InterfaceDescription,
                 DriverVersion,
                 AdapterType.ToString(),
+                $"wlan-streaming={WlanMediaStreamingEnabled}",
+                $"wlan-ac-power={WirelessPowerSavingAcMode}",
             };
 
             parts.AddRange(PowerManagement

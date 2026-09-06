@@ -31,6 +31,8 @@ public sealed class TrafficGuardTests
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 60, loadedP95: 88, uplinkKbps: 18_400),
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 34, loadedP95: 42, uplinkKbps: 16_000),
             FakeLoadExperiment.Upload(idleMedian: 24, loadedMedian: 35, loadedP95: 44, uplinkKbps: 16_000));
+        var requests = new List<LoadExperimentRequest>();
+        load.OnRun = requests.Add;
 
         var outcome = await Guard(qos, load).RunAsync(Request());
 
@@ -46,6 +48,8 @@ public sealed class TrafficGuardTests
         // One cap measured, then confirmed: three rounds, and the harsher caps untouched.
         Assert.Single(outcome.State.Trials);
         Assert.Equal(3, load.Calls);
+        Assert.True(requests[0].RequireSaturation);
+        Assert.All(requests.Skip(1), request => Assert.False(request.RequireSaturation));
 
         // The cap that was kept is not the fixed 85 percent an earlier build assumed.
         Assert.NotEqual(
