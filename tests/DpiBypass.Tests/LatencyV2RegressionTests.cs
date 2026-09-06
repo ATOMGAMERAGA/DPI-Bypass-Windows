@@ -121,7 +121,8 @@ public sealed class LatencyApplyStateTests
             controller,
             FakeProbe.Flat(controller),
             snapshots,
-            profiles: new FakeProfileStore());
+            profiles: new FakeProfileStore(),
+            captureRoute: Fake.NoRoute);
 
         Assert.True(await optimizer.RecoverAsync());
 
@@ -429,7 +430,8 @@ public sealed class LoadedLaneStageTests
             log: _ => { },
             flows: new FakeFlowObserver { OnQuery = _ => Fake.Flow(at: DateTimeOffset.UtcNow.AddSeconds(1)) },
             applications: new FakeApplicationResolver(),
-            stages: stages);
+            stages: stages,
+            captureRoute: Fake.NoRoute);
 
         await lane.RunAsync(new LoadedLaneRequest
         {
@@ -669,7 +671,8 @@ public sealed class LatencyServiceCommandTests
             targets: new FakeTargetResolver(),
             environmentSampler: new FakeEnvironmentSampler(),
             resourceRestorers: [],
-            delay: (_, _) => Task.CompletedTask);
+            delay: (_, _) => Task.CompletedTask,
+            captureRoute: Fake.NoRoute);
 
         var started = new TaskCompletionSource();
         var release = new TaskCompletionSource();
@@ -682,7 +685,8 @@ public sealed class LatencyServiceCommandTests
             snapshots: new FakeSnapshotStore(),
             capture: () => Fake.Network("cancel"),
             log: _ => { },
-            applications: new FakeApplicationResolver());
+            applications: new FakeApplicationResolver(),
+            captureRoute: Fake.NoRoute);
 
         await using var service = new ProtectionService(
             new ConfigStore(directory.File("settings.json"), directory.File("networks.json")),

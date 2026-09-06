@@ -118,7 +118,8 @@ public sealed class LoadedLaneCompletionTests
             snapshots: new FakeSnapshotStore(),
             capture: () => Fake.Network("busy"),
             log: _ => { },
-            applications: new FakeApplicationResolver());
+            applications: new FakeApplicationResolver(),
+            captureRoute: Fake.NoRoute);
 
         var result = await lane.RunAsync(new LoadedLaneRequest());
 
@@ -150,7 +151,8 @@ public sealed class LoadedLaneCompletionTests
             snapshots: new FakeSnapshotStore(),
             capture: () => Fake.Network("sweep"),
             log: _ => { },
-            applications: new FakeApplicationResolver());
+            applications: new FakeApplicationResolver(),
+            captureRoute: Fake.NoRoute);
 
         var sweep = await lane.SweepOwnedPoliciesAsync();
 
@@ -211,7 +213,8 @@ public sealed class LatencyRunLifecycleTests
             targets: new FakeTargetResolver(),
             environmentSampler: new FakeEnvironmentSampler(),
             resourceRestorers: [],
-            delay: (_, _) => Task.CompletedTask);
+            delay: (_, _) => Task.CompletedTask,
+            captureRoute: Fake.NoRoute);
 
         var load = new FakeLoadExperiment();
         load.OnRun = _ =>
@@ -233,7 +236,8 @@ public sealed class LatencyRunLifecycleTests
                 snapshots: new FakeSnapshotStore(),
                 capture: () => Fake.Network("gate"),
                 log: _ => { },
-                applications: new FakeApplicationResolver()),
+                applications: new FakeApplicationResolver(),
+                captureRoute: Fake.NoRoute),
             flowObserver: new FakeFlowObserver());
 
         var modeOn = service.SetLowLatencyModeAsync(true);
@@ -269,7 +273,8 @@ public sealed class LatencyRunLifecycleTests
             targets: new FakeTargetResolver(),
             environmentSampler: new FakeEnvironmentSampler(),
             resourceRestorers: [],
-            delay: (_, _) => Task.CompletedTask);
+            delay: (_, _) => Task.CompletedTask,
+            captureRoute: Fake.NoRoute);
 
         await using var service = new ProtectionService(
             new ConfigStore(directory.File("settings.json"), directory.File("networks.json")),

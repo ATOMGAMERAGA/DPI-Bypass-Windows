@@ -1052,7 +1052,7 @@ public sealed class LoadedLatencyLaneTests
         await qos.CreateAsync(new QosPolicyRequest { Name = "DPIBypass.Latency.bulk.a" });
         await qos.CreateAsync(new QosPolicyRequest { Name = "DPIBypass.Latency.bulk.b" });
 
-        var lane = new LoadedLatencyLane(qos: qos, log: _ => { });
+        var lane = new LoadedLatencyLane(qos: qos, log: _ => { }, captureRoute: Fake.NoRoute);
 
         Assert.Equal(2, await lane.ClearOwnedPoliciesAsync());
         Assert.Empty(qos.Policies);
@@ -1070,7 +1070,8 @@ public sealed class LoadedLatencyLaneTests
             qos: qos,
             snapshots: new FakeSnapshotStore(),
             capture: () => Fake.Network("offline", online: false),
-            log: _ => { });
+            log: _ => { },
+            captureRoute: Fake.NoRoute);
 
         var result = await lane.RunAsync(new LoadedLaneRequest { RunTrafficGuard = true });
 
@@ -1110,7 +1111,8 @@ public sealed class LoadedLatencyLaneTests
                 OnQuery = _ => Fake.Flow(at: DateTimeOffset.UtcNow.AddSeconds(1)),
             },
             applications: new FakeApplicationResolver(),
-            stages: stages ?? new RecordingStages());
+            stages: stages ?? new RecordingStages(),
+            captureRoute: Fake.NoRoute);
     }
 
     private sealed class StubProbe : ILatencyProbe

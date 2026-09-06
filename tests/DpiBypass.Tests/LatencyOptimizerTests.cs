@@ -660,6 +660,98 @@ public sealed class LatencyOptimizerTests
         Assert.Equal(applies, scenario.Controller.Applied.Count);
     }
 
+    // --- the adapter the traffic really leaves by ------------------------------------------
+
+    /// <summary>
+    /// On a machine with more than one way out - a VPN, a tether, a second card - the
+    /// adapter the monitor reports need not be the one carrying the game. The settings
+    /// belong on the card the packets actually use.
+    /// </summary>
+    [Fact]
+    public async Task TheAdapterTheTrafficLeavesByIsTheOneOptimised()
+    {
+        var routed = Fake.Network("routed");
+        var controller = new FakeController();
+        var scenario = new LatencyScenario(
+            controller,
+            FakeProbe.Improves(controller, gain: 6),
+            route: Fake.RouteVia(routed));
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("reported"));
+
+        Assert.Equal($"{routed.AdapterId}:{Fake.DefaultKeyword}", controller.Events[0]);
+        Assert.Equal(routed.Key, result.NetworkKey);
+        Assert.Equal(routed.AdapterId, Assert.Single(scenario.Profiles.Profiles).AdapterId);
+    }
+
+    /// <summary>
+    /// The baseline every later number is subtracted from has to have been taken on the
+    /// adapter that ends up being changed, so moving costs a fresh one - and staying put
+    /// must not.
+    /// </summary>
+    [Fact]
+    public async Task OnlyARouteNamingADifferentAdapterPaysForASecondBaseline()
+    {
+        var reported = Fake.Network("reported");
+
+        var agreeing = new FakeController();
+        var sameCard = new LatencyScenario(agreeing, FakeProbe.Flat(agreeing), route: Fake.RouteVia(reported));
+        await sameCard.Optimizer.OptimizeAsync(reported);
+
+        var moved = new FakeController();
+        var otherCard = new LatencyScenario(
+            moved,
+            FakeProbe.Flat(moved),
+            route: Fake.RouteVia(Fake.Network("elsewhere")));
+        await otherCard.Optimizer.OptimizeAsync(reported);
+
+        Assert.Equal(sameCard.Probe.Measurements + 1, otherCard.Probe.Measurements);
+    }
+
+    /// <summary>
+    /// A run is deduplicated by the network the caller reported, not by the adapter the
+    /// route pinned it to. Filing it under the re-pinned adapter meant the optimizer's
+    /// own check could never match on a multi-homed machine, so every repeated
+    /// notification paid for a benchmark that can run for half an hour.
+    /// </summary>
+    [Fact]
+    public async Task ARepeatedNotificationIsStillDedupedWhenTheRouteMovesTheAdapter()
+    {
+        var controller = new FakeController();
+        var scenario = new LatencyScenario(
+            controller,
+            FakeProbe.Improves(controller, gain: 6),
+            route: Fake.RouteVia(Fake.Network("routed")));
+        var reported = Fake.Network("reported");
+
+        await scenario.Optimizer.OptimizeAsync(reported);
+        var applies = controller.Applied.Count;
+
+        await scenario.Optimizer.OptimizeNetworkChangeAsync(reported);
+
+        Assert.Equal(applies, controller.Applied.Count);
+    }
+
+    /// <summary>
+    /// A route lookup is a call into the operating system, and an unrouteable target
+    /// throws rather than answering. The run keeps the adapter it already had.
+    /// </summary>
+    [Fact]
+    public async Task ARouteLookupThatThrowsLeavesTheReportedAdapterInPlace()
+    {
+        var controller = new FakeController();
+        var scenario = new LatencyScenario(
+            controller,
+            FakeProbe.Improves(controller, gain: 6),
+            route: (_, _) => throw new InvalidOperationException("no route to host"));
+
+        var result = await scenario.Optimizer.OptimizeAsync(Fake.Network("reported"));
+
+        Assert.Equal(LatencyOptimizationStatus.Active, result.Status);
+        Assert.Equal($"adapter-reported:{Fake.DefaultKeyword}", controller.Events[0]);
+        Assert.Contains(scenario.Logs, line => line.Contains("latency.route", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task ConcurrentOperationsNeverApplyAtTheSameTime()
     {

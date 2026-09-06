@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.NetworkInformation;
 using DpiBypass.Core.Network;
 
@@ -184,6 +185,22 @@ internal static class Fake
             Candidate = Measurement(pair.Candidate),
         }),
     ];
+
+    /// <summary>A route table with nothing to say, so the network a test named is the one used.</summary>
+    /// <remarks>
+    /// Given no route lookup, the optimizer and the loaded lane read the host's own
+    /// routing table on Windows. That turned six fixtures into measurements of whichever
+    /// card the build agent happened to have, and only on the build agent: the same tests
+    /// passed everywhere else, because everywhere else the lookup is switched off. Every
+    /// fixture passes a lookup of its own so the suite says the same thing on every
+    /// machine, and so the re-pin is exercised rather than skipped.
+    /// </remarks>
+    public static readonly Func<IPAddress, IPAddress?, NetworkFingerprint> NoRoute =
+        (_, _) => new NetworkFingerprint();
+
+    /// <summary>A route table that sends every destination over one network.</summary>
+    public static Func<IPAddress, IPAddress?, NetworkFingerprint> RouteVia(NetworkFingerprint network)
+        => (_, _) => network;
 }
 
 /// <summary>
@@ -519,7 +536,8 @@ internal sealed class LatencyScenario
         FakeProfileStore? profiles = null,
         Func<DateTimeOffset>? now = null,
         ILatencyTargetResolver? targets = null,
-        ILatencyEnvironmentSampler? environment = null)
+        ILatencyEnvironmentSampler? environment = null,
+        Func<IPAddress, IPAddress?, NetworkFingerprint>? route = null)
     {
         Controller = controller ?? new FakeController();
         Probe = probe ?? FakeProbe.Flat(Controller);
@@ -539,7 +557,8 @@ internal sealed class LatencyScenario
 
             // Settling pauses are real seconds on a real driver and nothing at all in a
             // test double, so the wait is injected rather than slept through.
-            delay: (_, _) => Task.CompletedTask);
+            delay: (_, _) => Task.CompletedTask,
+            captureRoute: route ?? Fake.NoRoute);
     }
 
     public FakeController Controller { get; }

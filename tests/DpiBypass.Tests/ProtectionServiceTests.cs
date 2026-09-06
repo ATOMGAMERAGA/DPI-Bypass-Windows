@@ -25,7 +25,8 @@ public sealed class ProtectionServiceLatencyRecoveryTests
             controller,
             FakeProbe.Flat(controller),
             snapshots,
-            profiles: new FakeProfileStore());
+            profiles: new FakeProfileStore(),
+            captureRoute: Fake.NoRoute);
         await using var service = new ProtectionService(
             store,
             new LearnedDomainStore(directory.File("learned.json")),
@@ -138,7 +139,8 @@ public sealed class ProtectionServiceLatencyRecoveryTests
                 targets: new FakeTargetResolver(),
                 environmentSampler: new FakeEnvironmentSampler(),
                 resourceRestorers: [],
-                delay: (_, _) => Task.CompletedTask);
+                delay: (_, _) => Task.CompletedTask,
+                captureRoute: Fake.NoRoute);
 
             Service = new ProtectionService(
                 Store,
@@ -148,7 +150,8 @@ public sealed class ProtectionServiceLatencyRecoveryTests
                     qos: Qos,
                     snapshots: new FakeSnapshotStore(),
                     capture: () => Fake.Network("service"),
-                    log: _ => { }));
+                    log: _ => { },
+                    captureRoute: Fake.NoRoute));
         }
 
         public ConfigStore Store { get; }

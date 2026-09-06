@@ -110,6 +110,18 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private CancellationTokenSource? _lifetime;
     private CancellationTokenSource? _operationCancellation;
     private string? _lastNetworkKey;
+
+    /// <summary>The network key the run in flight was asked about, before any route re-pin.</summary>
+    /// <remarks>
+    /// A run identifies itself to <see cref="_lastNetworkKey"/> by the network the caller
+    /// reported, not by the adapter the route table later pinned the endpoint to. Storing
+    /// the re-pinned key instead meant the dedupe below could never match on a multi-homed
+    /// machine, so every repeated "the network changed" notification re-ran a benchmark
+    /// that can take half an hour. Only one run holds the operation gate at a time, which
+    /// is what makes a single field enough.
+    /// </remarks>
+    private string? _requestedNetworkKey;
+
     private bool _enabled;
     private bool _disposed;
     private bool _ignoreCacheOnce;
@@ -440,12 +452,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         var (measurement, endpoint) = await MeasureTargetAsync(network, resolution, cancellationToken)
             .ConfigureAwait(false);
-        network = RouteNetworkFor(endpoint, network);
-        if (measurement.HasRemoteConnectivity)
-        {
-            measurement = await _probe.MeasureAsync(network, _options.Benchmark.For(endpoint), cancellationToken)
-                .ConfigureAwait(false);
-        }
+        (network, measurement) = await RepinToRouteAsync(network, measurement, endpoint, cancellationToken)
+            .ConfigureAwait(false);
         var path = LatencyPathAnalysis.Describe(measurement);
 
         return new LatencyOptimizationResult
@@ -549,6 +557,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             {
                 return Current;
             }
+
+            _requestedNetworkKey = network.Key;
 
             return await RunGuardedAsync(network, token).ConfigureAwait(false);
         }
@@ -656,12 +666,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         // this run uses that same pinned endpoint so the numbers can be subtracted.
         _log?.Invoke($"latency.baseline.started: {network.AdapterName ?? network.DisplayName} · ağ {network.Key}");
         var (baseline, endpoint) = await MeasureTargetAsync(network, resolution, token).ConfigureAwait(false);
-        var routed = RouteNetworkFor(endpoint, network);
-        if (!string.Equals(routed.AdapterId, network.AdapterId, StringComparison.OrdinalIgnoreCase))
-        {
-            network = routed;
-            baseline = await _probe.MeasureAsync(network, _options.Benchmark.For(endpoint), token).ConfigureAwait(false);
-        }
+        (network, baseline) = await RepinToRouteAsync(network, baseline, endpoint, token).ConfigureAwait(false);
 
         var adapter = await _controller.DetectAsync(network, token).ConfigureAwait(false);
         var adapterUsable = adapter is not null && adapter.IsEligible;
@@ -1053,7 +1058,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
         await SaveProfileAsync(network, adapter, baseline, final, verdicts, path, context, token).ConfigureAwait(false);
 
-        _lastNetworkKey = network.Key;
+        _lastNetworkKey = _requestedNetworkKey ?? network.Key;
 
         // Per-candidate paired deltas remain in Verdicts for diagnostics. The headline is
         // the confirmation's own paired difference: its two arms alternated, so drift
@@ -1578,6 +1583,42 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         _ => LatencyTrafficScope.Icmp,
     };
 
+    /// <summary>
+    /// Re-pins a reading to the adapter the chosen endpoint's traffic actually leaves by.
+    /// </summary>
+    /// <remarks>
+    /// The survey and its benchmark run against whichever adapter the caller handed in,
+    /// which on a multi-homed machine - a VPN, a second card, a tethered phone - need not
+    /// be the one carrying the game. Only once an endpoint is pinned can the route table
+    /// name that adapter, and a reading taken against a different one has to be retaken:
+    /// every later number in the run is subtracted from it. When the route names the
+    /// adapter that was already measured, which is the ordinary case, the reading stands.
+    /// Re-measuring then would buy nothing and cost a second full benchmark - which is
+    /// what the quick test used to spend on every single run.
+    /// </remarks>
+    private async Task<(NetworkFingerprint Network, LatencyMeasurement Measurement)> RepinToRouteAsync(
+        NetworkFingerprint network,
+        LatencyMeasurement measurement,
+        LatencyEndpoint endpoint,
+        CancellationToken token)
+    {
+        var routed = RouteNetworkFor(endpoint, network);
+        if (string.Equals(routed.AdapterId, network.AdapterId, StringComparison.OrdinalIgnoreCase))
+        {
+            return (network, measurement);
+        }
+
+        _log?.Invoke(
+            $"latency.route: {endpoint.Label} trafiği {routed.AdapterName ?? routed.DisplayName} üzerinden gidiyor; "
+                + "ölçüm o bağdaştırıcıda yenileniyor.");
+
+        var remeasured = await _probe
+            .MeasureAsync(routed, _options.Benchmark.For(endpoint), token)
+            .ConfigureAwait(false);
+
+        return (routed, remeasured);
+    }
+
     private NetworkFingerprint RouteNetworkFor(LatencyEndpoint endpoint, NetworkFingerprint fallback)
     {
         if (!_routeLookupAvailable)
@@ -1694,7 +1735,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             snapshot with { State = LatencyTransactionState.Committed, PendingProperty = null },
             token).ConfigureAwait(false);
 
-        _lastNetworkKey = network.Key;
+        _lastNetworkKey = _requestedNetworkKey ?? network.Key;
         var applied = candidates.Select(candidate => candidate.Description).ToArray();
 
         // A replay re-applies a profile that a paired experiment verified on an earlier
