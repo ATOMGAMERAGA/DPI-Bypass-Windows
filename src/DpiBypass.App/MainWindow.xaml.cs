@@ -53,7 +53,7 @@ public partial class MainWindow : Window
         // Screen uses physical pixels; WPF sizes use DIPs. Convert exactly once,
         // and never feed ActualWidth/ActualHeight back through a scaling transform.
         var work = System.Windows.Forms.Screen.FromHandle(handle).WorkingArea;
-        var bounds = target.TransformFromDevice.TransformBounds(
+        var bounds = new MatrixTransform(target.TransformFromDevice).TransformBounds(
             new Rect(work.Left, work.Top, work.Width, work.Height));
         MinWidth = Math.Min(820, bounds.Width);
         MinHeight = Math.Min(620, bounds.Height);
