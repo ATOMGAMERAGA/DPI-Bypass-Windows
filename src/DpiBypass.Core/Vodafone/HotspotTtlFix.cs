@@ -77,6 +77,8 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     private long _ipv6Dropped;
     private long _checksumFailures;
     private int _checksumFailureLogged;
+    private int _minecraftSplitLogged;
+    private int _minecraftSplitFailureLogged;
 
     public HotspotTtlFix(Action<string>? log = null) => _log = log;
 
@@ -156,6 +158,8 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
             Interlocked.Exchange(ref _ipv6Dropped, 0);
             Interlocked.Exchange(ref _checksumFailures, 0);
             Interlocked.Exchange(ref _checksumFailureLogged, 0);
+            Interlocked.Exchange(ref _minecraftSplitLogged, 0);
+            Interlocked.Exchange(ref _minecraftSplitFailureLogged, 0);
 
             // Handed over rather than read from the fields later, so the worker stays
             // pinned to the rule and the stop signal it was started for even once
@@ -281,6 +285,33 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
                             _log?.Invoke("TTL fix: checksum could not be recalculated; "
                                 + "affected packets are forwarded unmodified.");
                         }
+                    }
+                }
+
+                if (MinecraftHandshakeSplit.TryCreateSegments(packet, Settings.Guard, out var first, out var second))
+                {
+                    var firstAddress = address;
+                    var secondAddress = address;
+                    // Unlike a TTL-only edit, segmentation changes the TCP pseudo-header
+                    // and payload. Prepare both checksums before injecting anything.
+                    if (WinDivertHandle.CalculateChecksums(first, ref firstAddress)
+                        && WinDivertHandle.CalculateChecksums(second, ref secondAddress)
+                        && handle.Send(first, ref firstAddress)
+                        && handle.Send(second, ref secondAddress))
+                    {
+                        if (Interlocked.Exchange(ref _minecraftSplitLogged, 1) == 0)
+                        {
+                            _log?.Invoke("Vodafone: Minecraft Java login handshake segmented (4-byte prefix).");
+                        }
+
+                        continue;
+                    }
+
+                    // If only the prefix was sent, the unchanged original overlaps it
+                    // with identical bytes. TCP reassembly safely supplies the remainder.
+                    if (Interlocked.Exchange(ref _minecraftSplitFailureLogged, 1) == 0)
+                    {
+                        _log?.Invoke("Vodafone: Minecraft segmentation failed; forwarding the original packet.");
                     }
                 }
 
