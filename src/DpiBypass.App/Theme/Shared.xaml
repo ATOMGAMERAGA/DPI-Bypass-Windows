@@ -96,6 +96,33 @@
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="Padding" Value="20,0,0,0" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="VerticalContentAlignment" Value="Stretch" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabControl">
+                    <!-- A bounded content column prevents a page's desired width
+                         from enlarging the navigation/content layout on updates. -->
+                    <Grid ClipToBounds="True" KeyboardNavigation.TabNavigation="Local">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel IsItemsHost="True"
+                                    VerticalAlignment="Top"
+                                    KeyboardNavigation.TabIndex="1" />
+                        <Border Grid.Column="1" Padding="{TemplateBinding Padding}"
+                                ClipToBounds="True">
+                            <ContentPresenter x:Name="PART_SelectedContentHost"
+                                              ContentSource="SelectedContent"
+                                              HorizontalAlignment="Stretch"
+                                              VerticalAlignment="Stretch"
+                                              KeyboardNavigation.TabIndex="2" />
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="NavTabItemStyle" TargetType="TabItem">
@@ -385,7 +412,6 @@
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="Chrome" Property="Opacity" Value="0.70" />
-                            <Setter Property="Padding" Value="22,12,22,10" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppNeutralBrush}" />

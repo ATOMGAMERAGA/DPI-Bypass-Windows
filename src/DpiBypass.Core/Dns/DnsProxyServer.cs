@@ -56,6 +56,10 @@ public sealed class DnsProxyServer : IAsyncDisposable
     /// <summary>True when the IPv6 loopback listeners came up too.</summary>
     public bool HasIPv6 { get; private set; }
 
+    // Evaluated for every query, before the cache, so toggling the hotspot rule
+    // never serves a cached address whose packets the rule will discard.
+    public Func<bool>? SuppressIPv6Answers { get; init; }
+
     /// <summary>
     /// Raised with each distinct hostname the machine looks up. The discovery pass
     /// uses it to notice sites it has not measured yet.
@@ -323,13 +327,26 @@ public sealed class DnsProxyServer : IAsyncDisposable
             TaskScheduler.Default);
     }
 
-    private async Task<byte[]?> ResolveAsync(byte[] query, CancellationToken cancellationToken)
+    internal async Task<byte[]?> ResolveAsync(byte[] query, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _served);
 
         if (!DnsMessage.TryReadQuestion(query, out var question))
         {
             return null;
+        }
+
+        if (question.Type == DnsRecordType.Aaaa && question.Class == 1
+            && SuppressIPv6Answers?.Invoke() == true)
+        {
+            // NODATA, not NXDOMAIN: the name and its A/SRV records still exist.
+            // Java/game clients may wait indefinitely on an unusable IPv6 address
+            // instead of racing an IPv4 connection as browsers do.
+            var empty = DnsMessage.BuildQuery(DnsMessage.GetId(query), question.Name, question.Type,
+                recursionDesired: (query[2] & 1) != 0);
+            empty[2] |= 0x80;
+            empty[3] = 0x80; // recursion available; no authenticated-data claim
+            return empty;
         }
 
         var id = DnsMessage.GetId(query);

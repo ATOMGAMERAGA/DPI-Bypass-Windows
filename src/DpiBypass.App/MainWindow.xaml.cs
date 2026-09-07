@@ -38,6 +38,29 @@ public partial class MainWindow : Window
         }
 
         ((INotifyCollectionChanged)_viewModel.LogLines).CollectionChanged += OnLogLinesChanged;
+        Loaded += (_, _) => FitInitialBoundsToScreen();
+    }
+
+    private void FitInitialBoundsToScreen()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        var source = HwndSource.FromHwnd(handle);
+        if (source?.CompositionTarget is not { } target || WindowState != WindowState.Normal)
+        {
+            return;
+        }
+
+        // Screen uses physical pixels; WPF sizes use DIPs. Convert exactly once,
+        // and never feed ActualWidth/ActualHeight back through a scaling transform.
+        var work = System.Windows.Forms.Screen.FromHandle(handle).WorkingArea;
+        var bounds = target.TransformFromDevice.TransformBounds(
+            new Rect(work.Left, work.Top, work.Width, work.Height));
+        MinWidth = Math.Min(820, bounds.Width);
+        MinHeight = Math.Min(620, bounds.Height);
+        Width = Math.Min(Width, bounds.Width);
+        Height = Math.Min(Height, bounds.Height);
+        Left = Math.Clamp(Left, bounds.Left, bounds.Right - Width);
+        Top = Math.Clamp(Top, bounds.Top, bounds.Bottom - Height);
     }
 
     public event Action? CloseToTrayRequested;
@@ -161,7 +184,7 @@ public partial class MainWindow : Window
         {
             _scrollPending = false;
 
-            if (LogList.Items.Count > 0)
+            if (LogList.IsVisible && LogList.Items.Count > 0)
             {
                 LogList.ScrollIntoView(LogList.Items[^1]);
             }

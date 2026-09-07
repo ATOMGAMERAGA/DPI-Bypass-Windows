@@ -45,7 +45,7 @@ public sealed class AsyncRelayCommand : ICommand
 
     public async void Execute(object? parameter)
     {
-        if (_running)
+        if (!CanExecute(parameter))
         {
             return;
         }

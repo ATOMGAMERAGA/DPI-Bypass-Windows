@@ -12,6 +12,7 @@ public class DnsMessageTests
     [InlineData("discord.com", DnsRecordType.A)]
     [InlineData("gateway.discord.gg", DnsRecordType.Aaaa)]
     [InlineData("1.1.1.1.origin.asn.cymru.com", DnsRecordType.Txt)]
+    [InlineData("_minecraft._tcp.example.test", DnsRecordType.Srv)]
     public void QueryRoundTripsThroughTheQuestionReader(string name, ushort type)
     {
         var query = DnsMessage.BuildQuery(0x1234, name, type);

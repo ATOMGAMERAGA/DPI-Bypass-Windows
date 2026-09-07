@@ -1,4 +1,5 @@
 using DpiBypass.Core.Config;
+using System.Buffers.Binary;
 using DpiBypass.Core.Engine;
 using DpiBypass.Core.Vodafone;
 using Xunit;
@@ -7,6 +8,55 @@ namespace DpiBypass.Tests;
 
 public class HotspotTtlFixTests
 {
+    [Theory]
+    [InlineData(443)]
+    [InlineData(25565)]
+    public void TtlRewritePreservesTransportIncludingDeliberatelyBadChecksums(int port)
+    {
+        var packet = PacketFactory.BuildIPv4Tcp([0, 1, 2, 3], destinationPort: (ushort)port);
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(36), 0xBAD1);
+        var transport = packet[20..];
+
+        Assert.True(HotspotTtlFix.TryFix(packet, TtlFixSettings.Default, out var changed));
+        Assert.True(changed);
+        Assert.Equal(65, packet[8]);
+        Assert.Equal(transport, packet[20..]);
+
+        uint sum = 0;
+        for (var i = 0; i < 20; i += 2)
+        {
+            sum += BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(i));
+        }
+
+        while ((sum >> 16) != 0)
+        {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        Assert.Equal(0xFFFFu, sum);
+    }
+
+    [Fact]
+    public void ExpiringDecoyIsForwardedByteForByte()
+    {
+        var packet = PacketFactory.BuildIPv4Tcp([1, 2, 3], ttl: 5);
+        var original = packet.ToArray();
+        Assert.True(HotspotTtlFix.TryFix(packet, TtlFixSettings.Default, out var changed));
+        Assert.False(changed);
+        Assert.Equal(original, packet);
+    }
+
+    [Fact]
+    public void IPv6HopLimitRewritePreservesTransportAndExtensions()
+    {
+        var packet = PacketFactory.BuildIPv6Tcp([1, 2, 3], destinationOptions: true);
+        var original = packet.ToArray();
+        Assert.True(HotspotTtlFix.TryFix(packet, new TtlFixSettings { DropIPv6 = false }, out var changed));
+        Assert.True(changed);
+        original[7] = 65;
+        Assert.Equal(original, packet);
+    }
+
     /// <summary>
     /// The invariant that keeps the two features from destroying each other.
     /// </summary>

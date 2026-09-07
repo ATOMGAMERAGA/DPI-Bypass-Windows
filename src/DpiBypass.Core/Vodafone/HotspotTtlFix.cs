@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using DpiBypass.Core.Interop;
 using DpiBypass.Core.Net;
 
@@ -196,7 +197,7 @@ public sealed class HotspotTtlFix : IDisposable
 
                 var packet = buffer.AsSpan(0, length);
 
-                if (!TryFix(packet, out var changed))
+                if (!TryFix(packet, Settings, out var changed))
                 {
                     Interlocked.Increment(ref _ipv6Dropped);
                     continue;
@@ -204,7 +205,13 @@ public sealed class HotspotTtlFix : IDisposable
 
                 if (changed)
                 {
-                    WinDivertHandle.CalculateChecksums(packet, ref address);
+                    // TTL is outside the TCP/UDP pseudo-header. Recomputing those
+                    // checksums would turn BadChecksum decoys into valid traffic.
+                    // Preserve transport bytes and their original offload flags.
+                    if ((packet[0] >> 4) == 4)
+                    {
+                        address.IPChecksum = true;
+                    }
                     Interlocked.Increment(ref _rewritten);
                 }
 
@@ -256,7 +263,7 @@ public sealed class HotspotTtlFix : IDisposable
     }
 
     /// <summary>Returns false when the packet should be dropped rather than forwarded.</summary>
-    private bool TryFix(Span<byte> packet, out bool changed)
+    internal static bool TryFix(Span<byte> packet, TtlFixSettings settings, out bool changed)
     {
         changed = false;
 
@@ -266,7 +273,6 @@ public sealed class HotspotTtlFix : IDisposable
         }
 
         var version = packet[0] >> 4;
-        var settings = Settings;
 
         if (version == 6)
         {
@@ -288,7 +294,33 @@ public sealed class HotspotTtlFix : IDisposable
             return true;
         }
 
-        return Rewrite(packet, offset: 8, settings, out changed);
+        var headerLength = (packet[0] & 0x0F) * 4;
+        if (headerLength < 20 || headerLength > packet.Length)
+        {
+            return true;
+        }
+
+        Rewrite(packet, offset: 8, settings, out changed);
+        if (changed)
+        {
+            // Only the IPv4 header changes, including when the transport checksum
+            // is intentionally invalid or awaiting checksum offload by Windows.
+            packet[10] = packet[11] = 0;
+            uint sum = 0;
+            for (var i = 0; i < headerLength; i += 2)
+            {
+                sum += BinaryPrimitives.ReadUInt16BigEndian(packet[i..]);
+            }
+
+            while ((sum >> 16) != 0)
+            {
+                sum = (sum & 0xFFFF) + (sum >> 16);
+            }
+
+            BinaryPrimitives.WriteUInt16BigEndian(packet[10..], (ushort)~sum);
+        }
+
+        return true;
     }
 
     private static bool Rewrite(Span<byte> packet, int offset, TtlFixSettings settings, out bool changed)

@@ -6,6 +6,7 @@
         Height="780"
         MinWidth="820"
         MinHeight="620"
+        SizeToContent="Manual"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource AppWindowBackgroundBrush}"
         TextOptions.TextFormattingMode="Ideal"
@@ -79,6 +80,9 @@
                             </Ellipse.Style>
                         </Ellipse>
                         <TextBlock Text="{Binding StatusHeadline}"
+                                   MaxWidth="220"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding StatusHeadline}"
                                    FontSize="13"
                                    FontWeight="SemiBold"
                                    VerticalAlignment="Center"
@@ -104,7 +108,9 @@
 
                                 <StackPanel Grid.Column="0" Margin="0,0,16,0">
                                     <TextBlock Text="{Binding StatusHeadline}" Style="{StaticResource PageTitleStyle}" />
-                                    <TextBlock Text="{Binding StatusDetail}" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding StatusDetail}" Style="{StaticResource CaptionStyle}"
+                                               Height="36" TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding StatusDetail}" />
                                     <TextBlock Style="{StaticResource CaptionStyle}" Margin="0,10,0,0">
                                         <Run Text="Kapsam:" />
                                         <Run Text="{Binding SelectedScope.Title, Mode=OneWay}" FontWeight="SemiBold" />
@@ -113,7 +119,7 @@
 
                                 <Button Grid.Column="1"
                                         VerticalAlignment="Center"
-                                        MinWidth="180"
+                                        Width="180" Height="44"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
                                         Command="{Binding ToggleCommand}"
                                         Content="{Binding ToggleCaption}" />

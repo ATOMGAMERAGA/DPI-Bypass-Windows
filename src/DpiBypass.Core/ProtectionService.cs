@@ -40,6 +40,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private readonly LearnedDomainStore _learned;
     private readonly TargetMatcher _matcher = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Lock _backgroundGate = new();
     private readonly HotspotTtlFix _ttlFix = new(AppLog.InfoSink);
     private readonly LatencyOptimizer _latencyOptimizer;
 
@@ -220,6 +221,8 @@ public sealed class ProtectionService : IAsyncDisposable
                 _dnsConfigurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
                 _tester = new ConnectivityTester(_resolver);
 
+                Network = NetworkFingerprint.Capture();
+                ApplyTtlFix();
                 await ConfigureDnsAsync(lifetime.Token).ConfigureAwait(false);
 
                 _portMap = new ProcessPortMap(AppLog.InfoSink);
@@ -262,13 +265,27 @@ public sealed class ProtectionService : IAsyncDisposable
             }).ConfigureAwait(false);
 
             SetState(ProtectionState.Running, "Koruma etkin");
+            lock (_backgroundGate)
+            {
+                var token = lifetime.Token;
+                _networkWork = Task.Run(() => InitialiseNetworkAsync(token));
+                _recheckWork = Task.Run(() => RecheckLoopAsync(token));
+            }
         }
         catch (Exception ex)
         {
             // A driver that refuses to open would otherwise leave the machine's DNS
             // pointed at us and the state stuck on Starting, which the guard above turns
             // into a start button that does nothing for the rest of the session.
-            await TeardownAsync().ConfigureAwait(false);
+            try
+            {
+                await TeardownAsync().ConfigureAwait(false);
+            }
+            catch (Exception cleanupError)
+            {
+                SetState(ProtectionState.Degraded, $"DNS geri yüklemesi bekliyor: {cleanupError.Message}", allowDuringShutdown: true);
+                throw;
+            }
             SetState(ProtectionState.Stopped, $"Başlatılamadı: {ex.Message}");
             throw;
         }
@@ -276,10 +293,6 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             _gate.Release();
         }
-
-        // Detection and tuning are slow; do them after the UI is already responsive.
-        _networkWork = Task.Run(() => InitialiseNetworkAsync(_lifetime!.Token));
-        _recheckWork = Task.Run(() => RecheckLoopAsync(_lifetime!.Token));
     }
 
     private void OnDomainLearned(string domain)
@@ -352,7 +365,10 @@ public sealed class ProtectionService : IAsyncDisposable
 
         if (mode == DnsMode.EncryptedLoopback)
         {
-            _dnsProxy = new DnsProxyServer(_resolver!, AppLog.InfoSink);
+            _dnsProxy = new DnsProxyServer(_resolver!, AppLog.InfoSink)
+            {
+                SuppressIPv6Answers = () => _ttlFix.IsActive && _ttlFix.Settings.DropIPv6,
+            };
             if (_dnsProxy.TryStart())
             {
                 // The ::1 listeners are best effort, and pointing the machine's IPv6
@@ -403,6 +419,7 @@ public sealed class ProtectionService : IAsyncDisposable
         SetState(State, $"Ağ inceleniyor ({reason})…");
 
         await ResolveIspAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (Settings.ManualStrategyId is { Length: > 0 } manualStrategy)
         {
@@ -439,6 +456,7 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         var result = await _tuner.FindBestAsync(Isp, checkUnfilteredFirst: true, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (result.Winner is not null)
         {
@@ -538,6 +556,7 @@ public sealed class ProtectionService : IAsyncDisposable
         _store.Save(Settings);
 
         ApplyTtlFix();
+        RefreshDnsAfterTtlChange();
         Changed?.Invoke();
     }
 
@@ -546,6 +565,7 @@ public sealed class ProtectionService : IAsyncDisposable
         Settings.HotspotTtlFix = false;
         _store.Save(Settings);
         _ttlFix.Clear();
+        RefreshDnsAfterTtlChange();
         Changed?.Invoke();
     }
 
@@ -556,6 +576,7 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             _store.Save(Settings);
             ApplyTtlFix();
+            RefreshDnsAfterTtlChange();
             Changed?.Invoke();
         }
     }
@@ -577,36 +598,65 @@ public sealed class ProtectionService : IAsyncDisposable
             ApplyTtlFix();
         }
 
+        RefreshDnsAfterTtlChange();
         Changed?.Invoke();
+    }
+
+    private void RefreshDnsAfterTtlChange()
+    {
+        _dnsProxy?.ClearCache();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await DnsConfigurator.FlushCacheAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("DNS önbelleği yenilenemedi", ex);
+            }
+        });
     }
 
     private void OnNetworkChanged(NetworkFingerprint fingerprint)
     {
-        Network = fingerprint;
-        ApplyTtlFix();
-        Changed?.Invoke();
-
-        var token = _lifetime?.Token ?? CancellationToken.None;
-        if (token.IsCancellationRequested)
+        lock (_backgroundGate)
         {
-            return;
+            if (State is not (ProtectionState.Running or ProtectionState.Degraded)
+                || _lifetime is null || _lifetime.IsCancellationRequested)
+            {
+                return;
+            }
+
+            var token = _lifetime.Token;
+            var previous = _networkWork;
+            // Retain the previous work so stop can drain every callback before
+            // disposing the engine, and an old callback cannot revive the TTL rule.
+            _networkWork = Task.Run(async () =>
+            {
+                try
+                {
+                    if (previous is not null)
+                    {
+                        await previous.ConfigureAwait(false);
+                    }
+
+                    token.ThrowIfCancellationRequested();
+                    Network = fingerprint;
+                    ApplyTtlFix();
+                    RefreshDnsAfterTtlChange();
+                    Changed?.Invoke();
+                    await DetectAndTuneAsync($"'{fingerprint.DisplayName}' ağına geçildi", token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error("Ağ değişikliği sonrası ayarlama başarısız", ex);
+                }
+            });
         }
-
-        // Re-tuning happens off the event thread so the OS notification returns at once.
-        _networkWork = Task.Run(async () =>
-        {
-            try
-            {
-                await DetectAndTuneAsync($"'{fingerprint.DisplayName}' ağına geçildi", token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                AppLog.Error("Ağ değişikliği sonrası ayarlama başarısız", ex);
-            }
-        }, token);
     }
 
     private void OnHostRewritten(string host, string strategyId) => HostRewritten?.Invoke(host, strategyId);
@@ -773,6 +823,12 @@ public sealed class ProtectionService : IAsyncDisposable
             _store.Save(Settings);
             SetState(ProtectionState.Stopped, "Koruma kapalı");
         }
+        catch (Exception ex)
+        {
+            // Keep Stop available when DNS restoration needs another attempt.
+            SetState(ProtectionState.Degraded, $"Durdurma tamamlanamadı: {ex.Message}", allowDuringShutdown: true);
+            throw;
+        }
         finally
         {
             _gate.Release();
@@ -786,12 +842,35 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <remarks>Expects the gate to be held, and never touches it.</remarks>
     private async Task TeardownAsync()
     {
+        if (_monitor is not null)
+        {
+            _monitor.Changed -= OnNetworkChanged;
+            _monitor.Dispose();
+            _monitor = null;
+        }
+
         // Everything running in the background hangs off this token, so it goes first:
         // nothing should still be reaching for the objects about to be disposed.
         if (_lifetime is not null)
         {
             await _lifetime.CancelAsync().ConfigureAwait(false);
         }
+
+        Task[] pending;
+        lock (_backgroundGate)
+        {
+            pending = new[] { _networkWork, _recheckWork }.OfType<Task>().ToArray();
+        }
+
+        try
+        {
+            await Task.WhenAll(pending).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        _networkWork = _recheckWork = null;
 
         // The TTL rule is a system-wide packet rewrite; it goes down with the rest
         // rather than outliving the app that put it there.
@@ -809,13 +888,6 @@ public sealed class ProtectionService : IAsyncDisposable
             _engine.HostRewritten -= OnHostRewritten;
             _engine.Dispose();
             _engine = null;
-        }
-
-        if (_monitor is not null)
-        {
-            _monitor.Changed -= OnNetworkChanged;
-            _monitor.Dispose();
-            _monitor = null;
         }
 
         _portMap?.Dispose();
@@ -978,8 +1050,17 @@ public sealed class ProtectionService : IAsyncDisposable
         _store.Save(Settings);
     }
 
-    private void SetState(ProtectionState state, string? detail)
+    private void SetState(ProtectionState state, string? detail, bool allowDuringShutdown = false)
     {
+        // An in-flight probe may finish as Stop is cancelling it. It must never
+        // turn a stopping/stopped UI back into a running one.
+        if (!allowDuringShutdown && (state is ProtectionState.Running or ProtectionState.Degraded)
+            && _lifetime?.IsCancellationRequested == true
+            && (State is ProtectionState.Stopping or ProtectionState.Stopped))
+        {
+            return;
+        }
+
         State = state;
         StatusDetail = detail;
         Changed?.Invoke();

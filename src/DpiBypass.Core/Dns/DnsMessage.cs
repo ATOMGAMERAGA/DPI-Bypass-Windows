@@ -13,6 +13,7 @@ public static class DnsRecordType
     public const ushort Ptr = 12;
     public const ushort Txt = 16;
     public const ushort Aaaa = 28;
+    public const ushort Srv = 33;
     public const ushort Https = 65;
 }
 

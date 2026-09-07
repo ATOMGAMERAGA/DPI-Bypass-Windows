@@ -73,6 +73,7 @@ public sealed class MainViewModel : ObservableObject
     private readonly ConcurrentQueue<string> _pendingLogLines = new();
 
     private int _logDrainQueued;
+    private int _serviceRefreshQueued;
 
     private string _statusHeadline = "Koruma kapalı";
     private string _statusDetail = "Başlatmak için düğmeye dokunun.";
@@ -182,10 +183,10 @@ public sealed class MainViewModel : ObservableObject
         _lowLatencyMode = _service.Settings.LowLatencyMode;
         _latencyStatusLine = _service.LatencyResult.StatusLine;
 
-        ToggleCommand = new AsyncRelayCommand(ToggleAsync);
-        TestCommand = new AsyncRelayCommand(TestAsync);
-        RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !_tuningInProgress);
-        TestAllCommand = new AsyncRelayCommand(TestAllAsync);
+        ToggleCommand = new AsyncRelayCommand(ToggleAsync, () => !IsTransitioning && !IsBusy);
+        TestCommand = new AsyncRelayCommand(TestAsync, () => _isRunning && !IsTransitioning && !IsBusy);
+        RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !_tuningInProgress && !IsTransitioning && !IsBusy);
+        TestAllCommand = new AsyncRelayCommand(TestAllAsync, () => _isRunning && !IsTransitioning && !IsBusy);
         LatencyTestCommand = new AsyncRelayCommand(TestLatencyAsync, () => !_isLatencyBusy);
         LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
@@ -292,9 +293,37 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (Set(ref _isBusy, value))
+            {
+                RefreshProtectionCommands();
+            }
+        }
+    }
 
-    public string ToggleCaption => _isRunning ? "Korumayı durdur" : "Korumayı başlat";
+    public bool IsTransitioning => _service.State is ProtectionState.Starting or ProtectionState.Stopping;
+
+    public string ToggleCaption => _service.State switch
+    {
+        ProtectionState.Starting => "Başlatılıyor…",
+        ProtectionState.Stopping => "Durduruluyor…",
+        ProtectionState.Running or ProtectionState.Degraded => "Korumayı durdur",
+        _ => "Korumayı başlat",
+    };
+
+    private void RefreshProtectionCommands()
+    {
+        Raise(nameof(IsTransitioning));
+        Raise(nameof(ToggleCaption));
+        ToggleCommand.RaiseCanExecuteChanged();
+        TestCommand.RaiseCanExecuteChanged();
+        TestAllCommand.RaiseCanExecuteChanged();
+        RetuneCommand.RaiseCanExecuteChanged();
+    }
 
     public string NetworkName { get => _networkName; private set => Set(ref _networkName, value); }
 
@@ -814,10 +843,15 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task ToggleAsync()
     {
+        if (IsBusy || IsTransitioning)
+        {
+            return;
+        }
+
         IsBusy = true;
         try
         {
-            if (_isRunning)
+            if (_service.State is ProtectionState.Running or ProtectionState.Degraded)
             {
                 await _service.StopAsync().ConfigureAwait(true);
             }
@@ -829,7 +863,7 @@ public sealed class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             AppLog.Error("Koruma durumu değiştirilemedi", ex);
-            StatusHeadline = "Başlatılamadı";
+            StatusHeadline = "İşlem tamamlanamadı";
             StatusDetail = ex.Message;
         }
         finally
@@ -840,6 +874,11 @@ public sealed class MainViewModel : ObservableObject
 
     private async Task RestartAsync()
     {
+        if (IsBusy || IsTransitioning)
+        {
+            return;
+        }
+
         IsBusy = true;
         try
         {
@@ -928,11 +967,19 @@ public sealed class MainViewModel : ObservableObject
     {
         if (!_dispatcher.CheckAccess())
         {
-            _dispatcher.BeginInvoke(OnServiceChanged);
+            if (Interlocked.Exchange(ref _serviceRefreshQueued, 1) == 0)
+            {
+                _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                {
+                    Interlocked.Exchange(ref _serviceRefreshQueued, 0);
+                    OnServiceChanged();
+                }));
+            }
             return;
         }
 
         IsRunning = _service.State is ProtectionState.Running or ProtectionState.Degraded;
+        RefreshProtectionCommands();
 
         StatusHeadline = _service.State switch
         {

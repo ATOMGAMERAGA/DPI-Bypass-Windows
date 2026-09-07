@@ -70,11 +70,9 @@ public sealed class DnsConfigurator
             return false;
         }
 
-        var snapshotWritten = false;
         if (!HasPendingRestore)
         {
             SaveSnapshot(adapters);
-            snapshotWritten = true;
         }
 
         var v4 = mode == DnsMode.EncryptedLoopback ? ["127.0.0.1"] : PublicV4;
@@ -82,33 +80,22 @@ public sealed class DnsConfigurator
             ? (loopbackHasIPv6 ? ["::1"] : PublicV6)
             : PublicV6;
 
-        var applied = 0;
-        foreach (var adapter in adapters)
+        // One helper for the entire transaction, with both families supplied
+        // together. Starting a PowerShell process per family dominated start/stop.
+        var changes = adapters.Select(adapter => new
         {
-            if (await SetServersAsync(adapter.InterfaceIndexV4, v4, cancellationToken).ConfigureAwait(false))
-            {
-                applied++;
-            }
-
-            if (adapter.InterfaceIndexV6 > 0)
-            {
-                await SetServersAsync(adapter.InterfaceIndexV6, v6, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+            Index = adapter.InterfaceIndexV4,
+            Servers = adapter.InterfaceIndexV6 > 0 ? v4.Concat(v6).ToArray() : v4,
+            Reset = false,
+        });
+        var applied = await ApplyChangesAsync(changes, cancellationToken).ConfigureAwait(false);
 
         if (applied == 0)
         {
-            _log?.Invoke("No adapter accepted the new DNS servers; the previous configuration is still in place.");
+            _log?.Invoke("DNS configuration could not be confirmed; the recovery snapshot was retained.");
 
-            // A snapshot left behind here would offer to "restore" a change that never
-            // happened, and the caller would report encrypted DNS as active.
-            if (snapshotWritten)
-            {
-                DeleteSnapshot();
-            }
-
+            // Keep the snapshot: a failed or interrupted helper may already have
+            // changed an adapter before reporting its result.
             return false;
         }
 
@@ -126,34 +113,19 @@ public sealed class DnsConfigurator
             return;
         }
 
-        foreach (var adapter in snapshot)
+        var changes = snapshot.Select(adapter => new
         {
-            // The interface index is per adapter rather than per family and
-            // -ResetServerAddresses takes no family, so a reset clears both families at
-            // once. Every reset therefore has to happen before the explicit servers go
-            // back on, otherwise the v6 reset undoes the v4 servers just restored.
-            if (adapter.OriginalV4.Length == 0)
-            {
-                await ResetServersAsync(adapter.InterfaceIndexV4, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length == 0)
-            {
-                await ResetServersAsync(adapter.InterfaceIndexV6, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (adapter.OriginalV4.Length > 0)
-            {
-                await SetServersAsync(adapter.InterfaceIndexV4, adapter.OriginalV4, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length > 0)
-            {
-                await SetServersAsync(adapter.InterfaceIndexV6, adapter.OriginalV6, cancellationToken).ConfigureAwait(false);
-            }
+            Index = adapter.InterfaceIndexV4,
+            Servers = adapter.OriginalV4.Concat(adapter.OriginalV6).ToArray(),
+            // A reset affects both families; do it once before restoring servers.
+            Reset = adapter.OriginalV4.Length == 0
+                || (adapter.InterfaceIndexV6 > 0 && adapter.OriginalV6.Length == 0),
+        });
+        var restored = await ApplyChangesAsync(changes, cancellationToken).ConfigureAwait(false);
+        if (restored != snapshot.Count)
+        {
+            throw new InvalidOperationException("DNS ayarlarının tamamı geri yüklenemedi; yeniden durdurmayı deneyin. DNS yedeği korundu.");
         }
-
-        await FlushCacheAsync(cancellationToken).ConfigureAwait(false);
         DeleteSnapshot();
         CurrentMode = DnsMode.SystemDefault;
         _log?.Invoke("Original DNS configuration restored.");
@@ -316,19 +288,37 @@ public sealed class DnsConfigurator
         return rows;
     }
 
-    private static async Task<bool> SetServersAsync(int interfaceIndex, string[] servers, CancellationToken cancellationToken)
+    private async Task<int> ApplyChangesAsync<T>(IEnumerable<T> changes, CancellationToken cancellationToken)
     {
-        var list = string.Join(',', servers.Select(s => $"'{s}'"));
-        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ServerAddresses ({list}) -ErrorAction Stop";
-        var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
-        return result.Success;
-    }
+        const string script = """
+            $changes = @($env:DPI_BYPASS_DNS_CHANGES | ConvertFrom-Json)
+            $applied = 0
+            foreach ($change in $changes) {
+              try {
+                if ($change.Reset) {
+                  Set-DnsClientServerAddress -InterfaceIndex $change.Index -ResetServerAddresses -ErrorAction Stop
+                }
+                if (@($change.Servers).Count -gt 0) {
+                  Set-DnsClientServerAddress -InterfaceIndex $change.Index -ServerAddresses @($change.Servers) -ErrorAction Stop
+                }
+                $applied++
+              } catch {
+                [Console]::Error.WriteLine($_.Exception.Message)
+              }
+            }
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
+            [Console]::WriteLine($applied)
+            """;
+        var result = await ProcessRunner.PowerShellWithEnvironmentAsync(script,
+            new Dictionary<string, string?> { ["DPI_BYPASS_DNS_CHANGES"] = JsonSerializer.Serialize(changes) },
+            TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            _log?.Invoke($"DNS configuration: {result.StandardError.Trim()}");
+        }
 
-    private static async Task<bool> ResetServersAsync(int interfaceIndex, CancellationToken cancellationToken)
-    {
-        var script = $"Set-DnsClientServerAddress -InterfaceIndex {interfaceIndex} -ResetServerAddresses -ErrorAction SilentlyContinue";
-        var result = await ProcessRunner.PowerShellAsync(script, TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
-        return result.Success;
+        cancellationToken.ThrowIfCancellationRequested();
+        return result.Success && int.TryParse(result.StandardOutput.Trim(), out var count) ? count : 0;
     }
 
     public static Task FlushCacheAsync(CancellationToken cancellationToken = default)
@@ -336,15 +326,9 @@ public sealed class DnsConfigurator
 
     private void SaveSnapshot(IReadOnlyList<AdapterDnsSnapshot> adapters)
     {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(_snapshotPath)!);
-            File.WriteAllText(_snapshotPath, JsonSerializer.Serialize(adapters, JsonOptions));
-        }
-        catch (IOException ex)
-        {
-            _log?.Invoke($"Could not persist DNS snapshot: {ex.Message}");
-        }
+        // Do not change DNS if the recovery snapshot cannot be persisted.
+        Directory.CreateDirectory(Path.GetDirectoryName(_snapshotPath)!);
+        File.WriteAllText(_snapshotPath, JsonSerializer.Serialize(adapters, JsonOptions));
     }
 
     private IReadOnlyList<AdapterDnsSnapshot>? LoadSnapshot()
