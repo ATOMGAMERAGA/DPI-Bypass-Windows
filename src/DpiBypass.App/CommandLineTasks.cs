@@ -383,7 +383,7 @@ internal static class CommandLineTasks
 
         if (response is not null)
         {
-            WriteConsole(response.Text);
+            WriteConsole(response.Text, allowDialog: false);
             return true;
         }
 
@@ -404,7 +404,7 @@ internal static class CommandLineTasks
 
         WriteConsole(removed > 0
             ? $"{result.StatusLine}{Environment.NewLine}{removed} QoS ilkesi kaldırıldı."
-            : result.StatusLine);
+            : result.StatusLine, allowDialog: false);
 
         return true;
     }
@@ -494,7 +494,7 @@ internal static class CommandLineTasks
     /// dialog covers being launched from Explorer, where there is no console to
     /// attach to.
     /// </remarks>
-    private static void WriteConsole(string text)
+    private static void WriteConsole(string text, bool allowDialog = true)
     {
         var attached = false;
 
@@ -524,6 +524,14 @@ internal static class CommandLineTasks
             {
                 FreeConsole();
             }
+        }
+
+        // Maintenance runs under Setup with no parent console. A modal result
+        // dialog would keep Setup waiting indefinitely for this helper to exit.
+        if (!allowDialog)
+        {
+            AppLog.Info(text);
+            return;
         }
 
         try

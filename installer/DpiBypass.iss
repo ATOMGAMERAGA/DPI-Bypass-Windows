@@ -80,7 +80,11 @@ Type: files; Name: "{autodesktop}\Atom DPI Bypass.lnk"
 Type: filesandordirs; Name: "{autoprograms}\Atom DPI Bypass"
 
 [Files]
-Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "WinDivert64.sys"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The kernel may retain the driver after the application closes its handles.
+; Respect its file version so an unchanged driver is not replaced on every update.
+; A newer locked driver can be replaced at reboot without aborting the app update.
+Source: "{#PublishDir}\WinDivert64.sys"; DestDir: "{app}"; Flags: restartreplace uninsrestartdelete
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
