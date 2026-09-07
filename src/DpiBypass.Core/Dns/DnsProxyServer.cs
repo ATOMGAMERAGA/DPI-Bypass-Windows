@@ -71,6 +71,8 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
     public bool IsRunning { get; private set; }
 
+    public Func<bool>? SuppressIPv6Answers { get; init; }
+
     public long QueriesServed => Interlocked.Read(ref _served);
 
     public long CacheHits => Interlocked.Read(ref _cacheHits);
@@ -423,6 +425,18 @@ public sealed class DnsProxyServer : IAsyncDisposable
         if (!DnsMessage.TryReadQuestion(query, out var question))
         {
             return null;
+        }
+
+        // Evaluate before the cache: the hotspot rule can make a previously cached
+        // IPv6 address unusable. A/SRV lookups must continue to reach upstream.
+        if (question.Type == DnsRecordType.Aaaa && question.Class == 1
+            && SuppressIPv6Answers?.Invoke() == true)
+        {
+            var empty = DnsMessage.BuildQuery(DnsMessage.GetId(query), question.Name, question.Type,
+                recursionDesired: (query[2] & 1) != 0);
+            empty[2] |= 0x80;
+            empty[3] = 0x80; // NODATA with recursion available, not NXDOMAIN.
+            return empty;
         }
 
         var id = DnsMessage.GetId(query);

@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using DpiBypass.Core.Interop;
 
 namespace DpiBypass.Core.Vodafone;
@@ -262,7 +263,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
 
                 if (change is { } rewrite)
                 {
-                    if (WinDivertHandle.CalculateChecksums(packet, ref address))
+                    if (RecalculateIpChecksum(packet, ref address))
                     {
                         Interlocked.Increment(ref _rewritten);
                     }
@@ -369,6 +370,44 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
         }
 
         change = Rewrite(packet, offset: 8, settings);
+        return true;
+    }
+
+    internal static bool RecalculateIpChecksum(Span<byte> packet, ref WinDivertAddress address)
+    {
+        if (packet.Length < 20)
+        {
+            return false;
+        }
+
+        if ((packet[0] >> 4) == 6)
+        {
+            // Hop limit is outside the transport checksum; IPv6 has no header checksum.
+            return packet.Length >= 40;
+        }
+
+        var headerLength = (packet[0] & 0x0F) * 4;
+        if ((packet[0] >> 4) != 4 || headerLength < 20 || headerLength > packet.Length)
+        {
+            return false;
+        }
+
+        // Do not repair the DPI engine's deliberately invalid TCP decoys or alter
+        // checksum-offload flags. Only the IPv4 header changed with the TTL.
+        packet[10] = packet[11] = 0;
+        uint sum = 0;
+        for (var i = 0; i < headerLength; i += 2)
+        {
+            sum += BinaryPrimitives.ReadUInt16BigEndian(packet[i..]);
+        }
+
+        while ((sum >> 16) != 0)
+        {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        BinaryPrimitives.WriteUInt16BigEndian(packet[10..], (ushort)~sum);
+        address.IPChecksum = true;
         return true;
     }
 

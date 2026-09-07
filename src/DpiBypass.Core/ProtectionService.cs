@@ -1294,7 +1294,10 @@ public sealed class ProtectionService : IAsyncDisposable
 
         if (mode == DnsMode.EncryptedLoopback)
         {
-            _dnsProxy = new DnsProxyServer(_resolver!, AppLog.InfoSink);
+            _dnsProxy = new DnsProxyServer(_resolver!, AppLog.InfoSink)
+            {
+                SuppressIPv6Answers = () => _ttlFix.IsActive && _ttlFix.Settings.DropIPv6,
+            };
             if (_dnsProxy.TryStart())
             {
                 // The ::1 listeners are best effort, and pointing the machine's IPv6
@@ -1575,6 +1578,7 @@ public sealed class ProtectionService : IAsyncDisposable
                 if (_ttlFix.IsActive)
                 {
                     _ttlFix.Clear();
+                    RefreshVodafoneDns();
                     AppLog.Info("vodafone: TTL kuralı kaldırıldı.");
                 }
 
@@ -1601,6 +1605,7 @@ public sealed class ProtectionService : IAsyncDisposable
             try
             {
                 _ttlFix.Apply(network.InterfaceIndex, rule);
+                RefreshVodafoneDns();
                 LastVodafoneFailure = null;
                 AppLog.Info($"vodafone: TTL kuralı '{network.DisplayName}' ağında etkin "
                     + $"(bağdaştırıcı {network.InterfaceIndex}, TTL={rule.TimeToLive}, "
@@ -1631,6 +1636,27 @@ public sealed class ProtectionService : IAsyncDisposable
     /// </remarks>
     public void EnableVodafoneModeHere()
         => EnableVodafoneMode(NetworkFingerprint.Capture());
+
+    private void RefreshVodafoneDns()
+    {
+        if (_dnsProxy is not { IsRunning: true } proxy)
+        {
+            return;
+        }
+
+        proxy.ClearCache();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await DnsConfigurator.FlushCacheAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Vodafone DNS önbelleği yenilenemedi", ex);
+            }
+        });
+    }
 
     internal void EnableVodafoneMode(NetworkFingerprint network)
     {
