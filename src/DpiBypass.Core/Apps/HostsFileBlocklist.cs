@@ -49,6 +49,8 @@ public sealed class HostsFileBlocklist
 
     private const string SinkholeV6 = "::";
 
+    private static readonly Encoding Transcoder = Encoding.Latin1;
+
     /// <summary>
     /// Serialises the read-modify-write, because two of them can be asked for at once.
     /// </summary>
@@ -110,7 +112,7 @@ public sealed class HostsFileBlocklist
                 return HostsBlocklistResult.Unchanged;
             }
 
-            var original = exists ? File.ReadAllText(_path) : string.Empty;
+            var original = exists ? Read() : string.Empty;
             var stripped = RemoveBlock(original, names);
             var desired = enabled ? AppendBlock(stripped, names) : stripped;
 
@@ -122,11 +124,11 @@ public sealed class HostsFileBlocklist
             // Written in place rather than through a temporary file and a rename: the
             // hosts file has an access control list of its own, and replacing the file
             // would replace that with whatever the new one inherited.
-            File.WriteAllText(_path, desired, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.WriteAllBytes(_path, Transcoder.GetBytes(desired));
 
             // Read back, because a write that silently did not land is exactly the
             // failure this feature cannot notice any other way.
-            if (!string.Equals(File.ReadAllText(_path), desired, StringComparison.Ordinal))
+            if (!string.Equals(Read(), desired, StringComparison.Ordinal))
             {
                 return HostsBlocklistResult.Failed(
                     "Hosts dosyası yazıldı ama içeriği doğrulanamadı; güvenlik yazılımı engelliyor olabilir.");
@@ -150,13 +152,26 @@ public sealed class HostsFileBlocklist
         }
     }
 
+    /// <summary>
+    /// The file's bytes, mapped one to one onto characters.
+    /// </summary>
+    /// <remarks>
+    /// Latin-1 rather than UTF-8, and not because the file is Latin-1: this mapping is a
+    /// lossless byte to character round trip for any input at all, which is what lets the
+    /// promise above - that everything outside the markers comes back exactly as it was
+    /// found - hold for a file carrying a byte order mark, a comment in another script, or
+    /// bytes that are not valid UTF-8 in the first place. Everything this class writes is
+    /// ASCII, where the two encodings agree.
+    /// </remarks>
+    private string Read() => Transcoder.GetString(File.ReadAllBytes(_path));
+
     /// <summary>Whether the managed block is in the file right now.</summary>
     public bool IsApplied()
     {
         try
         {
             return File.Exists(_path)
-                && File.ReadAllText(_path).Contains(BeginMarker, StringComparison.Ordinal);
+                && Read().Contains(BeginMarker, StringComparison.Ordinal);
         }
         catch (Exception)
         {

@@ -208,6 +208,41 @@ public sealed class HostsFileBlocklistTests
         Assert.Equal(unix, File.ReadAllText(path));
     }
 
+    /// <summary>
+    /// A file carrying bytes that are not ASCII comes back with those bytes intact.
+    /// </summary>
+    /// <remarks>
+    /// A byte order mark, a comment in another script, or a byte sequence that is not
+    /// valid UTF-8 at all. None of them is this class's to normalise, and a hosts file
+    /// that came back subtly re-encoded would be a change nobody asked for to a file
+    /// Windows reads on every lookup.
+    /// </remarks>
+    [Fact]
+    public void BytesOutsideTheBlockSurviveWhateverTheyAre()
+    {
+        using var directory = new TempDirectory("hosts");
+        var path = directory.File("hosts");
+
+        byte[] awkward =
+        [
+            0xEF, 0xBB, 0xBF,                                     // a UTF-8 byte order mark
+            .. "127.0.0.1 localhost\r\n# "u8.ToArray(),
+            0xC3, 0xBC, 0xC3, 0xA7,                               // "üç" in UTF-8
+            0x0D, 0x0A,
+            0xFF, 0xFE,                                           // and two bytes that are not
+            0x0D, 0x0A,
+        ];
+
+        File.WriteAllBytes(path, awkward);
+        var blocklist = new HostsFileBlocklist(path);
+
+        blocklist.Apply(true, Names);
+        Assert.Equal(awkward, File.ReadAllBytes(path).Take(awkward.Length));
+
+        blocklist.Apply(false, Names);
+        Assert.Equal(awkward, File.ReadAllBytes(path));
+    }
+
     /// <summary>The real list is what actually gets written, and all of it does.</summary>
     [Fact]
     public void TheShippedListIsWrittenInFull()
