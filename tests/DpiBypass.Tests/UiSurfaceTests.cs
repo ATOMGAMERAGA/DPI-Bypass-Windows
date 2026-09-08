@@ -205,4 +205,39 @@ public sealed class UiSurfaceTests
         // value would be a number with nothing behind it.
         Assert.DoesNotContain("LatencyProgressPercent", text, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The advertisement block is a switch with a name, and it says what it is doing.
+    /// </summary>
+    /// <remarks>
+    /// It has two layers that can be in place independently, so a status line is not
+    /// decoration here: without it, a user whose hosts write was refused would see a
+    /// switch in the on position and an advertisement still in their launcher, with
+    /// nothing on screen to reconcile the two.
+    /// </remarks>
+    [Fact]
+    public void TheLunarAdBlockIsASwitchThatSaysWhatItIsDoing()
+    {
+        var document = Window();
+        var ns = document.Root!.Name.Namespace;
+
+        var toggle = document.Descendants(ns + "CheckBox").Single(box =>
+            box.Attribute("IsChecked")?.Value.Contains("BlockLunarAds", StringComparison.Ordinal) == true);
+
+        // Its label is the word "Etkin", so the switch itself needs a name that says
+        // what it enables.
+        Assert.NotNull(toggle.Attribute("AutomationProperties.Name"));
+
+        var text = File.ReadAllText(RepoFiles.MainWindowXaml);
+        Assert.Contains("{Binding LunarAdBlockLine}", text, StringComparison.Ordinal);
+        Assert.Contains("LunarAdBlockSeverity", text, StringComparison.Ordinal);
+
+        // It is above the fold rather than behind another jump button: the page already
+        // has three, and the test below pins that count.
+        var settings = document
+            .Descendants(ns + "TabItem")
+            .Single(tab => tab.Attribute("AutomationProperties.Name")?.Value == "DNS ve ayarlar");
+
+        Assert.Contains(toggle, settings.Descendants());
+    }
 }

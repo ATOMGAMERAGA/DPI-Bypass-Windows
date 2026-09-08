@@ -722,6 +722,46 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- ===== Lunar Client reklam engeli =====
+                             Above the fold on purpose: it is a switch, not a section, and
+                             it belongs next to name resolution because that is the only
+                             thing it touches. Nothing here is on the packet path. -->
+                        <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Column="0"
+                                               Text="Lunar Client reklam engeli"
+                                               Style="{StaticResource SectionTitleStyle}"
+                                               VerticalAlignment="Center" />
+
+                                    <CheckBox Grid.Column="1"
+                                              Content="Etkin"
+                                              Style="{StaticResource SwitchStyle}"
+                                              VerticalAlignment="Center"
+                                              AutomationProperties.Name="Lunar Client reklam engelini etkinleştir"
+                                              IsChecked="{Binding BlockLunarAds, Mode=TwoWay}" />
+                                </Grid>
+
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="0,10,0,0"
+                                           Text="Lunar Client başlatıcısının sağ alt köşesindeki reklam alanını Overwolf doldurur. Açıldığında yalnızca reklam, ölçüm ve telemetri sunucularının adları hem hosts dosyasında hem uygulamanın kendi çözümleyicisinde sıfır adrese bağlanır: istek ağa hiç çıkmadığı için ping artmaz, indirme hızı düşmez." />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="0,6,0,0"
+                                           Text="Lunar Client'ın giriş, kozmetik ve sunucu bağlantıları listede değildir; oyuna bağlanmanız etkilenmez. Vodafone Sınırsız Modu ile birlikte çalışır, o modun TTL kuralına dokunmaz." />
+
+                                <TextBlock Text="{Binding LunarAdBlockLine}"
+                                           Style="{StaticResource StatusLineStyle}"
+                                           Margin="0,12,0,0"
+                                           TextWrapping="Wrap"
+                                           Foreground="{Binding LunarAdBlockSeverity, Converter={StaticResource SeverityBrushConverter}}" />
+                            </StackPanel>
+                        </Border>
+
                         <Border Style="{StaticResource CardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Başlangıç ve pencere" Style="{StaticResource SectionTitleStyle}" />

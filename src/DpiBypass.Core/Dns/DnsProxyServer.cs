@@ -62,6 +62,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
     private long _truncated;
     private long _partialSends;
     private long _crossNetworkDrops;
+    private long _sinkholed;
 
     public DnsProxyServer(DohResolver resolver, Action<string>? log = null)
     {
@@ -72,6 +73,17 @@ public sealed class DnsProxyServer : IAsyncDisposable
     public bool IsRunning { get; private set; }
 
     public Func<bool>? SuppressIPv6Answers { get; init; }
+
+    /// <summary>
+    /// Names to answer with an unroutable address instead of resolving them.
+    /// </summary>
+    /// <remarks>
+    /// Asked once per query, before anything else looks at it, and expected to be a set
+    /// membership test - which is why the advertisement block costs nothing measurable:
+    /// a blocked name never reaches the cache, the resolver or the network, and a name
+    /// that is not blocked has paid one hash lookup for the privilege.
+    /// </remarks>
+    public Func<string, bool>? Sinkhole { get; init; }
 
     public long QueriesServed => Interlocked.Read(ref _served);
 
@@ -85,6 +97,9 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
     /// <summary>Answers that came back after a network change and were not cached.</summary>
     public long CrossNetworkDrops => Interlocked.Read(ref _crossNetworkDrops);
+
+    /// <summary>Questions answered locally because the name is on the block list.</summary>
+    public long SinkholedAnswers => Interlocked.Read(ref _sinkholed);
 
     public int Port { get; private set; } = 53;
 
@@ -425,6 +440,17 @@ public sealed class DnsProxyServer : IAsyncDisposable
         if (!DnsMessage.TryReadQuestion(query, out var question))
         {
             return null;
+        }
+
+        // First, and before the hotspot rule, so a blocked name is refused identically
+        // whether or not Vodafone Sınırsız Modu is suppressing IPv6 under it. Nothing
+        // downstream sees the name: it is not cached, the discovery pass is not told
+        // about it, and no packet leaves the machine on its account.
+        if (Sinkhole is { } blocked && blocked(question.Name)
+            && DnsMessage.BuildSinkholeResponse(query) is { } refusal)
+        {
+            Interlocked.Increment(ref _sinkholed);
+            return refusal;
         }
 
         // Evaluate before the cache: the hotspot rule can make a previously cached

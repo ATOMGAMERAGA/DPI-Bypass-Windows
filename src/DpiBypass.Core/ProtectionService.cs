@@ -1,3 +1,4 @@
+using DpiBypass.Core.Apps;
 using DpiBypass.Core.Config;
 using DpiBypass.Core.Diagnostics;
 using DpiBypass.Core.Dns;
@@ -20,6 +21,25 @@ public enum ProtectionState
     Degraded = 3,
     Stopping = 4,
 }
+
+/// <summary>Where the Lunar Client advertisement block stands, layer by layer.</summary>
+/// <param name="Enabled">The switch, as the user set it.</param>
+/// <param name="ResolverActive">
+/// Whether the loopback resolver is up and refusing the names. This is the layer that
+/// covers subdomains, and it needs protection to be running.
+/// </param>
+/// <param name="HostsFileActive">
+/// Whether the machine's hosts file carries the block. This layer does not need anything
+/// to be running, and it is what keeps the launcher's slot empty with the app closed.
+/// </param>
+/// <param name="BlockedAnswers">Questions the resolver has answered locally this session.</param>
+/// <param name="Detail">Why a layer is not in place, when one is not. Empty otherwise.</param>
+public sealed record LunarAdBlockState(
+    bool Enabled,
+    bool ResolverActive,
+    bool HostsFileActive,
+    long BlockedAnswers,
+    string Detail);
 
 /// <summary>What the mobile hotspot feature is doing right now.</summary>
 /// <param name="TtlActive">
@@ -126,6 +146,29 @@ public sealed class ProtectionService : IAsyncDisposable
     /// </remarks>
     private readonly TrackedWork _background = new();
 
+    /// <summary>
+    /// The hosts file half of the Lunar Client advertisement block.
+    /// </summary>
+    /// <remarks>
+    /// Held for the life of the service rather than made per call so the path is resolved
+    /// once, and so a test can point the whole feature at a file of its own.
+    /// </remarks>
+    private readonly HostsFileBlocklist _hostsBlocklist;
+
+    /// <summary>
+    /// Whether the hosts file was carrying the block the last time it was written.
+    /// </summary>
+    /// <remarks>
+    /// Remembered rather than re-read, because the status it feeds is rebuilt on every
+    /// service notification - a counter tick, a learned domain - and reading a file from
+    /// the UI thread a few times a second to answer a question that only changes when
+    /// this class changes it would be a cost with nothing to show for it.
+    /// </remarks>
+    private bool _hostsBlockApplied;
+
+    /// <summary>Why the hosts layer is not in place, or empty when it is.</summary>
+    private string _hostsBlockDetail = string.Empty;
+
     private DohResolver? _resolver;
     private DnsProxyServer? _dnsProxy;
     private DnsConfigurator? _dnsConfigurator;
@@ -170,9 +213,11 @@ public sealed class ProtectionService : IAsyncDisposable
         IMobileHotspotDiagnostics? hotspotDiagnostics = null,
         LoadedLatencyLane? loadedLatency = null,
         IProcessFlowObserver? flowObserver = null,
-        IHotspotTtlFix? ttlFix = null)
+        IHotspotTtlFix? ttlFix = null,
+        HostsFileBlocklist? hostsBlocklist = null)
     {
         _store = store ?? new ConfigStore();
+        _hostsBlocklist = hostsBlocklist ?? new HostsFileBlocklist();
         _learned = learnedDomains ?? new LearnedDomainStore();
         _flowObserver = flowObserver ?? new WinDivertFlowObserver(AppLog.InfoSink);
 
@@ -220,6 +265,11 @@ public sealed class ProtectionService : IAsyncDisposable
         {
             ReportSave(_store.Save(Settings), "ayarlar");
         }
+
+        // Read once, and only when the switch is on, so the very first status line
+        // describes the machine rather than a field initialiser. A settings file with
+        // the block switched off costs no file access at all.
+        _hostsBlockApplied = Settings.BlockLunarAds && _hostsBlocklist.IsApplied();
 
         _latencyResult = _latencyOptimizer.Current;
         ApplyLatencyPreferences();
@@ -1132,6 +1182,15 @@ public sealed class ProtectionService : IAsyncDisposable
                 SetState(ProtectionState.Starting, "Ad çözümleme ayarlanıyor…");
                 await ConfigureDnsAsync(startToken).ConfigureAwait(false);
 
+                // The hosts file outlives the process, so a block the user asked for has
+                // to be checked rather than assumed: something else may have edited the
+                // file, or this may be the first start after they turned the switch on
+                // from a settings file copied in from elsewhere.
+                if (SyncLunarAdBlock() is { Enabled: true, HostsFileActive: false, Detail.Length: > 0 } refused)
+                {
+                    AppLog.Warning($"Lunar Client reklam engeli hosts katmanı uygulanamadı: {refused.Detail}");
+                }
+
                 SetState(ProtectionState.Starting, "Ağ sürücüsü açılıyor…");
                 _portMap = new ProcessPortMap(AppLog.InfoSink);
                 if (!_portMap.TryStart())
@@ -1297,6 +1356,10 @@ public sealed class ProtectionService : IAsyncDisposable
             _dnsProxy = new DnsProxyServer(_resolver!, AppLog.InfoSink)
             {
                 SuppressIPv6Answers = () => _ttlFix.IsActive && _ttlFix.Settings.DropIPv6,
+
+                // Read per query rather than captured, so the switch takes effect on the
+                // next lookup instead of on the next start of the service.
+                Sinkhole = name => Settings.BlockLunarAds && LunarAdBlock.Blocks(name),
             };
             if (_dnsProxy.TryStart())
             {
@@ -2180,6 +2243,93 @@ public sealed class ProtectionService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Turns the Lunar Client advertisement block on or off, and makes it true now.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// There are two layers and neither of them is on the packet path, which is why this
+    /// cannot cost a millisecond of ping or a byte of throughput. The resolver refuses
+    /// the names from a hash set, before its own cache and before anything is sent; the
+    /// hosts file has the Windows resolver refuse them for every process on the machine,
+    /// running or not. Traffic that is not to a blocked name is not looked at by either.
+    /// </para>
+    /// <para>
+    /// Flushing the Windows cache is what makes the switch immediate rather than
+    /// eventual: without it a name resolved a minute ago keeps its old answer until that
+    /// answer expires, in both directions. The proxy's own cache needs no such treatment,
+    /// because a sinkholed answer is returned before the cache is consulted and is never
+    /// written into it - so switching the block off cannot leave a stale zero behind.
+    /// </para>
+    /// </remarks>
+    public async Task<LunarAdBlockState> ApplyLunarAdBlockAsync(
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        Settings.BlockLunarAds = enabled;
+        ReportSave(_store.Save(Settings), "ayarlar");
+
+        var hosts = await Task
+            .Run(() => _hostsBlocklist.Apply(enabled, LunarAdBlock.HostsFileNames), cancellationToken)
+            .ConfigureAwait(false);
+
+        try
+        {
+            // Unconditional, because the switch has just moved and the Windows cache is
+            // holding answers from before it did - a real advertisement address on the
+            // way in, a sinkholed one on the way out. Both are wrong now, and neither
+            // layer of the block can reach into that cache to say so.
+            await DnsConfigurator.FlushCacheAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The block is in place either way; the machine just keeps answering the
+            // handful of names it already had until they age out.
+            AppLog.Error("Reklam engeli sonrası DNS önbelleği temizlenemedi", ex);
+        }
+
+        AppLog.Info(enabled
+            ? "Lunar Client reklam engeli açıldı."
+            : "Lunar Client reklam engeli kapatıldı.");
+
+        var state = DescribeLunarAdBlock(hosts);
+        Changed?.Invoke();
+        return state;
+    }
+
+    /// <summary>
+    /// Puts the hosts file back in line with the setting, without changing the setting.
+    /// </summary>
+    /// <remarks>
+    /// Run on start so a block the user asked for survives anything that edited the file
+    /// while the app was not running, and so a block they turned off on another machine's
+    /// copy of the settings is not left behind on this one.
+    /// </remarks>
+    public LunarAdBlockState SyncLunarAdBlock()
+        => DescribeLunarAdBlock(_hostsBlocklist.Apply(Settings.BlockLunarAds, LunarAdBlock.HostsFileNames));
+
+    /// <summary>Where the two layers of the advertisement block actually stand.</summary>
+    public LunarAdBlockState DescribeLunarAdBlock()
+        => DescribeLunarAdBlock(null);
+
+    private LunarAdBlockState DescribeLunarAdBlock(HostsBlocklistResult? hosts)
+    {
+        var enabled = Settings.BlockLunarAds;
+
+        if (hosts is { } written)
+        {
+            _hostsBlockApplied = enabled && written.Applied;
+            _hostsBlockDetail = written.Detail;
+        }
+
+        return new LunarAdBlockState(
+            Enabled: enabled,
+            ResolverActive: enabled && _dnsProxy is { IsRunning: true },
+            HostsFileActive: enabled && _hostsBlockApplied,
+            BlockedAnswers: _dnsProxy?.SinkholedAnswers ?? 0,
+            Detail: _hostsBlockDetail);
+    }
+
     public void SaveSettings()
     {
         ApplySettingsToMatcher();
@@ -2602,6 +2752,8 @@ public sealed class ProtectionService : IAsyncDisposable
             new("Kesilen yanıt", _dnsProxy is null ? "ölçülmedi" : _dnsProxy.TruncatedAnswers.ToString()),
             new("Ağ değişiminde atılan yanıt", _dnsProxy is null ? "ölçülmedi" : _dnsProxy.CrossNetworkDrops.ToString()),
             new("Birleştirilen sorgu", _resolver is null ? "ölçülmedi" : _resolver.CoalescedQueries.ToString()),
+            new("Lunar Client reklam engeli", Settings.BlockLunarAds ? "açık" : "kapalı"),
+            new("Yerel olarak reddedilen sorgu", _dnsProxy is null ? "ölçülmedi" : _dnsProxy.SinkholedAnswers.ToString()),
         };
 
         if (_resolver is null)

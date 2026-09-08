@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.Core;
+using DpiBypass.Core.Apps;
 using DpiBypass.Core.Config;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Ipc;
@@ -81,6 +82,10 @@ internal static class CommandLineTasks
 
             case "restore-dns":
                 await RestoreDnsAsync().ConfigureAwait(false);
+                return true;
+
+            case "restore-hosts":
+                RemoveHostsBlock();
                 return true;
 
             case "dns-watchdog":
@@ -599,6 +604,29 @@ internal static class CommandLineTasks
         }
 
         await configurator.RestoreAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Takes the advertisement block out of the machine's hosts file.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not part of <c>--restore-dns</c>, which is run on upgrade and by the
+    /// installer's own failure recovery as well as on uninstall. Stripping a block the
+    /// user asked for every time they update the app would be a setting that quietly
+    /// turns itself off; this verb is reached only from the uninstaller.
+    /// </remarks>
+    private static void RemoveHostsBlock()
+    {
+        var result = new HostsFileBlocklist().Apply(false, LunarAdBlock.HostsFileNames);
+
+        if (!result.Applied)
+        {
+            AppLog.Warning($"Hosts dosyasındaki reklam engeli kaldırılamadı: {result.Detail}");
+        }
+        else if (result.Changed)
+        {
+            AppLog.Info("Hosts dosyasındaki Lunar Client reklam engeli kaldırıldı.");
+        }
     }
 
     /// <summary>

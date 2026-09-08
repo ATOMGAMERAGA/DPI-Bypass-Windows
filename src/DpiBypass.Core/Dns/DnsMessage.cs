@@ -32,6 +32,17 @@ public static class DnsMessage
 {
     public const int HeaderLength = 12;
 
+    /// <summary>
+    /// How long a locally refused answer may be cached by whoever asked for it.
+    /// </summary>
+    /// <remarks>
+    /// A minute, which is also the ceiling Chromium puts on its own in-process DNS cache.
+    /// Short enough that lifting a block frees the name without the user waiting, and
+    /// irrelevant to cost either way: a repeat question is answered out of a hash set on
+    /// the loopback interface, which is cheaper than the cache lookup it replaces.
+    /// </remarks>
+    public const uint SinkholeTtlSeconds = 60;
+
     public static byte[] BuildQuery(ushort id, string name, ushort type, bool recursionDesired = true)
     {
         var encodedName = EncodeName(name);
@@ -85,6 +96,108 @@ public static class DnsMessage
             name,
             BinaryPrimitives.ReadUInt16BigEndian(message[pos..]),
             BinaryPrimitives.ReadUInt16BigEndian(message[(pos + 2)..]));
+        return true;
+    }
+
+    /// <summary>
+    /// Answers a query locally with an address nothing is listening on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The sinkhole answer for a blocked name. It is a positive answer rather than
+    /// NXDOMAIN on purpose: a client that is told a name does not exist is entitled to
+    /// ask the next resolver on its list, which turns a block into a real lookup and the
+    /// latency that comes with it, while an answer of <c>0.0.0.0</c> ends the question
+    /// where it was asked. The connection that follows it fails at once instead of
+    /// timing out, because nothing accepts on the unspecified address.
+    /// </para>
+    /// <para>
+    /// Anything that is not an address question - HTTPS/SVCB, which Chromium asks for
+    /// every name, TXT, MX - comes back as NODATA: the same rcode, no answer records. It
+    /// is the honest answer for a name being held at zero, and it is equally final.
+    /// </para>
+    /// <para>
+    /// The question section is copied from the query byte for byte, so the reply is a
+    /// match for it whatever compression or casing the client used. EDNS is dropped: a
+    /// response with no OPT record simply tells the client this server does not do EDNS,
+    /// which costs a sinkholed name nothing.
+    /// </para>
+    /// </remarks>
+    /// <returns>Null when the query is not one this can answer, so the caller resolves it.</returns>
+    public static byte[]? BuildSinkholeResponse(ReadOnlySpan<byte> query, uint ttl = SinkholeTtlSeconds)
+    {
+        if (query.Length <= HeaderLength
+            || BinaryPrimitives.ReadUInt16BigEndian(query[4..]) != 1
+            || !TryReadQuestion(query, out var question)
+            || question.Class != 1
+            || !TryGetQuestionEnd(query, out var questionEnd))
+        {
+            return null;
+        }
+
+        // The answer names the question by pointing at it, which is only a name if the
+        // question spelled it out. A query that compressed its own question name is not
+        // something any resolver sends, and is left to be resolved rather than answered.
+        if ((query[HeaderLength] & 0xC0) != 0)
+        {
+            return null;
+        }
+
+        var addressLength = question.Type switch
+        {
+            DnsRecordType.A => 4,
+            DnsRecordType.Aaaa => 16,
+            _ => 0,
+        };
+
+        // name pointer, type, class, ttl, rdlength, then the address itself.
+        var answerLength = addressLength == 0 ? 0 : 12 + addressLength;
+        var response = new byte[questionEnd + answerLength];
+        query[..questionEnd].CopyTo(response);
+
+        // QR and RA set, the opcode and RD kept as asked, and everything else - AA, TC,
+        // the reserved bits and the rcode - cleared.
+        var asked = BinaryPrimitives.ReadUInt16BigEndian(query[2..]);
+        var flags = (ushort)(0x8000 | (asked & 0x7800) | (asked & 0x0100) | 0x0080);
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(2), flags);
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(6), (ushort)(answerLength == 0 ? 0 : 1));
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(8), 0);
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(10), 0);
+
+        if (answerLength == 0)
+        {
+            return response;
+        }
+
+        var answer = response.AsSpan(questionEnd);
+
+        // A pointer back to the question's own name, which starts right after the header.
+        BinaryPrimitives.WriteUInt16BigEndian(answer, (ushort)(0xC000 | HeaderLength));
+        BinaryPrimitives.WriteUInt16BigEndian(answer[2..], question.Type);
+        BinaryPrimitives.WriteUInt16BigEndian(answer[4..], 1);
+        BinaryPrimitives.WriteUInt32BigEndian(answer[6..], ttl);
+        BinaryPrimitives.WriteUInt16BigEndian(answer[10..], (ushort)addressLength);
+
+        // The address is left as written: all zeroes is 0.0.0.0 and ::.
+        return response;
+    }
+
+    /// <summary>The offset just past the first question, or false if there is not one.</summary>
+    public static bool TryGetQuestionEnd(ReadOnlySpan<byte> message, out int end)
+    {
+        end = 0;
+        if (message.Length < HeaderLength || BinaryPrimitives.ReadUInt16BigEndian(message[4..]) == 0)
+        {
+            return false;
+        }
+
+        var pos = HeaderLength;
+        if (!TryReadName(message, ref pos, out _) || pos + 4 > message.Length)
+        {
+            return false;
+        }
+
+        end = pos + 4;
         return true;
     }
 
