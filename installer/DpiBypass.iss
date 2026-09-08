@@ -119,6 +119,10 @@ Filename: "{app}\{#AppExeName}"; Parameters: "--show"; WorkingDir: "{app}"; Flag
 Filename: "{app}\{#AppExeName}"; Parameters: "latency restore"; WorkingDir: "{app}"; RunOnceId: "RestoreLatency"; Flags: runhidden waituntilterminated
 ; Put the user's DNS back before anything is deleted, using the same code that changed it.
 Filename: "{app}\{#AppExeName}"; Parameters: "--restore-dns"; WorkingDir: "{app}"; RunOnceId: "RestoreDns"; Flags: runhidden waituntilterminated
+; And the Lunar Client advertisement block, which lives in the machine's hosts file and
+; would otherwise outlive the program that wrote it. Its own verb rather than part of
+; --restore-dns: that one also runs on upgrade, where the block must stay.
+Filename: "{app}\{#AppExeName}"; Parameters: "--restore-hosts"; WorkingDir: "{app}"; RunOnceId: "RestoreHosts"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--uninstall-autostart"; WorkingDir: "{app}"; RunOnceId: "RemoveTask"; Flags: runhidden waituntilterminated
 ; The driver service is created on demand by WinDivert; remove it so nothing is left behind.
 Filename: "{sys}\sc.exe"; Parameters: "stop WinDivert"; WorkingDir: "{sys}"; RunOnceId: "StopDriver"; Flags: runhidden waituntilterminated

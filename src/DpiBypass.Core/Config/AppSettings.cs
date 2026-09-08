@@ -179,6 +179,17 @@ public sealed record AppSettings : IHotspotLegacyState
 
     public bool BlockQuicHandshakes { get; set; } = true;
 
+    /// <summary>
+    /// Refuse the hosts the Lunar Client launcher's advertisement slot is filled from.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, because it is the user's launcher and the advertisement is how
+    /// Moonsworth is paid for it. Missing from a settings file written by an older build
+    /// therefore reads as false through the serializer's own default, which is the right
+    /// answer: an update does not switch a feature like this on behind anyone's back.
+    /// </remarks>
+    public bool BlockLunarAds { get; set; }
+
     /// <summary>Empty means "detect the operator automatically".</summary>
     public string? ManualIspProfileId { get; set; }
 

@@ -409,6 +409,7 @@ public sealed class MainViewModel : ObservableObject
         RefreshVodafoneNetworks();
         RefreshHotspotStatus();
         ApplyLatencyStatus(_service.LatencyStatus);
+        ApplyLunarAdBlockState(_service.DescribeLunarAdBlock());
 
         foreach (var entry in AppLog.Snapshot())
         {
@@ -812,6 +813,120 @@ public sealed class MainViewModel : ObservableObject
             _service.ApplyQuicSetting(value);
             Raise();
         }
+    }
+
+    // --- Lunar Client reklam engeli -------------------------------------------
+
+    private bool _lunarAdBlockBusy;
+
+    private string _lunarAdBlockLine = string.Empty;
+
+    private string _lunarAdBlockSeverity = "off";
+
+    /// <summary>
+    /// Refuse the hosts the Lunar Client launcher's advertisement slot is filled from.
+    /// </summary>
+    /// <remarks>
+    /// Setting this hands the work to the service and returns, because the hosts file
+    /// half of it is disk and the flush that makes it immediate is a PowerShell process:
+    /// a few hundred milliseconds is not long, and it is far too long to hold the
+    /// dispatcher for. The line under the switch carries the outcome, which is why it
+    /// says "engelleniyor…" while the work is in flight rather than going straight to
+    /// the answer - the switch itself has already moved, and only the line can be honest
+    /// about a hosts write that has not landed yet.
+    /// </remarks>
+    public bool BlockLunarAds
+    {
+        get => _service.Settings.BlockLunarAds;
+        set
+        {
+            if (_lunarAdBlockBusy || _service.Settings.BlockLunarAds == value)
+            {
+                return;
+            }
+
+            _ = ApplyLunarAdBlockAsync(value);
+        }
+    }
+
+    /// <summary>What the block is doing, in one line.</summary>
+    public string LunarAdBlockLine
+    {
+        get => _lunarAdBlockLine;
+        private set => Set(ref _lunarAdBlockLine, value);
+    }
+
+    /// <summary>Colour for <see cref="LunarAdBlockLine"/>.</summary>
+    public string LunarAdBlockSeverity
+    {
+        get => _lunarAdBlockSeverity;
+        private set => Set(ref _lunarAdBlockSeverity, value);
+    }
+
+    private async Task ApplyLunarAdBlockAsync(bool enabled)
+    {
+        _lunarAdBlockBusy = true;
+        LunarAdBlockLine = enabled ? "Reklam sunucuları engelleniyor…" : "Engel kaldırılıyor…";
+        LunarAdBlockSeverity = "off";
+
+        try
+        {
+            ApplyLunarAdBlockState(await _service.ApplyLunarAdBlockAsync(enabled).ConfigureAwait(true));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Lunar Client reklam engeli uygulanamadı", ex);
+            LunarAdBlockLine = $"Reklam engeli uygulanamadı: {ex.Message}";
+            LunarAdBlockSeverity = "warn";
+        }
+        finally
+        {
+            _lunarAdBlockBusy = false;
+            Raise(nameof(BlockLunarAds));
+        }
+    }
+
+    /// <summary>
+    /// Turns the service's two-layer answer into one sentence and one colour.
+    /// </summary>
+    /// <remarks>
+    /// The two layers are worth telling apart rather than averaging into "on": the hosts
+    /// file works with nothing running but only matches the names in it exactly, while
+    /// the resolver also covers everything under them and needs protection to be running.
+    /// A user whose launcher still shows an advertisement needs to know which of those is
+    /// missing, not that the switch is in the on position.
+    /// </remarks>
+    private void ApplyLunarAdBlockState(LunarAdBlockState state)
+    {
+        if (!state.Enabled)
+        {
+            LunarAdBlockLine = "Kapalı. Lunar Client başlatıcısındaki reklam alanı olduğu gibi kalır.";
+            LunarAdBlockSeverity = "off";
+            return;
+        }
+
+        var counted = state.BlockedAnswers > 0
+            ? $" Bu oturumda {state.BlockedAnswers} istek yerel olarak reddedildi."
+            : string.Empty;
+
+        (LunarAdBlockLine, LunarAdBlockSeverity) = (state.ResolverActive, state.HostsFileActive) switch
+        {
+            (true, true) => (
+                "Açık. Reklam sunucuları hem hosts dosyasında hem yerel çözümleyicide reddediliyor."
+                    + counted,
+                "ok"),
+            (false, true) => (
+                "Açık. Hosts dosyası katmanı çalışıyor; alt alan adlarını da kapsayan çözümleyici "
+                    + "katmanı koruma başlayınca devreye girer.",
+                "attention"),
+            (true, false) => (
+                $"Açık. Çözümleyici katmanı çalışıyor, hosts katmanı uygulanamadı. {state.Detail}".TrimEnd()
+                    + counted,
+                "attention"),
+            _ => (
+                $"Açık ama henüz uygulanmadı. {state.Detail}".TrimEnd(),
+                "warn"),
+        };
     }
 
     public bool AutoTuneOnNetworkChange
@@ -2738,6 +2853,15 @@ public sealed class MainViewModel : ObservableObject
         IsLatencyBusy = _service.IsLatencyBusy;
         Raise(nameof(TrafficGuardEnabled));
         Raise(nameof(TrafficGuardApplication));
+
+        // Whether the resolver layer is up moves with the protection state, so the line
+        // is rebuilt here rather than only when the switch is used.
+        if (!_lunarAdBlockBusy)
+        {
+            Raise(nameof(BlockLunarAds));
+            ApplyLunarAdBlockState(_service.DescribeLunarAdBlock());
+        }
+
         StateChanged?.Invoke();
     }
 

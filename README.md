@@ -259,6 +259,76 @@ yalnız eski alan adlarını taşır.
 Kullanılamayacak bir TTL (koruma eşiğinin altında ya da 255 üstünde) elle
 yazılmışsa varsayılana döndürülür ve günlüğe yazılır; mod sessizce çalışmamaz.
 
+## Lunar Client reklam engeli
+
+Lunar Client başlatıcısının sağ alt köşesindeki reklam alanını **Overwolf**
+doldurur; Moonsworth'ün kendi destek makalesi reklamları Overwolf'un sunduğunu
+ve **GeoEdge**'in denetlediğini söyler. Başlatıcıda bunu kapatan bir seçenek
+yoktur. Bu anahtar, reklamın geldiği adları makinenin çözmeyi reddetmesini
+sağlar.
+
+**DNS ve ayarlar** sayfasındaki *Lunar Client reklam engeli* anahtarı açıldığında
+iki katman birden devreye girer:
+
+| Katman | Nerede çalışır | Neyi kapsar |
+| --- | --- | --- |
+| **Hosts dosyası** | Windows çözümleyicisinin kendisi; uygulama kapalıyken de | Listedeki adlar birebir |
+| **Yerel çözümleyici** | Koruma çalışırken, uygulamanın 127.0.0.1 DNS sunucusu | Listedeki adlar **ve altındaki bütün alt alan adları** |
+
+İki katman ayrı ayrı raporlanır: kart, hangisinin yerinde olduğunu tek satırda
+söyler. Koruma kapalıyken yalnız hosts katmanı çalışır, ki bu da başlatıcının
+reklam yuvasını boş bırakmaya yeter.
+
+Anahtar anında etki eder: ayar kaydedilir, hosts bloğu yazılır ve Windows'un DNS
+önbelleği temizlenir, dolayısıyla **bundan sonraki her reklam isteği** engellenir.
+Başlatıcı o sırada açıksa ekranda duran reklam, yuva bir sonraki kez
+yenilendiğinde (birkaç saniye) kaybolur; başlatıcıyı yeniden açmak da aynı işi
+yapar.
+
+### Ping ve hıza etkisi: yok
+
+Bu özellik **paket yoluna hiç dokunmaz**. Yaptığı tek şey, ad çözümleme
+sırasında bir küme sorgusudur:
+
+- Engellenen bir ad `0.0.0.0` / `::` olarak **yerelde** yanıtlanır. İstek ağa
+  hiç çıkmaz, DoH turu yapılmaz, tek paket gönderilmez — dolayısıyla reklam
+  isteği internetinizden pay almaz. Gerçek bir aramadan **daha hızlıdır**.
+- Engellenmeyen bir adın ödediği bedel, sorgu başına **bir hash araması**dır.
+- Yanıt `NXDOMAIN` değil olumlu bir yanıttır. Böylece istemci "bu ad yok" deyip
+  başka bir çözümleyiciye sormaz; soru sorulduğu yerde biter, bağlantı da
+  zaman aşımı beklemeden anında düşer.
+- Adres dışındaki sorular (Chromium'un her bağlantıdan önce sorduğu HTTPS/SVCB
+  kaydı gibi) hata değil **boş** yanıt alır; bu da yeniden denemeyi önler.
+
+### Vodafone Sınırsız Modu ile birlikte
+
+Sorunsuz çalışır ve o modun TTL kuralına dokunmaz. İkisi de bir aramayı
+çözümlenmeden önce yakaladığı için sıra önemlidir: **önce reklam engeli
+değerlendirilir**, dolayısıyla engellenen bir ad, altında IPv6 kısıtlaması olsa
+da olmasa da aynı yanıtı alır; engellenmeyen bir ad ise Vodafone modunun IPv6
+kuralına eskisi gibi tabidir. Bu davranış testlerle sabitlenmiştir.
+
+### Listede ne var, ne yok
+
+**Var:** Overwolf'un reklam ve telemetri sunucuları (`ads.overwolf.com`,
+`tracking.overwolf.com`, `analyticsnew` / `analyticssec` / `newlog` /
+`apps-errors` / `client-errors`), Overwolf'un pazarlama CDN'i
+(`mrkt.forgecdn.net`), Moonsworth'ün analitik ucu
+(`analytics.lunarclientprod.com`), GeoEdge, ve reklam yuvasının doldurulduğu
+borsalar ile ölçüm firmaları (Google reklam sunucuları, PubMatic, OpenX,
+Smartadserver, Criteo, Xandr, Moat, DoubleVerify ve benzerleri).
+
+**Yok:** Lunar Client'ın giriş ve API sunucusu (`api.lunarclientprod.com`),
+kozmetik ve varlık sunucuları, `www.lunarclient.com`, başlatıcı güncellemeleri,
+CurseForge'un mod indirme uçları (`edge.forgecdn.net` gibi) ve elbette hiçbir
+Minecraft sunucusu. Yani oyuna bağlanmanız, giriş yapmanız ve kozmetikleriniz
+etkilenmez.
+
+Anahtar kapatıldığında hosts dosyası **bulunduğu hâle birebir** geri döner:
+yazılan blok iki işaret satırı arasında durur ve dışındaki hiçbir satıra —
+girintisine, satır sonuna, sırasına — dokunulmaz. Uygulama kaldırıldığında da
+aynı temizlik yapılır.
+
 ## Ping düşürme (Beta)
 
 **DNS ve ayarlar → Ping düşürme** kartındaki özellik iki ayrı şeyi yapar ve
@@ -724,7 +794,7 @@ kalır.
 
 | Dosya | İçerik |
 | --- | --- |
-| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping düşürme, Vodafone ağ tercihleri ve hotspot tanılaması, başlangıç seçenekleri |
+| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping düşürme, Lunar Client reklam engeli, Vodafone ağ tercihleri ve hotspot tanılaması, başlangıç seçenekleri |
 | `networks.json` | Ağ başına öğrenilen yöntem belleği |
 | `learned-domains.json` | Otomatik keşfin bulduğu engelli alan adları |
 | `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |
@@ -735,8 +805,9 @@ kalır.
 ## Kaldırma
 
 Ayarlar → Uygulamalar üzerinden normal şekilde kaldırılır. Kaldırma sırasında
-özgün NIC ve DNS ayarlarınız geri yüklenir, oturum açma görevi silinir ve
-WinDivert sürücü servisi kaldırılır.
+özgün NIC ve DNS ayarlarınız geri yüklenir, hosts dosyasına yazılmış reklam
+engeli bloğu silinir, oturum açma görevi silinir ve WinDivert sürücü servisi
+kaldırılır.
 
 ## Kaynaktan derleme
 
@@ -789,6 +860,8 @@ src/DpiBypass.Core/
   Dns/DohResolver.cs          DNS-over-HTTPS çözümleyici
   Dns/DnsProxyServer.cs       yerel DNS köprüsü
   Dns/DnsConfigurator.cs      sistem DNS ayarları (ve geri alma)
+  Apps/LunarAdBlock.cs        Lunar Client reklam/telemetri ad listesi ve eşleme
+  Apps/HostsFileBlocklist.cs  hosts dosyasındaki işaretli blok (ve birebir geri alma)
   Network/IspProfile.cs       operatör profilleri
   Network/LatencyOptimizer.cs eşli A/B turlarıyla ölç, uygula, doğrula, rollback et
   Network/LatencyComparison.cs bir adayın kabul/ret kuralı
