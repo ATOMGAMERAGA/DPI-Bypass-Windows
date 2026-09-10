@@ -3,6 +3,28 @@ using System.Net.NetworkInformation;
 namespace DpiBypass.Core.Network;
 
 /// <summary>
+/// A watch on the network underneath us, which several features can share.
+/// </summary>
+/// <remarks>
+/// Answering "which network are we on" costs a full adapter enumeration - every
+/// interface, its addresses, its byte counters, the wireless association and an ARP
+/// lookup for the gateway - and it is answered on a timer. One watch per interested
+/// feature therefore pays that price once per feature, for the same answer. This is
+/// the seam that lets them agree on one.
+/// </remarks>
+public interface INetworkWatch : IDisposable
+{
+    /// <summary>The network the watch believes we are on.</summary>
+    NetworkFingerprint Current { get; }
+
+    /// <summary>Raised once, after things settle, when the network identity has changed.</summary>
+    event Action<NetworkFingerprint>? Changed;
+
+    /// <summary>Begins watching. Idempotent for a watch that is already running.</summary>
+    void Start();
+}
+
+/// <summary>
 /// Watches for the network underneath us changing.
 /// </summary>
 /// <remarks>
@@ -12,7 +34,7 @@ namespace DpiBypass.Core.Network;
 /// alongside them and compares keys. Events give a fast reaction; the poll
 /// guarantees we never miss one.
 /// </remarks>
-public sealed class NetworkMonitor : IDisposable
+public sealed class NetworkMonitor : INetworkWatch
 {
     private readonly TimeSpan _pollInterval;
     private readonly TimeSpan _debounce;
@@ -49,6 +71,14 @@ public sealed class NetworkMonitor : IDisposable
 
     public void Start()
     {
+        // Idempotent: a shared watch is started by whoever gets there first, and a
+        // second Start would otherwise leave a second poller running for ever against
+        // the same fingerprint - which is the duplication this watch exists to remove.
+        if (_poller is not null)
+        {
+            return;
+        }
+
         lock (_gate)
         {
             _current = NetworkFingerprint.Capture();
@@ -190,7 +220,32 @@ public sealed class NetworkMonitor : IDisposable
         if (changed)
         {
             _log?.Invoke($"Network changed to '{captured.DisplayName}' ({captured.Key}).");
-            Changed?.Invoke(captured);
+            Raise(captured);
+        }
+    }
+
+    /// <summary>
+    /// Tells every subscriber, keeping one that throws to itself.
+    /// </summary>
+    /// <remarks>
+    /// One multicast invocation means the first handler to throw silences every handler
+    /// registered after it. That did not matter while each feature owned a watch of its
+    /// own; sharing one makes the protection service and the latency lane each other's
+    /// problem, and a roam that the first of them cannot digest must still reach the
+    /// second.
+    /// </remarks>
+    private void Raise(NetworkFingerprint captured)
+    {
+        foreach (var handler in Changed?.GetInvocationList() ?? [])
+        {
+            try
+            {
+                ((Action<NetworkFingerprint>)handler)(captured);
+            }
+            catch (Exception ex)
+            {
+                _log?.Invoke($"Network change handler failed: {ex.Message}");
+            }
         }
     }
 

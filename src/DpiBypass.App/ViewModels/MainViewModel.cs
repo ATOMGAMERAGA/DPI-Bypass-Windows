@@ -160,10 +160,22 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>Hosts the engine rewrote, waiting to be handed to the UI thread.</summary>
     private readonly ConcurrentQueue<string> _pendingHosts = new();
 
+    /// <summary>
+    /// How many rewritten hostnames the queue will hold before it drops the oldest.
+    /// </summary>
+    /// <remarks>
+    /// The page shows the hundred most recent, so anything past a few multiples of that
+    /// is memory held to be thrown away on arrival - the same bound the log lines have
+    /// had, applied to the one queue that is fed straight from the packet path.
+    /// </remarks>
+    private const int PendingHostCapacity = 400;
+
     private int _logDrainQueued;
     private int _pendingLogCount;
     private long _droppedLogLines;
     private int _hostDrainQueued;
+    private int _pendingHostCount;
+    private bool _presentationActive = true;
 
     private string _statusHeadline = "Koruma kapalı";
     private string _statusDetail = "Başlatmak için düğmeye dokunun.";
@@ -417,15 +429,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = VisibleRefreshInterval };
-        _refreshTimer.Tick += (_, _) =>
-        {
-            RefreshCounters();
-            UpdateLatencyElapsed();
-
-            // The wording is relative ("3 dk önce"), so it goes stale on its own even when
-            // nothing has changed.
-            RefreshVerification();
-        };
+        _refreshTimer.Tick += (_, _) => RefreshPresentation();
         _refreshTimer.Start();
 
         // So the first frame shows the real answer rather than the field initialiser's.
@@ -3120,29 +3124,71 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>How often the counters are re-read while the window is on screen.</summary>
     private static readonly TimeSpan VisibleRefreshInterval = TimeSpan.FromSeconds(2);
 
-    /// <summary>How often they are re-read while the window is in the notification area.</summary>
-    private static readonly TimeSpan HiddenRefreshInterval = TimeSpan.FromSeconds(20);
+    /// <summary>
+    /// Whether anybody can currently see what this view model formats.
+    /// </summary>
+    /// <remarks>
+    /// Written on the UI thread and read from the packet path, so it is read and written
+    /// through <see cref="Volatile"/> rather than left to the JIT: a thread that missed
+    /// the window coming back would go on queueing hostnames nobody drains.
+    /// </remarks>
+    public bool IsPresentationActive
+    {
+        get => Volatile.Read(ref _presentationActive);
+        private set => Volatile.Write(ref _presentationActive, value);
+    }
 
     /// <summary>
     /// Tells the view model whether anybody is looking at it.
     /// </summary>
     /// <remarks>
-    /// Only the presentation counters slow down: formatting packet totals and a DNS
-    /// summary for a window in the notification area is work whose entire output is
-    /// discarded. Protection, the network watch, the DNS proxy and everything the user
+    /// <para>
+    /// Only the presentation counters stop: formatting packet totals, a DNS summary and
+    /// three relative timestamps for a window nobody can see is work whose entire output
+    /// is discarded. Protection, the network watch, the DNS proxy and everything the user
     /// asked for run exactly as before - this timer draws nothing but text. Coming back
     /// re-reads immediately, so the window is current the moment it is on screen rather
-    /// than up to one interval stale.
+    /// than one interval stale.
+    /// </para>
+    /// <para>
+    /// It stops rather than slows down. A slower tick still wakes the dispatcher, still
+    /// formats every counter and still raises the property changes that walk the binding
+    /// graph of a window in the notification area; the output was discarded either way,
+    /// so the only thing the interval bought was doing it less often. An app started
+    /// straight into the tray never received the visibility change that used to slow it
+    /// at all, so it formatted counters every two seconds for the whole session - which
+    /// is precisely the state this exists to cover.
+    /// </para>
     /// </remarks>
     public void SetPresentationActive(bool active)
     {
-        _refreshTimer.Interval = active ? VisibleRefreshInterval : HiddenRefreshInterval;
+        IsPresentationActive = active;
 
-        if (active)
+        if (!active)
         {
-            RefreshCounters();
-            OnServiceChanged();
+            _refreshTimer.Stop();
+            return;
         }
+
+        _refreshTimer.Start();
+        RefreshPresentation();
+        OnServiceChanged();
+
+        // Everything that was queued rather than posted while the window was away now
+        // has somewhere to go.
+        QueueLogDrain();
+        RequeueHostDrain();
+    }
+
+    /// <summary>Re-reads everything on screen whose text goes stale on its own.</summary>
+    private void RefreshPresentation()
+    {
+        RefreshCounters();
+        UpdateLatencyElapsed();
+
+        // The wording is relative ("3 dk önce"), so it goes stale on its own even when
+        // nothing has changed.
+        RefreshVerification();
     }
 
     private void RefreshCounters()
@@ -3177,22 +3223,23 @@ public sealed class MainViewModel : ObservableObject
     {
         _pendingHosts.Enqueue($"{DateTime.Now:HH:mm:ss}  {host}");
 
-        if (Interlocked.Exchange(ref _hostDrainQueued, 1) == 1)
+        // Bounded, like the log queue and for the same reason - only more so, because
+        // this one is fed once per rewritten handshake from the packet path. The page
+        // shows the hundred most recent hostnames, so a queue holding several times that
+        // is already more than can ever be displayed; without the bound, an app left in
+        // the notification area during a long session grew a list of hostnames whose only
+        // future was being trimmed off the end of the display.
+        if (Interlocked.Increment(ref _pendingHostCount) > PendingHostCapacity
+            && _pendingHosts.TryDequeue(out _))
         {
-            return;
+            // Oldest first: the list is newest at the top, so what falls off the back of
+            // the queue is what would have fallen off the bottom of the page. Counted
+            // rather than measured, because this runs once per rewritten handshake and
+            // asking a concurrent queue its length is not the free answer it looks like.
+            Interlocked.Decrement(ref _pendingHostCount);
         }
 
-        try
-        {
-            _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainHosts));
-        }
-        catch (Exception)
-        {
-            // The dispatcher is shutting down. This runs on the packet path, and throwing
-            // from there over a list of hostnames nobody will read again would take the
-            // engine thread down with it.
-            Interlocked.Exchange(ref _hostDrainQueued, 0);
-        }
+        RequeueHostDrain();
     }
 
     private void DrainHosts()
@@ -3202,6 +3249,7 @@ public sealed class MainViewModel : ObservableObject
         var added = 0;
         while (added < LogDrainBudget && _pendingHosts.TryDequeue(out var line))
         {
+            Interlocked.Decrement(ref _pendingHostCount);
             added++;
             if (ProtectedHosts.Contains(line))
             {
@@ -3225,6 +3273,11 @@ public sealed class MainViewModel : ObservableObject
 
     private void RequeueHostDrain()
     {
+        if (!IsPresentationActive)
+        {
+            return;
+        }
+
         if (Interlocked.Exchange(ref _hostDrainQueued, 1) == 1)
         {
             return;
@@ -3279,6 +3332,27 @@ public sealed class MainViewModel : ObservableObject
             Interlocked.Increment(ref _droppedLogLines);
         }
 
+        QueueLogDrain();
+    }
+
+    /// <summary>
+    /// Asks the UI thread to take what is queued, unless nobody is looking at it.
+    /// </summary>
+    /// <remarks>
+    /// While the window is away, every line used to buy a dispatcher operation, a
+    /// collection change and - once the log page has been visited - a WPF container pass
+    /// over a list with no pixels. The lines stay in their bounded queue instead and
+    /// arrive together when the window comes back. Nothing is lost that would have been
+    /// kept: the queue holds several times what the page displays, the page only ever
+    /// shows the last few hundred lines, and the file on disk has all of it either way.
+    /// </remarks>
+    private void QueueLogDrain()
+    {
+        if (!IsPresentationActive)
+        {
+            return;
+        }
+
         // Already queued: the pending drain will pick this line up as well.
         if (Interlocked.Exchange(ref _logDrainQueued, 1) == 1)
         {
@@ -3324,18 +3398,9 @@ public sealed class MainViewModel : ObservableObject
 
         // Whatever did not fit in this pass gets its own, so the dispatcher gets a turn
         // at input and rendering in between.
-        if (!_pendingLogLines.IsEmpty && Interlocked.Exchange(ref _logDrainQueued, 1) == 0)
+        if (!_pendingLogLines.IsEmpty)
         {
-            try
-            {
-                _dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainLogLines));
-            }
-            catch (Exception)
-            {
-                // Shutting down. The lines are already in the file; what is left in the
-                // queue is a display backlog nobody will see.
-                Interlocked.Exchange(ref _logDrainQueued, 0);
-            }
+            QueueLogDrain();
         }
     }
 
