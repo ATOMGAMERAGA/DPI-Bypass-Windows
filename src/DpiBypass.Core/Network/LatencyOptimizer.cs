@@ -97,7 +97,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private readonly ILatencyEnvironmentSampler _environmentSampler;
     private readonly ILatencyExperimentRunner _runner;
     private readonly LatencySnapshotRestorer _restorer;
-    private readonly Func<NetworkMonitor> _monitorFactory;
+    private readonly Func<INetworkWatch> _monitorFactory;
     private readonly LatencyOptimizerOptions _options;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<IPAddress, IPAddress?, NetworkFingerprint> _captureRoute;
@@ -106,7 +106,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private readonly Lock _cancellationGate = new();
 
-    private NetworkMonitor? _monitor;
+    private INetworkWatch? _monitor;
     private CancellationTokenSource? _lifetime;
     private CancellationTokenSource? _operationCancellation;
     private string? _lastNetworkKey;
@@ -130,7 +130,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         ILatencyAdapterController? controller = null,
         ILatencyProbe? probe = null,
         ILatencySnapshotStore? snapshots = null,
-        Func<NetworkMonitor>? monitorFactory = null,
+        Func<INetworkWatch>? monitorFactory = null,
         Action<string>? log = null,
         ILatencyProfileStore? profiles = null,
         LatencyOptimizerOptions? options = null,

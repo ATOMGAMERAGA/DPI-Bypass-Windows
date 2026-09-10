@@ -187,6 +187,42 @@ public sealed partial class ValorantHudLatencySource : IGameLatencySource, IDisp
         return foregroundProcessId == (uint)processId;
     }
 
+    /// <summary>
+    /// Frees the OCR engine while nothing is being measured.
+    /// </summary>
+    /// <remarks>
+    /// Tesseract's English LSTM model is a four megabyte data file that becomes tens of
+    /// megabytes of native allocations once loaded, and it used to stay loaded for the
+    /// life of the process after a single measurement - memory held, for the whole time
+    /// the app sits in the notification area, for a screen region nobody is reading. It
+    /// is rebuilt lazily on the next frame, so the cost is the first few hundred
+    /// milliseconds of the next run and the saving is every minute between runs. A
+    /// measurement in flight owns the gate and its engine is not this call's to dispose,
+    /// so a busy source is simply left alone; the run's own end releases it.
+    /// </remarks>
+    public void ReleaseIdleResources()
+    {
+        if (_disposed || !_gate.Wait(0))
+        {
+            return;
+        }
+
+        try
+        {
+            var engine = _engine;
+            _engine = null;
+            engine?.Dispose();
+        }
+        catch (Exception)
+        {
+            // Giving memory back is best effort; a failure here must not end a run.
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private TesseractEngine GetEngine()
     {
         if (_engine is not null)

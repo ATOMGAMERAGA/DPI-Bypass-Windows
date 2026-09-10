@@ -103,9 +103,21 @@ public partial class App : Application
     private MainViewModel? _viewModel;
     private MainWindow? _window;
     private DispatcherTimer? _visibilityWatchdog;
+    private DispatcherTimer? _idleMemoryTimer;
     private StartupPlan _plan = new(StartupVisibility.ShowWindow, "başlatılıyor");
     private bool _shuttingDown;
     private bool _dnsWatchdogStarted;
+
+    /// <summary>
+    /// How long the window has to stay out of sight before its memory is handed back.
+    /// </summary>
+    /// <remarks>
+    /// Long enough that minimising and restoring, or a quick look at the tray menu, is
+    /// not a trim followed immediately by faulting the same pages back in; short enough
+    /// that a user who put the app away and went to play something sees the difference
+    /// while they are still in the loading screen.
+    /// </remarks>
+    private static readonly TimeSpan IdleMemoryDelay = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Whether the app currently intends the user to be looking at the window. Set by
@@ -379,6 +391,14 @@ public partial class App : Application
         {
             ShowMainWindow();
         }
+        else
+        {
+            // Straight to the notification area: nothing will ever raise the window's
+            // own presentation change, and the launch that never draws a frame is
+            // exactly the one carrying a whole startup's worth of pages it will not
+            // touch again.
+            OnPresentationChanged(presenting: false);
+        }
 
         // Whatever was decided above, something has to be reachable once the message
         // loop is running: a window on screen, or an icon in the notification area.
@@ -561,6 +581,7 @@ public partial class App : Application
         try
         {
             _window = new MainWindow(_viewModel!, _theme);
+            _window.PresentationChanged += OnPresentationChanged;
             _window.CloseToTrayRequested += OnCloseToTray;
             _window.ExitRequested += () => _ = ShutdownAsync();
             _window.FirstFrameRendered += OnFirstFrameRendered;
@@ -571,6 +592,69 @@ public partial class App : Application
             AppLog.Error("Pencere oluşturulamadı", ex);
             _window = null;
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Gives the process's memory back a few seconds after the window goes away.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Building the window, parsing the XAML, jitting the startup path and running a
+    /// latency benchmark each commit tens of megabytes that are dead the moment they are
+    /// finished with. Nothing asked for them back, so an app that had been used once and
+    /// then left in the notification area kept the whole peak resident - which is the
+    /// number the user reads in Task Manager and calls the app heavy.
+    /// </para>
+    /// <para>
+    /// Nothing is discarded and nothing is stopped: the collector is asked whether a pass
+    /// is worth its cost rather than told to run one, and the working set trim is a hint
+    /// that costs a handful of soft faults if it turns out to be wrong. Restoring the
+    /// window cancels a trim that has not happened yet.
+    /// </para>
+    /// </remarks>
+    private void OnPresentationChanged(bool presenting)
+    {
+        if (presenting || _shuttingDown)
+        {
+            _idleMemoryTimer?.Stop();
+            return;
+        }
+
+        if (_idleMemoryTimer is null)
+        {
+            // ApplicationIdle: this is housekeeping, and it must never be the reason a
+            // frame is late. Background priority would still put it in front of nothing,
+            // but idle says what it is.
+            _idleMemoryTimer = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = IdleMemoryDelay,
+            };
+
+            _idleMemoryTimer.Tick += (_, _) =>
+            {
+                _idleMemoryTimer?.Stop();
+                ReleaseIdleMemory();
+            };
+        }
+
+        _idleMemoryTimer.Stop();
+        _idleMemoryTimer.Start();
+    }
+
+    private static void ReleaseIdleMemory()
+    {
+        try
+        {
+            // Optimized rather than forced, and not blocking: the collector decides
+            // whether a pass would actually free anything, so an app that is already
+            // small pays nothing for this.
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false);
+            ProcessMemory.TrimWorkingSet();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Boştaki bellek geri verilemedi", ex);
         }
     }
 
@@ -1663,6 +1747,8 @@ public partial class App : Application
         try
         {
             StopVisibilityWatchdog();
+            _idleMemoryTimer?.Stop();
+            _idleMemoryTimer = null;
             _window?.Hide();
             _viewModel?.Detach();
 

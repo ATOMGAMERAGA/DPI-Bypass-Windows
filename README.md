@@ -676,6 +676,24 @@ Tasarım gereği yok denecek kadar az:
 - Otomatik ayarlama, çalışan yöntemler arasından en düşük gecikmeliyi seçer;
   bölme yöntemleri hiçbir paket düşürmediği için sıfır ek gecikme getirir.
 
+## Arka planda RAM ve CPU
+
+Uygulama tepsideyken ya da simge durumundayken korumayı sürdürür, ama
+görüntülemeye ait hiçbir iş yapmaz:
+
+- Sayaç zamanlayıcısı **durur**; yavaşlamaz. Pencere geri geldiğinde her şey
+  anında yeniden okunur.
+- Simge durumuna küçültmek de "görünmüyor" sayılır ve tepside açılan bir oturum
+  baştan bu durumda başlar.
+- Günlük satırları ve korunan site listesi kendi sınırlı kuyruklarında bekler;
+  pencere döndüğünde toplu olarak aktarılır. Günlük dosyasına yazma değişmez.
+- Pencere beş saniye görünmez kaldıktan sonra çalışma kümesi işletim sistemine
+  geri verilir ve ekran okuma (OCR) motoru her ölçümün sonunda serbest bırakılır.
+- Düşük gecikme kipi açıkken ayrı bir ağ izleyicisi daha kurulmaz; uygulama tek
+  bir izleyiciyi paylaşır.
+
+Ayrıntı ve doğrulama adımları için `docs/background-footprint.md`.
+
 ## Ekran arayüzü
 
 Windows 11'in Fluent görünümünü ve Mica malzemesini kullanır, sistem

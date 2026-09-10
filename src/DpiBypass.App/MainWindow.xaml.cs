@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private bool _exiting;
     private bool _detached;
     private bool _contentRenderedSeen;
+    private bool _presenting;
 
     public MainWindow(MainViewModel viewModel, ThemeManager? theme)
     {
@@ -48,11 +49,14 @@ public partial class MainWindow : Window
 
         ((INotifyCollectionChanged)_viewModel.VisibleLogLines).CollectionChanged += OnLogLinesChanged;
 
-        // Hidden in the notification area, the only thing the counter timer produces is
-        // formatted text nobody can see. Protection and the network watch are untouched -
-        // this covers presentation and nothing else - and coming back re-reads at once so
-        // the window is current the moment it is on screen.
+        // Away in the notification area or shrunk to a taskbar button, the only thing the
+        // counter timer produces is formatted text nobody can see. Protection and the
+        // network watch are untouched - this covers presentation and nothing else - and
+        // coming back re-reads at once so the window is current the moment it is on
+        // screen. Off until the window is actually shown, because a launch that goes
+        // straight to the notification area never shows it at all.
         IsVisibleChanged += OnWindowVisibilityChanged;
+        _viewModel.SetPresentationActive(false);
 
         Loaded += OnWindowLoaded;
         Readiness = WindowReadiness.Created;
@@ -65,6 +69,16 @@ public partial class MainWindow : Window
 
     /// <summary>Raised on the UI thread the first time a frame reaches the screen.</summary>
     public event Action? FirstFrameRendered;
+
+    /// <summary>
+    /// Raised when the window starts or stops being on screen, with which of the two it is.
+    /// </summary>
+    /// <remarks>
+    /// Put away in the notification area and shrunk to a taskbar button are the same
+    /// event as far as anybody outside is concerned, and both are what "the app is in the
+    /// background" means to the person watching Task Manager.
+    /// </remarks>
+    public event Action<bool>? PresentationChanged;
 
     private void SelectValorantRttRegion_Click(object sender, RoutedEventArgs e)
     {
@@ -308,6 +322,7 @@ public partial class MainWindow : Window
         CloseToTrayRequested = null;
         ExitRequested = null;
         FirstFrameRendered = null;
+        PresentationChanged = null;
 
         try
         {
@@ -494,7 +509,42 @@ public partial class MainWindow : Window
     }
 
     private void OnWindowVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
-        => _viewModel.SetPresentationActive(e.NewValue is true);
+        => UpdatePresentationState();
+
+    protected override void OnStateChanged(EventArgs e)
+    {
+        base.OnStateChanged(e);
+        UpdatePresentationState();
+    }
+
+    /// <summary>
+    /// Tells the view model, and anybody watching, whether the window is really on screen.
+    /// </summary>
+    /// <remarks>
+    /// A minimised WPF window keeps <see cref="UIElement.IsVisible"/> true, so the
+    /// visibility event on its own could not tell a window the user had put away from one
+    /// they were reading: shrinking the app to a taskbar button left it formatting
+    /// counters every two seconds for a window with no pixels. Both ways out of sight now
+    /// report the same thing, and the transition is raised once rather than on every
+    /// restore and resize the window manager sends.
+    /// </remarks>
+    private void UpdatePresentationState()
+    {
+        if (_detached)
+        {
+            return;
+        }
+
+        var presenting = IsVisible && WindowState != WindowState.Minimized;
+        if (presenting == _presenting)
+        {
+            return;
+        }
+
+        _presenting = presenting;
+        _viewModel.SetPresentationActive(presenting);
+        PresentationChanged?.Invoke(presenting);
+    }
 
     private void OnLogLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {

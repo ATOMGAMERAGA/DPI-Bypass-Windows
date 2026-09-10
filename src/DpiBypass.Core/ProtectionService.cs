@@ -231,6 +231,7 @@ public sealed class ProtectionService : IAsyncDisposable
             defaultLatencyProbe = new GameAwareLatencyProbe(new LatencyProbe(), _valorantLatency);
             _latencyOptimizer = new LatencyOptimizer(
                 probe: defaultLatencyProbe,
+                monitorFactory: ShareNetworkWatch,
                 log: AppLog.InfoSink,
                 targets: new LatencyTargetResolver(log: AppLog.InfoSink, flows: _flowObserver));
         }
@@ -551,6 +552,34 @@ public sealed class ProtectionService : IAsyncDisposable
         Changed?.Invoke();
     }
 
+    /// <summary>
+    /// Lends the lifetime network watch to the latency lane instead of it starting a second one.
+    /// </summary>
+    /// <remarks>
+    /// Low latency mode used to create its own <see cref="NetworkMonitor"/>, so a machine
+    /// with the mode switched on ran two watches that each enumerated every adapter, its
+    /// addresses and its byte counters, asked the wireless stack for the association and
+    /// looked the gateway up in the ARP table - every ten seconds, for ever, to reach the
+    /// same answer. One watch now serves both. The lane gets a non-owning view, so
+    /// switching the mode off no longer takes the network name away from the rest of the
+    /// app; and if the lifetime watch could not be started at all the lane still falls
+    /// back to one of its own rather than losing roaming detection.
+    /// </remarks>
+    private INetworkWatch ShareNetworkWatch()
+    {
+        StartNetworkWatch();
+
+        lock (_networkWatchGate)
+        {
+            if (_monitor is { } shared)
+            {
+                return new SharedNetworkWatch(shared);
+            }
+        }
+
+        return new NetworkMonitor(log: AppLog.InfoSink);
+    }
+
     /// <summary>Ends the lifetime network watch. Safe to call more than once.</summary>
     private void StopNetworkWatch()
     {
@@ -716,8 +745,21 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         run.Source.Dispose();
+        ReleaseIdleLatencyResources();
         Changed?.Invoke();
     }
+
+    /// <summary>
+    /// Hands back what a finished latency run was holding only for its own sake.
+    /// </summary>
+    /// <remarks>
+    /// The screen reader's OCR engine is the expensive one: a four megabyte model that
+    /// becomes tens of megabytes of native allocations, loaded on the first frame of a
+    /// VALORANT measurement and, until now, never let go of again. Runs are minutes
+    /// apart at best and usually hours, so holding it between them is the app sitting in
+    /// the notification area with a language model resident for nothing.
+    /// </remarks>
+    private void ReleaseIdleLatencyResources() => _valorantLatency?.ReleaseIdleResources();
 
     /// <summary>One latency operation: its cancellation source and its stamp.</summary>
     private readonly record struct LatencyRun(CancellationTokenSource Source, int Generation)
@@ -816,6 +858,7 @@ public sealed class ProtectionService : IAsyncDisposable
             }
 
             run.Dispose();
+            ReleaseIdleLatencyResources();
             _latencyGate.Release();
             Changed?.Invoke();
         }

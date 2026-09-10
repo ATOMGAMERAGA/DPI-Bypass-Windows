@@ -26,6 +26,18 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishReadyToRun>true</PublishReadyToRun>
     <DebugType>embedded</DebugType>
+    <!-- The memory shape of the running app, written down rather than left to whatever
+         the SDK defaults to next. Server GC gives a process one heap and one dedicated
+         thread per core, which on a modern machine is hundreds of megabytes reserved for
+         a desktop app whose live set is a few tens; it must never be switched on here.
+         Concurrent GC deliberately stays on: the packet path and the latency lane both
+         pay for a blocking gen2 pause, and that is worth more than the larger gen0
+         budget it costs. Retaining VM would keep freed segments on a standby list
+         instead of returning them, which is the opposite of what this app wants while it
+         sits in the notification area. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <RetainVMGarbageCollection>false</RetainVMGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
