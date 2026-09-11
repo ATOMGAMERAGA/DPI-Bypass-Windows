@@ -70,15 +70,56 @@ public sealed class BypassEngine : IDisposable
 
     private const int MaxPacket = 65535;
 
+    /// <summary>
+    /// How many re-injections the driver may refuse in a row before the filter is released.
+    /// </summary>
+    /// <remarks>
+    /// A refused packet is a lost packet, and TCP retransmits lost packets - so a handful
+    /// of them while a route is being rebuilt costs a retransmit each and nothing else.
+    /// Releasing the filter, on the other hand, takes protection off the machine until
+    /// something notices and rebuilds it. The threshold is what separates the two: a run
+    /// this long is not a moving route, it is a handle that has stopped working.
+    /// </remarks>
+    private const int MaxConsecutiveSendFailures = 64;
+
+    /// <summary>How many receive errors in a row before the handle is treated as finished.</summary>
+    private const int MaxConsecutiveReceiveFailures = 8;
+
+    /// <summary>How many rewrite failures in a row before the filter is released.</summary>
+    private const int MaxConsecutiveRewriteFailures = 16;
+
+    /// <summary>How long a worker must survive for its restart budget to be forgiven.</summary>
+    private static readonly TimeSpan HealthyWorkerLifetime = TimeSpan.FromMinutes(1);
+
+    /// <summary>How many times a dead worker is replaced before the handle is given up on.</summary>
+    private const int MaxWorkerRestarts = 8;
+
+    /// <summary>Breathing space between a worker dying and its replacement starting.</summary>
+    private static readonly TimeSpan RestartPause = TimeSpan.FromMilliseconds(250);
+
     private readonly TargetMatcher _matcher;
     private readonly ProcessPortMap? _portMap;
     private readonly Action<string>? _log;
+    private readonly Lock _workerGate = new();
+
+    /// <summary>
+    /// Serialises opening and closing the driver.
+    /// </summary>
+    /// <remarks>
+    /// Start and stop used to be reached only from the service's own gate, one at a time.
+    /// The watchdog reopens a filter that released itself, and it does so from a
+    /// background tick rather than from that gate, so a restart and a shutdown can now
+    /// arrive at the same moment. Reentrant on purpose: a restart is a stop and a start.
+    /// </remarks>
+    private readonly Lock _lifecycleGate = new();
     private readonly List<Thread> _workers = [];
 
     private CancellationTokenSource _stopping = new();
     private WinDivertHandle? _tcpHandle;
     private WinDivertHandle? _quicHandle;
     private volatile BypassStrategy _strategy = StrategyLibrary.Default;
+    private int _workerCount;
+    private volatile bool _disposed;
 
     public BypassEngine(TargetMatcher matcher, ProcessPortMap? portMap = null, Action<string>? log = null)
     {
@@ -112,9 +153,28 @@ public sealed class BypassEngine : IDisposable
     /// <summary>Raised the first time each hostname is rewritten. Used for the activity list.</summary>
     public event Action<string, string>? HostRewritten;
 
+    /// <summary>
+    /// Raised when the engine has let a filter go without having been asked to stop.
+    /// </summary>
+    /// <remarks>
+    /// Traffic is flowing again by the time this fires - releasing the handle is what
+    /// makes that true - but it is flowing unprotected, and nothing else in the process
+    /// would otherwise know. The service listens for it so a filter that died on its own
+    /// is reopened rather than quietly missing for the rest of the session.
+    /// </remarks>
+    public event Action<string>? Faulted;
+
     public void Start(int workerCount = 0)
     {
-        if (IsRunning)
+        lock (_lifecycleGate)
+        {
+            StartCore(workerCount);
+        }
+    }
+
+    private void StartCore(int workerCount)
+    {
+        if (IsRunning || _disposed)
         {
             return;
         }
@@ -127,33 +187,76 @@ public sealed class BypassEngine : IDisposable
 
         // WinDivert rejects an IPv4-only filter clause on machines without IPv4, and
         // some builds are pickier than others about the "ip and" prefix, so fall back.
-        _tcpHandle = OpenWithFallback();
+        var tcpHandle = OpenWithFallback();
 
-        // Deeper queues make bursts (a browser opening thirty connections at once)
-        // safe without us having to keep up in real time.
-        _tcpHandle.SetParam(WinDivertParam.QueueLength, 8192);
-        _tcpHandle.SetParam(WinDivertParam.QueueTime, 2000);
-        _tcpHandle.SetParam(WinDivertParam.QueueSize, 16 * 1024 * 1024);
+        try
+        {
+            // Deeper queues make bursts (a browser opening thirty connections at once)
+            // safe without us having to keep up in real time.
+            tcpHandle.SetParam(WinDivertParam.QueueLength, 8192);
+            tcpHandle.SetParam(WinDivertParam.QueueTime, 2000);
+            tcpHandle.SetParam(WinDivertParam.QueueSize, 16 * 1024 * 1024);
+        }
+        catch (Exception)
+        {
+            // A handle nobody reads still takes packets out of the stack. A start that
+            // cannot finish must not leave one behind - especially now that a failed
+            // start can be retried by the watchdog every few seconds.
+            tcpHandle.Dispose();
+            throw;
+        }
+
+        _tcpHandle = tcpHandle;
 
         // Opened regardless of the current setting so the toggle takes effect
         // immediately instead of waiting for a restart. With the narrow filter above
         // this costs a handful of packets per new QUIC connection.
         _quicHandle = TryOpenQuicHandle();
 
-        var tcpGroup = new WorkerGroup(_tcpHandle);
+        var tcpGroup = new WorkerGroup(tcpHandle, "TCP");
         var threads = workerCount > 0 ? workerCount : Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
+        _workerCount = threads;
         for (var i = 0; i < threads; i++)
         {
-            StartWorker($"DpiBypass.Tcp{i}", () => TcpLoop(_tcpHandle), tcpGroup);
+            StartWorker($"DpiBypass.Tcp{i}", () => TcpLoop(tcpHandle), tcpGroup);
         }
 
-        if (_quicHandle is not null)
+        if (_quicHandle is { } quicHandle)
         {
-            StartWorker("DpiBypass.Quic", () => QuicLoop(_quicHandle), new WorkerGroup(_quicHandle));
+            StartWorker("DpiBypass.Quic", () => QuicLoop(quicHandle), new WorkerGroup(quicHandle, "QUIC"));
         }
 
         Stats.StartedAt = DateTimeOffset.UtcNow;
         _log?.Invoke($"Engine running with {threads} worker thread(s); strategy '{_strategy.Id}'.");
+    }
+
+    /// <summary>
+    /// Closes whatever is left of the previous run and opens the driver again.
+    /// </summary>
+    /// <remarks>
+    /// Restarting in place rather than building a replacement engine is deliberate: the
+    /// discovery pass, the tuner's leases and the status page all hold this object, and
+    /// swapping it out from underneath them would leave each of them pointed at an engine
+    /// nobody is running. The counters carry over for the same reason - they describe the
+    /// session, not the handle.
+    /// </remarks>
+    /// <returns>True when the filter is open again.</returns>
+    public bool Restart()
+    {
+        lock (_lifecycleGate)
+        {
+            if (_disposed)
+            {
+                // A shutdown got here first. Reopening the driver now would install a
+                // rule with nobody left to close it.
+                return false;
+            }
+
+            var workers = _workerCount;
+            StopCore();
+            StartCore(workers);
+            return IsRunning;
+        }
     }
 
     private WinDivertHandle? TryOpenQuicHandle()
@@ -243,45 +346,24 @@ public sealed class BypassEngine : IDisposable
     /// Counting readers per handle lets the last one out close it, which downgrades
     /// that into traffic flowing unprotected: worse protection, working internet.
     /// </remarks>
-    private sealed class WorkerGroup(WinDivertHandle handle)
+    private sealed class WorkerGroup(WinDivertHandle handle, string role)
     {
         public WinDivertHandle Handle { get; } = handle;
 
+        /// <summary>What this filter carries, for the log line and the fault message.</summary>
+        public string Role { get; } = role;
+
         public int Live;
+
+        /// <summary>Replacements started for this filter since the last healthy stretch.</summary>
+        public int Restarts;
     }
 
     private void StartWorker(string name, Action body, WorkerGroup group)
     {
         Interlocked.Increment(ref group.Live);
 
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                body();
-            }
-            catch (Exception ex)
-            {
-                Stats.AddError();
-                _log?.Invoke($"{name} stopped: {ex.Message}");
-            }
-            finally
-            {
-                if (Interlocked.Decrement(ref group.Live) == 0 && !_stopping.IsCancellationRequested)
-                {
-                    _log?.Invoke($"{name} was the last reader on its filter; releasing it so traffic flows again.");
-
-                    try
-                    {
-                        group.Handle.Dispose();
-                    }
-                    catch (Exception)
-                    {
-                        // Already gone; the point was only to stop diverting.
-                    }
-                }
-            }
-        })
+        var thread = new Thread(() => RunWorker(name, body, group))
         {
             IsBackground = true,
             Name = name,
@@ -289,21 +371,135 @@ public sealed class BypassEngine : IDisposable
             Priority = ThreadPriority.AboveNormal,
         };
 
-        _workers.Add(thread);
-        thread.Start();
+        lock (_workerGate)
+        {
+            // Threads that have already finished are only holding the list open; a
+            // filter that has been through a few replacements would otherwise grow it
+            // for the life of the process. Started inside the lock so a thread that has
+            // been added but not yet started cannot be swept out by the next caller and
+            // left running with nobody to join it.
+            _workers.RemoveAll(existing => !existing.IsAlive);
+            _workers.Add(thread);
+            thread.Start();
+        }
+    }
+
+    /// <summary>
+    /// Runs one reader, and makes sure the filter is never left with nobody on it.
+    /// </summary>
+    /// <remarks>
+    /// A reader can come back for two reasons. Either the handle is finished - we shut it
+    /// down, or the driver did - and there is nothing to replace; or the thread fell over
+    /// on its own, in which case the filter is still diverting into a queue this reader
+    /// was draining. The second case used to be the one that hurt: with the last reader
+    /// gone the handle was released, protection disappeared, and the only sign of it was
+    /// one line in the log. A replacement is started instead, and only a filter that
+    /// cannot keep a reader alive is given up on.
+    /// </remarks>
+    private void RunWorker(string name, Action body, WorkerGroup group)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+
+        try
+        {
+            body();
+        }
+        catch (Exception ex)
+        {
+            Stats.AddError();
+            _log?.Invoke($"{name} stopped: {ex.Message}");
+        }
+        finally
+        {
+            var replaced = TryReplaceWorker(name, body, group, DateTimeOffset.UtcNow - startedAt);
+
+            if (Interlocked.Decrement(ref group.Live) == 0 && !_stopping.IsCancellationRequested && !replaced)
+            {
+                _log?.Invoke($"{name} was the last reader on its filter; releasing it so traffic flows again.");
+
+                try
+                {
+                    group.Handle.Dispose();
+                }
+                catch (Exception)
+                {
+                    // Already gone; the point was only to stop diverting.
+                }
+
+                RaiseFaulted(group.Role);
+            }
+        }
+    }
+
+    /// <summary>Starts a replacement for a reader that came back while its filter is live.</summary>
+    private bool TryReplaceWorker(string name, Action body, WorkerGroup group, TimeSpan lifetime)
+    {
+        if (_stopping.IsCancellationRequested || group.Handle.IsShutdown || !group.Handle.IsOpen)
+        {
+            return false;
+        }
+
+        if (lifetime >= HealthyWorkerLifetime)
+        {
+            // It did its job for a while before something knocked it over. A budget
+            // spent minutes or hours ago says nothing about the filter's health now.
+            Interlocked.Exchange(ref group.Restarts, 0);
+        }
+
+        if (Interlocked.Increment(ref group.Restarts) > MaxWorkerRestarts)
+        {
+            _log?.Invoke(
+                $"{name} could not be kept alive after {MaxWorkerRestarts} attempts; "
+                + "the filter will be released so traffic flows.");
+            group.Handle.Shutdown();
+            return false;
+        }
+
+        // Not a busy loop: whatever knocked the reader over is usually still true for a
+        // moment afterwards, and the replacement should not meet it at full speed.
+        try
+        {
+            Thread.Sleep(RestartPause);
+        }
+        catch (Exception)
+        {
+            // A thread being torn down; the replacement below is still worth starting.
+        }
+
+        if (_stopping.IsCancellationRequested || group.Handle.IsShutdown || !group.Handle.IsOpen)
+        {
+            return false;
+        }
+
+        _log?.Invoke($"{name} came back unexpectedly; starting a replacement reader.");
+        StartWorker(name, body, group);
+        return true;
+    }
+
+    private void RaiseFaulted(string role)
+    {
+        try
+        {
+            Faulted?.Invoke(role);
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"Engine fault observer failed: {ex.Message}");
+        }
     }
 
     private void TcpLoop(WinDivertHandle handle)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(MaxPacket);
         var scratch = ArrayPool<byte>.Shared.Rent(MaxPacket);
+        var health = new LoopHealth();
 
         try
         {
             while (!_stopping.IsCancellationRequested)
             {
                 var address = default(WinDivertAddress);
-                if (!handle.Receive(buffer.AsSpan(0, MaxPacket), out var length, ref address))
+                if (!TryReceive(handle, buffer, health, out var length, ref address))
                 {
                     return;
                 }
@@ -319,18 +515,34 @@ public sealed class BypassEngine : IDisposable
                 {
                     if (!TryRewrite(handle, packet, scratch, ref address))
                     {
-                        if (!TryForward(handle, packet, ref address))
+                        if (!Forward(handle, packet, health, ref address))
                         {
                             return;
                         }
                     }
+
+                    health.Rewrites = 0;
                 }
                 catch (Exception ex)
                 {
+                    // Nothing below the planner throws by design, so this is the net for a
+                    // packet nobody predicted. The packet is dropped rather than replayed -
+                    // segments may already be in the connection's sequence space, and the
+                    // sender retransmits what never arrived. Only a filter that cannot get
+                    // through a run of them is released.
                     Stats.AddError();
-                    _log?.Invoke($"Packet rewrite failed; stopping the filter to avoid an unsafe replay: {ex.Message}");
-                    handle.Shutdown();
-                    return;
+                    health.Rewrites++;
+
+                    if (health.Rewrites > MaxConsecutiveRewriteFailures)
+                    {
+                        _log?.Invoke(
+                            $"Packet rewrite failed {health.Rewrites} times in a row; releasing the filter "
+                            + $"so traffic flows: {ex.Message}");
+                        handle.Shutdown();
+                        return;
+                    }
+
+                    _log?.Invoke($"Packet rewrite failed; dropping this packet and carrying on: {ex.Message}");
                 }
             }
         }
@@ -341,17 +553,95 @@ public sealed class BypassEngine : IDisposable
         }
     }
 
-    private bool TryForward(WinDivertHandle handle, ReadOnlySpan<byte> packet, ref WinDivertAddress address)
+    /// <summary>
+    /// Reads one packet, absorbing the errors that describe a moment rather than a handle.
+    /// </summary>
+    /// <returns>False when the reader should stop.</returns>
+    private bool TryReceive(
+        WinDivertHandle handle,
+        byte[] buffer,
+        LoopHealth health,
+        out int length,
+        ref WinDivertAddress address)
     {
-        if (handle.Send(packet, ref address))
+        length = 0;
+
+        try
         {
+            if (!handle.Receive(buffer.AsSpan(0, MaxPacket), out length, ref address))
+            {
+                return false;
+            }
+
+            health.Receives = 0;
+            return true;
+        }
+        catch (WinDivertException ex)
+        {
+            Stats.AddError();
+            health.Receives++;
+
+            if (health.Receives > MaxConsecutiveReceiveFailures)
+            {
+                _log?.Invoke(
+                    $"WinDivert refused {health.Receives} reads in a row ({ex.NativeErrorCode}); "
+                    + "releasing the filter so traffic flows.");
+                handle.Shutdown();
+                return false;
+            }
+
+            _log?.Invoke($"WinDivert read failed ({ex.NativeErrorCode}); retrying.");
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Re-injects a packet the engine is not rewriting.
+    /// </summary>
+    /// <remarks>
+    /// A driver that refuses one packet is refusing one packet: the route moved, the
+    /// adapter is coming back, the non-paged pool is briefly full. TCP retransmits, and
+    /// the connection carries on. This used to release the whole filter on the first
+    /// refusal, so a Wi-Fi roam could take protection off the machine for the rest of the
+    /// session with nothing but a log line to say so.
+    /// </remarks>
+    /// <returns>False when the reader should stop.</returns>
+    private bool Forward(WinDivertHandle handle, ReadOnlySpan<byte> packet, LoopHealth health, ref WinDivertAddress address)
+    {
+        if (handle.Send(packet, ref address, out var error))
+        {
+            health.Sends = 0;
             return true;
         }
 
         Stats.AddError();
-        _log?.Invoke("WinDivert could not re-inject a pass-through packet; stopping the filter.");
+        health.Sends++;
+
+        if (health.Sends <= MaxConsecutiveSendFailures && WinDivertHandle.IsTransientSendError(error))
+        {
+            if (health.Sends == 1)
+            {
+                _log?.Invoke($"WinDivert refused a pass-through packet (error {error}); dropping it and carrying on.");
+            }
+
+            return true;
+        }
+
+        _log?.Invoke(
+            $"WinDivert refused {health.Sends} pass-through packet(s) in a row (error {error}); "
+            + "releasing the filter so traffic flows.");
         handle.Shutdown();
         return false;
+    }
+
+    /// <summary>Consecutive failure counts for one reader. Never shared between threads.</summary>
+    private sealed class LoopHealth
+    {
+        public int Receives;
+
+        public int Sends;
+
+        public int Rewrites;
     }
 
     /// <summary>Returns true when the packet was replaced (and must not be forwarded as-is).</summary>
@@ -397,7 +687,7 @@ public sealed class BypassEngine : IDisposable
 
         var imagePath = _portMap?.GetImagePath(parsed.SourcePort);
 
-        if (!_matcher.ShouldProtect(hostName, imagePath))
+        if (!_matcher.ShouldProtect(hostName, imagePath, parsed.SourcePort))
         {
             Stats.AddPassedThrough();
             return false;
@@ -410,7 +700,20 @@ public sealed class BypassEngine : IDisposable
             return false;
         }
 
-        var plan = DesyncPlanner.Plan(strategy, payload, isTls, hostName);
+        DesyncPlan plan;
+        try
+        {
+            plan = DesyncPlanner.Plan(strategy, payload, isTls, hostName);
+        }
+        catch (Exception ex)
+        {
+            // Nothing has been injected yet, so the safe answer is the one the user would
+            // get with the app uninstalled: let the original packet through untouched.
+            Stats.AddError();
+            _log?.Invoke($"Could not plan a rewrite for '{hostName ?? "?"}'; passing the handshake through: {ex.Message}");
+            return false;
+        }
+
         if (plan.IsNoOp)
         {
             Stats.AddPassedThrough();
@@ -566,13 +869,14 @@ public sealed class BypassEngine : IDisposable
     private void QuicLoop(WinDivertHandle handle)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(MaxPacket);
+        var health = new LoopHealth();
 
         try
         {
             while (!_stopping.IsCancellationRequested)
             {
                 var address = default(WinDivertAddress);
-                if (!handle.Receive(buffer.AsSpan(0, MaxPacket), out var length, ref address))
+                if (!TryReceive(handle, buffer, health, out var length, ref address))
                 {
                     return;
                 }
@@ -586,7 +890,7 @@ public sealed class BypassEngine : IDisposable
 
                 if (address.Impostor || !ShouldDropQuic(packet))
                 {
-                    if (!TryForward(handle, packet, ref address))
+                    if (!Forward(handle, packet, health, ref address))
                     {
                         return;
                     }
@@ -650,7 +954,26 @@ public sealed class BypassEngine : IDisposable
 
     public void Stop()
     {
-        if (!IsRunning && _quicHandle is null)
+        lock (_lifecycleGate)
+        {
+            StopCore();
+        }
+    }
+
+    private void StopCore()
+    {
+        Thread[] workers;
+        lock (_workerGate)
+        {
+            workers = [.. _workers];
+            _workers.Clear();
+        }
+
+        // A filter that released itself leaves a disposed handle in the field and no live
+        // readers, and that state still has to be cleaned up before the engine can be
+        // opened again - so "nothing to do" is decided on what is actually here, not on
+        // whether the handle happens to be open.
+        if (_tcpHandle is null && _quicHandle is null && workers.Length == 0)
         {
             return;
         }
@@ -659,12 +982,24 @@ public sealed class BypassEngine : IDisposable
         _tcpHandle?.Shutdown();
         _quicHandle?.Shutdown();
 
-        foreach (var worker in _workers)
+        foreach (var worker in workers)
         {
             worker.Join(TimeSpan.FromSeconds(2));
         }
 
-        _workers.Clear();
+        // A replacement started while the shutdown was in flight is joined too: leaving
+        // one behind would mean the next start opens a second handle at the same priority
+        // with the previous reader still on the old one.
+        lock (_workerGate)
+        {
+            workers = [.. _workers];
+            _workers.Clear();
+        }
+
+        foreach (var worker in workers)
+        {
+            worker.Join(TimeSpan.FromSeconds(2));
+        }
 
         _tcpHandle?.Dispose();
         _tcpHandle = null;
@@ -676,7 +1011,11 @@ public sealed class BypassEngine : IDisposable
 
     public void Dispose()
     {
-        Stop();
-        _stopping.Dispose();
+        lock (_lifecycleGate)
+        {
+            _disposed = true;
+            StopCore();
+            _stopping.Dispose();
+        }
     }
 }

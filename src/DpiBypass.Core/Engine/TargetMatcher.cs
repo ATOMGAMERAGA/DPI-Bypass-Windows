@@ -76,7 +76,24 @@ public sealed class TargetMatcher
 
     public volatile string? ProbeForcedHost;
 
-    public bool ShouldProtect(string? hostName, string? imagePath)
+    /// <summary>
+    /// The local port of the probe's own connection, when the probe knows it.
+    /// </summary>
+    /// <remarks>
+    /// Naming the host was not narrow enough. The control arm has to reach the site with
+    /// no bypass applied - that is the whole measurement - but the site being measured is
+    /// one the machine looked up seconds ago, which means the user is very likely opening
+    /// it in a browser at that exact moment. Their handshake matched the passthrough too,
+    /// went out untouched, and was reset by the inspector: a page that failed to load for
+    /// no reason the user could see. Scoping the exemption to the socket the probe itself
+    /// opened keeps the measurement honest and leaves every other connection to the same
+    /// site protected. Zero means "not known", which is the old behaviour.
+    /// </remarks>
+    public volatile int ProbePassthroughPort;
+
+    public bool ShouldProtect(string? hostName, string? imagePath) => ShouldProtect(hostName, imagePath, 0);
+
+    public bool ShouldProtect(string? hostName, string? imagePath, ushort sourcePort)
     {
         if (hostName is not null && IsExcluded(hostName))
         {
@@ -88,7 +105,13 @@ public sealed class TargetMatcher
             // Checked before the scope so a probe measures what it means to measure.
             if (string.Equals(hostName, ProbePassthroughHost, StringComparison.OrdinalIgnoreCase))
             {
-                return false;
+                // Read once: the probe clears it from another thread the moment its
+                // measurement is over.
+                var probePort = ProbePassthroughPort;
+                if (probePort == 0 || probePort == sourcePort)
+                {
+                    return false;
+                }
             }
 
             if (string.Equals(hostName, ProbeForcedHost, StringComparison.OrdinalIgnoreCase))

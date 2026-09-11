@@ -18,8 +18,21 @@ public sealed class DnsProxyServer : IAsyncDisposable
 {
     private const int MaxUdpResponse = 4096;
     private const int MaxCacheEntries = 4096;
-    private const int MaxConcurrentQueries = 128;
-    private static readonly TimeSpan MaxStale = TimeSpan.FromMinutes(5);
+    private const int MaxConcurrentQueries = 256;
+
+    /// <summary>
+    /// How far past its own TTL an answer may still be handed out when nothing upstream
+    /// is answering.
+    /// </summary>
+    /// <remarks>
+    /// RFC 8767's whole point: while the resolvers are unreachable, a slightly old address
+    /// is worth far more than a failure, because the failure is what the user experiences
+    /// as the internet having stopped. Five minutes was short enough that a DoH outage of
+    /// any real length - an operator throttling 443, a hotel portal, a link that flaps for
+    /// a quarter of an hour - took name resolution off the machine with it. This only ever
+    /// applies after every endpoint in the chain has already failed.
+    /// </remarks>
+    private static readonly TimeSpan MaxStale = TimeSpan.FromHours(1);
 
     /// <summary>How long one query on a TCP connection may take from prefix to answer.</summary>
     private static readonly TimeSpan TcpQueryTimeout = TimeSpan.FromSeconds(5);
@@ -63,6 +76,8 @@ public sealed class DnsProxyServer : IAsyncDisposable
     private long _partialSends;
     private long _crossNetworkDrops;
     private long _sinkholed;
+    private long _overCapacity;
+    private long _staleAnswers;
 
     public DnsProxyServer(DohResolver resolver, Action<string>? log = null)
     {
@@ -70,7 +85,48 @@ public sealed class DnsProxyServer : IAsyncDisposable
         _log = log;
     }
 
+    /// <summary>
+    /// Where the cache reads the time from.
+    /// </summary>
+    /// <remarks>
+    /// Only the tests replace it. Whether an answer is fresh, stale-but-usable or too old
+    /// to hand out at all is entirely a question of elapsed time, and the alternative to a
+    /// seam here is a test that sits still for an hour to find out.
+    /// </remarks>
+    internal TimeProvider Clock { get; init; } = TimeProvider.System;
+
     public bool IsRunning { get; private set; }
+
+    /// <summary>
+    /// True while every listener this proxy bound is still being served.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="IsRunning"/> only says the proxy was started and not yet disposed. If a
+    /// listener loop ends on its own - a socket torn down under it by an adapter reset, an
+    /// exception nobody predicted - the port stays bound and every query aimed at it goes
+    /// unanswered, which on a machine whose resolvers point at 127.0.0.1 is the whole of
+    /// name resolution. The watchdog rebuilds the proxy on this.
+    /// </remarks>
+    public bool IsHealthy
+    {
+        get
+        {
+            if (!IsRunning)
+            {
+                return false;
+            }
+
+            foreach (var worker in _workers)
+            {
+                if (worker.IsCompleted)
+                {
+                    return false;
+                }
+            }
+
+            return _workers.Count > 0;
+        }
+    }
 
     public Func<bool>? SuppressIPv6Answers { get; init; }
 
@@ -101,6 +157,12 @@ public sealed class DnsProxyServer : IAsyncDisposable
     /// <summary>Questions answered locally because the name is on the block list.</summary>
     public long SinkholedAnswers => Interlocked.Read(ref _sinkholed);
 
+    /// <summary>Queries answered without a request slot, from cache or as SERVFAIL.</summary>
+    public long OverCapacityAnswers => Interlocked.Read(ref _overCapacity);
+
+    /// <summary>Answers handed out past their TTL because nothing upstream would answer.</summary>
+    public long StaleAnswers => Interlocked.Read(ref _staleAnswers);
+
     public int Port { get; private set; } = 53;
 
     /// <summary>True when the IPv6 loopback listeners came up too.</summary>
@@ -126,6 +188,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
         try
         {
             _udp4 = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            IgnoreConnectionResets(_udp4);
             _udp4.Bind(new IPEndPoint(IPAddress.Loopback, port));
 
             _tcp4 = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -143,6 +206,7 @@ public sealed class DnsProxyServer : IAsyncDisposable
         try
         {
             _udp6 = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp);
+            IgnoreConnectionResets(_udp6);
             _udp6.Bind(new IPEndPoint(IPAddress.IPv6Loopback, port));
 
             // Windows retries over TCP whenever an answer comes back truncated, so a
@@ -175,6 +239,37 @@ public sealed class DnsProxyServer : IAsyncDisposable
         IsRunning = true;
         _log?.Invoke($"DNS proxy listening on 127.0.0.1:{port} (UDP + TCP).");
         return true;
+    }
+
+    /// <summary>SIO_UDP_CONNRESET, which Windows leaves on for datagram sockets.</summary>
+    private const int SioUdpConnectionReset = -1744830452;
+
+    /// <summary>
+    /// Stops a client that walked away from breaking the next read.
+    /// </summary>
+    /// <remarks>
+    /// Windows turns the ICMP port-unreachable that comes back from an abandoned client
+    /// into a WSAECONNRESET on the server's *next* receive - an error about a datagram
+    /// nobody is waiting for any more, raised against the socket the whole machine
+    /// resolves names through. A resolver that gives up on a query and closes its socket
+    /// is completely ordinary, so this is not an edge case; it is the default behaviour
+    /// every Windows UDP server has to switch off.
+    /// </remarks>
+    private static void IgnoreConnectionResets(Socket socket)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            socket.IOControl(SioUdpConnectionReset, [0, 0, 0, 0], null);
+        }
+        catch (Exception)
+        {
+            // Not supported here; the receive loop absorbs the resets instead.
+        }
     }
 
     private async Task ServeUdpAsync(Socket socket, CancellationToken cancellationToken)
@@ -212,8 +307,19 @@ public sealed class DnsProxyServer : IAsyncDisposable
             {
                 try
                 {
-                    var failure = BuildServerFailure(query);
-                    await socket.SendToAsync(failure, SocketFlags.None, sender, cancellationToken).ConfigureAwait(false);
+                    // A burst is exactly when the machine is least able to afford a
+                    // failure, and an answer already in hand costs nothing to hand out.
+                    // Only a name that has never been resolved here falls through to
+                    // SERVFAIL, which is the honest answer for one nobody can look up.
+                    var answer = AnswerFromCache(query, allowStale: true) ?? BuildServerFailure(query);
+                    if (answer.Length > clientLimit)
+                    {
+                        answer = DnsMessage.BuildTruncatedResponse(answer);
+                        Interlocked.Increment(ref _truncated);
+                    }
+
+                    Interlocked.Increment(ref _overCapacity);
+                    await socket.SendToAsync(answer, SocketFlags.None, sender, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
@@ -486,13 +592,10 @@ public sealed class DnsProxyServer : IAsyncDisposable
         }
 
         var hasCached = _cache.TryGetValue(key, out var cached);
-        if (hasCached && cached!.Expires > DateTimeOffset.UtcNow)
+        if (hasCached && cached!.Expires > Clock.GetUtcNow())
         {
             Interlocked.Increment(ref _cacheHits);
-            cached!.Touch();
-            var reply = DnsMessage.AgeResponseTtls(cached.Response, DateTimeOffset.UtcNow - cached.StoredAt);
-            DnsMessage.SetId(reply, id);
-            return reply;
+            return Serve(cached, id, Clock.GetUtcNow());
         }
 
         // Read before the query and compared after it. A lookup that started on the
@@ -506,12 +609,11 @@ public sealed class DnsProxyServer : IAsyncDisposable
         {
             // Serve a stale answer rather than nothing - a slightly old IP beats a
             // dead name lookup while the operator is throttling us.
-            if (hasCached && DateTimeOffset.UtcNow - cached!.Expires <= MaxStale)
+            var now = Clock.GetUtcNow();
+            if (hasCached && now - cached!.Expires <= MaxStale)
             {
-                cached!.Touch();
-                var stale = DnsMessage.AgeResponseTtls(cached.Response, DateTimeOffset.UtcNow - cached.StoredAt);
-                DnsMessage.SetId(stale, id);
-                return stale;
+                Interlocked.Increment(ref _staleAnswers);
+                return Serve(cached, id, now);
             }
 
             return BuildServerFailure(query);
@@ -525,11 +627,11 @@ public sealed class DnsProxyServer : IAsyncDisposable
         if (DnsMessage.GetResponseCode(response) == 0 && _resolver.Epoch == epoch)
         {
             var ttl = DnsMessage.GetMinimumTtl(response);
-            var now = DateTimeOffset.UtcNow;
+            var storedAt = Clock.GetUtcNow();
             lock (_cacheGate)
             {
-                _cache[key] = new CacheEntry(response.ToArray(), now.AddSeconds(ttl), now);
-                PruneIfLarge();
+                _cache[key] = new CacheEntry(response.ToArray(), storedAt.AddSeconds(ttl), storedAt);
+                PruneIfLarge(storedAt);
             }
         }
         else if (_resolver.Epoch != epoch)
@@ -540,6 +642,46 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
         DnsMessage.SetId(response, id);
         return response;
+    }
+
+    /// <summary>
+    /// The best answer the cache can give for a query, or null when it has none.
+    /// </summary>
+    /// <remarks>
+    /// Used where there is no slot to resolve the query properly. A stale entry is offered
+    /// only because the alternative on that path is a failure, never in place of a lookup
+    /// that could have been made.
+    /// </remarks>
+    private byte[]? AnswerFromCache(byte[] query, bool allowStale)
+    {
+        if (!DnsMessage.TryBuildCacheKey(query, out var key) || !_cache.TryGetValue(key, out var entry))
+        {
+            return null;
+        }
+
+        var now = Clock.GetUtcNow();
+        if (entry.Expires > now)
+        {
+            Interlocked.Increment(ref _cacheHits);
+            return Serve(entry, DnsMessage.GetId(query), now);
+        }
+
+        if (!allowStale || now - entry.Expires > MaxStale)
+        {
+            return null;
+        }
+
+        Interlocked.Increment(ref _staleAnswers);
+        return Serve(entry, DnsMessage.GetId(query), now);
+    }
+
+    /// <summary>Copies a cached answer out for one client, aged and stamped with its ID.</summary>
+    private static byte[] Serve(CacheEntry entry, ushort id, DateTimeOffset now)
+    {
+        entry.Touch(now);
+        var reply = DnsMessage.AgeResponseTtls(entry.Response, now - entry.StoredAt);
+        DnsMessage.SetId(reply, id);
+        return reply;
     }
 
     private static byte[] BuildServerFailure(byte[] query)
@@ -555,14 +697,13 @@ public sealed class DnsProxyServer : IAsyncDisposable
         return response;
     }
 
-    private void PruneIfLarge()
+    private void PruneIfLarge(DateTimeOffset now)
     {
         if (_cache.Count < MaxCacheEntries)
         {
             return;
         }
 
-        var now = DateTimeOffset.UtcNow;
         foreach (var (key, entry) in _cache)
         {
             if (entry.Expires <= now)
@@ -661,6 +802,6 @@ public sealed class DnsProxyServer : IAsyncDisposable
 
         public DateTimeOffset LastAccess => new(Interlocked.Read(ref _lastAccess), TimeSpan.Zero);
 
-        public void Touch() => Interlocked.Exchange(ref _lastAccess, DateTimeOffset.UtcNow.UtcTicks);
+        public void Touch(DateTimeOffset now) => Interlocked.Exchange(ref _lastAccess, now.UtcTicks);
     }
 }

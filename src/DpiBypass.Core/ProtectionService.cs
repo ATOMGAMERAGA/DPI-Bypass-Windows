@@ -181,6 +181,22 @@ public sealed class ProtectionService : IAsyncDisposable
     private CancellationTokenSource? _lifetime;
     private Task? _networkWork;
     private Task? _recheckWork;
+    private Task? _healthWork;
+
+    /// <summary>
+    /// Wakes the health loop before its next tick.
+    /// </summary>
+    /// <remarks>
+    /// The loop's own cadence is what catches a part that died quietly. This is for the
+    /// cases where something announced itself - the engine raising its fault - and waiting
+    /// out the rest of the interval would leave the machine unprotected for no reason.
+    /// </remarks>
+    private readonly SemaphoreSlim _healthWake = new(0, 1);
+
+    private readonly RecoverySchedule _engineRecovery = new();
+    private readonly RecoverySchedule _portMapRecovery = new();
+    private readonly RecoverySchedule _dnsProxyRecovery = new();
+    private readonly RecoverySchedule _vodafoneRecovery = new();
     private CancellationTokenSource? _hotspotDiagnosticsCancellation;
     private CancellationTokenSource? _loadedLatencyCancellation;
 
@@ -291,6 +307,18 @@ public sealed class ProtectionService : IAsyncDisposable
     public IspDetection? Detection { get; private set; }
 
     public BypassStrategy Strategy => _engine?.Strategy ?? StrategyLibrary.Default;
+
+    /// <summary>
+    /// True while the service is meant to be protecting but its packet filter is not open.
+    /// </summary>
+    /// <remarks>
+    /// A window that says "Koruma etkin" over a released filter is the most misleading
+    /// thing this app can put on screen: the user's traffic is unprotected and the app is
+    /// telling them it is not. The watchdog is already reopening it when this is true;
+    /// what this exists for is to stop the headline claiming otherwise in the meantime.
+    /// </remarks>
+    public bool IsFilterDown => (State is ProtectionState.Running or ProtectionState.Degraded)
+        && _engine is { IsRunning: false };
 
     public DnsMode ActiveDnsMode => _dnsConfigurator?.CurrentMode ?? DnsMode.SystemDefault;
 
@@ -1249,7 +1277,15 @@ public sealed class ProtectionService : IAsyncDisposable
                     Strategy = ResolveInitialStrategy(),
                 };
                 _engine.HostRewritten += OnHostRewritten;
+                _engine.Faulted += OnEngineFaulted;
                 _engine.Start();
+
+                // A start is a clean slate: whatever the previous engine had to be
+                // rebuilt for is not this one's history.
+                _engineRecovery.Reset();
+                _portMapRecovery.Reset();
+                _dnsProxyRecovery.Reset();
+                _vodafoneRecovery.Reset();
 
                 _tuner = new StrategyTuner(_tester, AppLog.InfoSink);
                 _tuner.Progress += (name, index, total) => TuningProgress?.Invoke(name, index, total);
@@ -1259,12 +1295,6 @@ public sealed class ProtectionService : IAsyncDisposable
                     Enabled = Settings.AutoDiscoverBlockedSites,
                 };
                 _discovery.DomainLearned += OnDomainLearned;
-
-                if (_dnsProxy is not null)
-                {
-                    var token = lifetime.Token;
-                    _dnsProxy.NameResolved += name => _discovery?.Observe(name, token);
-                }
 
                 SetState(ProtectionState.Starting, "Ağ izleniyor…");
 
@@ -1300,6 +1330,7 @@ public sealed class ProtectionService : IAsyncDisposable
         var sessionToken = lifetime!.Token;
         _networkWork = _background.Track(Task.Run(() => InitialiseNetworkAsync(sessionToken), CancellationToken.None));
         _recheckWork = _background.Track(Task.Run(() => RecheckLoopAsync(sessionToken), CancellationToken.None));
+        _healthWork = _background.Track(Task.Run(() => HealthLoopAsync(sessionToken), CancellationToken.None));
     }
 
     private void OnDomainLearned(string domain)
@@ -1372,6 +1403,396 @@ public sealed class ProtectionService : IAsyncDisposable
         }
     }
 
+    /// <summary>How often the watchdog looks at the parts that can stop on their own.</summary>
+    private static readonly TimeSpan HealthInterval = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How far past its own interval a tick has to be late before the machine is taken
+    /// to have been asleep.
+    /// </summary>
+    private static readonly TimeSpan SleepThreshold = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Watches the three things that can stop without anybody noticing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The packet filter, the socket watcher and the loopback DNS listener all live on
+    /// their own threads and can end there. Until this loop existed nothing looked: a
+    /// filter released by a driver error left the window saying "Koruma etkin" over
+    /// traffic that had not been protected for hours, and a DNS listener that stopped
+    /// serving while the machine's resolvers still pointed at 127.0.0.1 read as a
+    /// perfectly healthy app with no working internet behind it. Those are precisely the
+    /// "it just cuts out sometimes" reports.
+    /// </para>
+    /// <para>
+    /// The tick doubles as a sleep detector. Timers do not run while a laptop is
+    /// suspended, so a tick that arrives far later than it was asked for is the clearest
+    /// signal available that the machine has been away - and everything the app was
+    /// keeping warm across that gap is stale.
+    /// </para>
+    /// </remarks>
+    private async Task HealthLoopAsync(CancellationToken cancellationToken)
+    {
+        var previousTick = DateTimeOffset.UtcNow;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await _healthWake.WaitAsync(HealthInterval, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var elapsed = now - previousTick;
+            previousTick = now;
+
+            if (elapsed > HealthInterval + SleepThreshold)
+            {
+                OnSystemResumed($"{elapsed.TotalMinutes:F0} dakikalık duraklama");
+            }
+
+            try
+            {
+                await CheckHealthAsync(now, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Sağlık denetimi hatası", ex);
+            }
+        }
+    }
+
+    /// <summary>Asks the health loop to run now instead of at its next tick.</summary>
+    private void WakeHealthLoop()
+    {
+        try
+        {
+            _healthWake.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // A wake is already queued, which is all one more would achieve.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Shutting down.
+        }
+    }
+
+    /// <summary>
+    /// The machine has just come back from sleep, or from long enough away that it makes
+    /// no difference.
+    /// </summary>
+    /// <remarks>
+    /// Public because the application layer hears about this first: Windows raises a
+    /// power event on resume, and acting on it is worth several seconds over waiting for
+    /// the health tick to work it out from the clock. Safe to call more than once for the
+    /// same wake - everything it does is a refresh.
+    /// </remarks>
+    public void OnSystemResumed(string reason)
+    {
+        AppLog.Info($"Uyanma algılandı ({reason}); bağlantı durumu yenileniyor.");
+
+        // Every pooled HTTPS connection to the resolvers died while the machine was
+        // away, and nothing on this side knows it yet. The first lookup after the lid
+        // opens would otherwise be dispatched onto a dead socket and wait out its whole
+        // budget, which is the pause people describe as the internet being slow to
+        // wake up. The cached answers go with them: they describe the link the machine
+        // went to sleep on.
+        _resolver?.OnResume();
+        _dnsProxy?.OnNetworkChanged();
+
+        // A resume does not always look like a network transition to the poller, and
+        // the adapter frequently comes back on a different lease than it went down on.
+        NetworkMonitor? monitor;
+        lock (_networkWatchGate)
+        {
+            monitor = _monitor;
+        }
+
+        try
+        {
+            monitor?.CheckNow();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Uyanma sonrası ağ denetimi başarısız", ex);
+        }
+
+        WakeHealthLoop();
+    }
+
+    /// <summary>Raised by the engine when it has let a filter go on its own.</summary>
+    private void OnEngineFaulted(string role)
+    {
+        AppLog.Warning(
+            $"{role} paket süzgeci kendiliğinden kapandı; trafik şu an korumasız akıyor. Yeniden açılacak.");
+
+        if (State == ProtectionState.Running)
+        {
+            SetState(ProtectionState.Degraded, "Paket süzgeci kapandı; yeniden açılıyor…");
+        }
+
+        // Do not wait out the rest of the tick with the machine unprotected.
+        WakeHealthLoop();
+    }
+
+    private async Task CheckHealthAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (State is not (ProtectionState.Running or ProtectionState.Degraded))
+        {
+            return;
+        }
+
+        RestartSocketWatcherIfNeeded(now);
+        ReapplyVodafoneModeIfNeeded(now);
+        await RestartDnsProxyIfNeededAsync(now, cancellationToken).ConfigureAwait(false);
+        await RestartEngineIfNeededAsync(now, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Puts the hotspot rule back up if its worker has gone.
+    /// </summary>
+    /// <remarks>
+    /// The TTL worker removes its own kernel rule when it ends, which is the right thing
+    /// to do - a rule with nobody draining it black-holes the adapter - but it leaves the
+    /// mode switched on in the settings with nothing running behind it, and the only way
+    /// back used to be moving networks or pressing the button. On a phone hotspot that is
+    /// the difference between the connection working and not.
+    /// </remarks>
+    private void ReapplyVodafoneModeIfNeeded(DateTimeOffset now)
+    {
+        if (!VodafoneModeWanted(Network))
+        {
+            _vodafoneRecovery.Reset();
+            return;
+        }
+
+        if (_ttlFix.IsActive)
+        {
+            _vodafoneRecovery.NoteHealthy(now);
+            return;
+        }
+
+        if (!_vodafoneRecovery.ShouldAttempt(now))
+        {
+            return;
+        }
+
+        AppLog.Warning("vodafone: TTL kuralı düşmüş; yeniden uygulanıyor.");
+        ApplyVodafoneMode();
+        _vodafoneRecovery.RecordAttempt(now, _ttlFix.IsActive);
+    }
+
+    /// <summary>
+    /// Reopens the socket-layer watcher when its reader has gone.
+    /// </summary>
+    /// <remarks>
+    /// Losing it does not stop traffic, so it never announces itself; it just means every
+    /// port comes back with no owner, and in the narrow scopes an unknown owner matches
+    /// nothing. Protection quietly stops applying to Discord while the app goes on saying
+    /// it is protecting Discord.
+    /// </remarks>
+    private void RestartSocketWatcherIfNeeded(DateTimeOffset now)
+    {
+        if (_portMap is not { } portMap)
+        {
+            return;
+        }
+
+        if (portMap.IsHealthy)
+        {
+            _portMapRecovery.NoteHealthy(now);
+            return;
+        }
+
+        if (!_portMapRecovery.ShouldAttempt(now))
+        {
+            return;
+        }
+
+        AppLog.Warning("Süreç eşlemesi durmuş; yeniden başlatılıyor.");
+
+        var restarted = false;
+        try
+        {
+            restarted = portMap.Restart();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Süreç eşlemesi yeniden başlatılamadı", ex);
+        }
+
+        var delay = _portMapRecovery.RecordAttempt(now, restarted);
+        AppLog.Info(restarted
+            ? "Süreç eşlemesi yeniden başlatıldı."
+            : $"Süreç eşlemesi yeniden başlatılamadı; {delay.TotalSeconds:F0} sn sonra tekrar denenecek.");
+    }
+
+    /// <summary>
+    /// Rebuilds the loopback DNS listener, and puts the machine's own resolvers back if
+    /// it cannot be rebuilt.
+    /// </summary>
+    /// <remarks>
+    /// This is the one failure in the whole app that takes the internet away outright
+    /// rather than degrading it: the adapters point at 127.0.0.1, so a listener that has
+    /// stopped serving means nothing on the machine can resolve a name. Rebuilding is the
+    /// first answer. If the port cannot be taken again, encrypted DNS is given up rather
+    /// than defended - the resolvers go back to what the network handed out, which is the
+    /// difference between a working machine and a dead one.
+    /// </remarks>
+    private async Task RestartDnsProxyIfNeededAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (_dnsProxy is not { } proxy || _resolver is null)
+        {
+            return;
+        }
+
+        if (proxy.IsHealthy)
+        {
+            _dnsProxyRecovery.NoteHealthy(now);
+            return;
+        }
+
+        if (!_dnsProxyRecovery.ShouldAttempt(now))
+        {
+            return;
+        }
+
+        AppLog.Warning("Yerel DNS sunucusu yanıt vermiyor; yeniden kuruluyor.");
+
+        var port = proxy.Port;
+        _dnsProxy = null;
+        await proxy.DisposeAsync().ConfigureAwait(false);
+
+        var replacement = CreateDnsProxy();
+        if (replacement.TryStart(port))
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // A stop got in between the two. Teardown has already looked at the
+                // field and found nothing, so publishing this one now would leave a
+                // listener holding port 53 with nobody left to close it.
+                await replacement.DisposeAsync().ConfigureAwait(false);
+                return;
+            }
+
+            _dnsProxy = replacement;
+            _dnsProxyRecovery.RecordAttempt(now, true);
+            AppLog.Info("Yerel DNS sunucusu yeniden kuruldu.");
+            return;
+        }
+
+        await replacement.DisposeAsync().ConfigureAwait(false);
+        _dnsProxyRecovery.RecordAttempt(now, false);
+        AppLog.Warning(
+            $"Yerel DNS sunucusu {port} numaralı portu geri alamadı; şifreli DNS bırakılıyor ve "
+            + "makinenin kendi çözümleyicileri geri yükleniyor.");
+
+        await FallBackToSystemDnsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Hands name resolution back to the network's own resolvers.
+    /// </summary>
+    /// <remarks>
+    /// Only reached when the loopback listener is gone and cannot be brought back. Doing
+    /// nothing here would leave every adapter pointed at a socket nobody is listening on.
+    /// </remarks>
+    private async Task FallBackToSystemDnsAsync(CancellationToken cancellationToken)
+    {
+        if (_dnsConfigurator is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _dnsConfigurator.RestoreAsync(cancellationToken).ConfigureAwait(false);
+            DnsRestorePending = null;
+            SetState(State, "Koruma etkin · şifreli DNS kapandı, ad çözümleme ağın kendi sunucularında");
+        }
+        catch (Exception ex)
+        {
+            DnsRestorePending = ex.Message;
+            AppLog.Error("DNS ayarları geri yüklenemedi", ex);
+        }
+    }
+
+    /// <summary>Reopens the packet filter after it has released itself.</summary>
+    private async Task RestartEngineIfNeededAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (_engine is not { } engine)
+        {
+            return;
+        }
+
+        if (engine.IsRunning)
+        {
+            _engineRecovery.NoteHealthy(now);
+            return;
+        }
+
+        if (!_engineRecovery.ShouldAttempt(now))
+        {
+            return;
+        }
+
+        AppLog.Warning("Paket süzgeci kapalı bulundu; yeniden açılıyor.");
+        SetState(ProtectionState.Degraded, "Paket süzgeci yeniden açılıyor…");
+
+        var reopened = false;
+        try
+        {
+            reopened = await Task.Run(engine.Restart, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Paket süzgeci yeniden açılamadı", ex);
+        }
+
+        var delay = _engineRecovery.RecordAttempt(now, reopened);
+
+        if (!reopened)
+        {
+            SetState(
+                ProtectionState.Degraded,
+                $"Paket süzgeci açılamadı; {delay.TotalSeconds:F0} sn sonra yeniden denenecek");
+            return;
+        }
+
+        AppLog.Info($"Paket süzgeci yeniden açıldı (deneme {_engineRecovery.Attempts}).");
+        SetState(ProtectionState.Running, "Koruma etkin · paket süzgeci yeniden açıldı");
+
+        // Reopening the handle is not the same as the bypass working again, and the
+        // window should say which of the two happened.
+        try
+        {
+            await VerifyAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Yeniden açılan süzgeç doğrulanamadı", ex);
+        }
+    }
+
     private async Task ConfigureDnsAsync(CancellationToken cancellationToken)
     {
         // "Leave the system alone" is applied rather than skipped. A run that was killed
@@ -1396,14 +1817,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
         if (mode == DnsMode.EncryptedLoopback)
         {
-            _dnsProxy = new DnsProxyServer(_resolver!, AppLog.InfoSink)
-            {
-                SuppressIPv6Answers = () => _ttlFix.IsActive && _ttlFix.Settings.DropIPv6,
-
-                // Read per query rather than captured, so the switch takes effect on the
-                // next lookup instead of on the next start of the service.
-                Sinkhole = name => Settings.BlockLunarAds && LunarAdBlock.Blocks(name),
-            };
+            _dnsProxy = CreateDnsProxy();
             if (_dnsProxy.TryStart())
             {
                 // The ::1 listeners are best effort, and pointing the machine's IPv6
@@ -1421,6 +1835,30 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         await _dnsConfigurator!.ApplyAsync(mode, loopbackHasIPv6, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Builds a loopback DNS listener wired to this session.
+    /// </summary>
+    /// <remarks>
+    /// One place, because the watchdog builds one too and a replacement that is missing
+    /// the advertisement block, the hotspot's IPv6 rule or the discovery hook would be a
+    /// listener that quietly behaves differently from the one it replaced.
+    /// </remarks>
+    private DnsProxyServer CreateDnsProxy()
+    {
+        var proxy = new DnsProxyServer(_resolver!, AppLog.InfoSink)
+        {
+            SuppressIPv6Answers = () => _ttlFix.IsActive && _ttlFix.Settings.DropIPv6,
+
+            // Read per query rather than captured, so the switch takes effect on the
+            // next lookup instead of on the next start of the service.
+            Sinkhole = name => Settings.BlockLunarAds && LunarAdBlock.Blocks(name),
+        };
+
+        var token = _lifetime?.Token ?? CancellationToken.None;
+        proxy.NameResolved += name => _discovery?.Observe(name, token);
+        return proxy;
     }
 
     private async Task InitialiseNetworkAsync(CancellationToken cancellationToken)
@@ -1670,14 +2108,18 @@ public sealed class ProtectionService : IAsyncDisposable
     /// person who wants to know whether their hotspot connection is being counted.
     /// </para>
     /// </remarks>
+    /// <summary>Whether the hotspot rule should be up for the network in front of us.</summary>
+    private bool VodafoneModeWanted(NetworkFingerprint network)
+        => Settings.VodafoneModeEnabled
+            && network.IsOnline
+            && Settings.VodafoneNetworkRegistered(network);
+
     private void ApplyVodafoneMode()
     {
         lock (_ttlFixGate)
         {
             var network = Network;
-            var wanted = Settings.VodafoneModeEnabled
-                && network.IsOnline
-                && Settings.VodafoneNetworkRegistered(network);
+            var wanted = VodafoneModeWanted(network);
 
             if (!wanted)
             {
@@ -2479,6 +2921,7 @@ public sealed class ProtectionService : IAsyncDisposable
         if (_engine is not null)
         {
             _engine.HostRewritten -= OnHostRewritten;
+            _engine.Faulted -= OnEngineFaulted;
             _engine.Dispose();
             _engine = null;
         }
@@ -3077,6 +3520,7 @@ public sealed class ProtectionService : IAsyncDisposable
         _latencyGate.Dispose();
         _strategies.Dispose();
         _lifetime?.Dispose();
+        _healthWake.Dispose();
         _gate.Dispose();
     }
 }

@@ -112,14 +112,56 @@ Desteklenen operatör profilleri: Türk Telekom (Mobil / Evde İnternet /
 Hotspot), Redbox, Turkcell (Mobil / Superonline / Superbox / Hotspot),
 Vodafone (Mobil / Evde İnternet / Hotspot), TurkNet ve "Diğer / Bilinmiyor".
 
+## Kesintiye karşı kendini toparlaması
+
+Bir masaüstü uygulamasının en kötü davranışı, çalıştığını söylerken çalışmıyor
+olmasıdır. Uygulamanın koruma yapan parçaları kendi iş parçacıklarında çalışır
+ve bir sürücü hatası, bir bağdaştırıcı sıfırlanması ya da uykudan dönüş bunları
+sessizce durdurabilir. Bunların hepsi artık **15 saniyede bir denetlenir** ve
+kendiliğinden yeniden kurulur:
+
+| Parça | Durursa ne olurdu | Ne yapılıyor |
+| --- | --- | --- |
+| **Paket süzgeci** | Trafik korumasız akar, pencere "Koruma etkin" demeye devam eder | Süzgeç yeniden açılır; açılana kadar başlıkta **"Koruma duraklatıldı, yeniden açılıyor"** yazar |
+| **Süreç eşlemesi** | Hiçbir bağlantının sahibi bilinemez, "Yalnızca Discord" kipi hiçbir şeyi korumaz | Dinleyici yeniden kurulur |
+| **Yerel DNS sunucusu** | Bağdaştırıcılar 127.0.0.1'e baktığı için makinede **hiçbir ad çözülmez** | Yeniden kurulur; kurulamazsa şifreli DNS bırakılır ve ağın kendi çözümleyicileri geri yüklenir |
+| **Vodafone TTL kuralı** | Hotspot bağlantısı çalışmayı bırakır | Kural yeniden uygulanır |
+
+Yeniden deneme aralığı her başarısız denemede iki katına çıkar (15 sn → 5 dk
+tavan) ve parça bir süre ayakta kaldığında geçmişi unutulur. Böylece açılmayan
+bir sürücü saniyede birkaç kez zorlanmaz, kısa süre takılan bir sürücü de
+saatlerce kapalı bırakılmaz.
+
+Ayrıca:
+
+- **Geçici sürücü hataları artık korumayı düşürmez.** Wi-Fi ağları arasında
+  geçerken bir an kaybolan yol yüzünden reddedilen tek bir paket, eskiden bütün
+  süzgecin oturum boyunca kapanmasına yol açabiliyordu. Artık o paket düşürülür
+  (TCP zaten yeniden gönderir); yalnızca üst üste gelen kalıcı hatalar süzgeci
+  kapatır.
+- **Okuyucusu ölen bir süzgeç yenisiyle değiştirilir.** Hiç okuyucu kalmazsa
+  süzgeç serbest bırakılır: koruma kaybolur ama internet akmaya devam eder.
+- **Uykudan dönüş algılanır.** Windows'un uyanma bildirimi (ve bildirim
+  gelmezse geciken sağlık denetimi) şifreli DNS bağlantı havuzunu tazeler, ad
+  önbelleğini boşaltır ve ağı yeniden yoklar. Uyandıktan sonraki ilk aramanın
+  ölü bir bağlantıda zaman aşımını beklemesi bu yüzden olmuyor.
+- **Bir çözümleyici yanıt vermezse beklenmez.** Sorgu 400 ms içinde
+  yanıtlanmazsa sıradaki çözümleyici de paralel olarak denenir ve ilk geçerli
+  yanıt kullanılır. Çalışan bir bağlantıda bu süre hiç dolmaz, yani fazladan
+  tek bir istek bile gitmez.
+- **Çözümleyicilerin hepsi erişilemezse** süresi dolmuş önbellek yanıtı
+  (en fazla 1 saat) verilir. Biraz eski bir adres, çözülemeyen bir addan
+  iyidir — çözülemeyen ad kullanıcı için "internet gitti" demektir.
+
 ## Her sitede çalışması
 
 - Yerleşik listede Discord'un tüm alan adları ve Türkiye'de DPI ile
   engellendiği bilinen diğer adresler vardır.
 - **Otomatik keşif:** açtığınız yeni bir alan adı, atlatmasız açılmayıp
   atlatmayla açılıyorsa sessizce sınanır ve kalıcı olarak listeye eklenir.
-  Ölçüm sırasında yalnızca o alan adı etkilenir; diğer bağlantıların koruması
-  bir an bile düşmez.
+  Ölçümün atlatmasız ayağı yalnızca **ölçümün kendi bağlantısına** uygulanır:
+  aynı siteyi o sırada tarayıcınızda açıyorsanız sizin bağlantınız korunmaya
+  devam eder, diğer bağlantıların koruması da bir an bile düşmez.
 - **Siteler** sekmesinden dilediğiniz alan adını elle ekleyebilir, yerleşik
   listeden çıkarabilirsiniz. Alt alan adları kendiliğinden kapsanır.
 
@@ -691,6 +733,9 @@ görüntülemeye ait hiçbir iş yapmaz:
   geri verilir ve ekran okuma (OCR) motoru her ölçümün sonunda serbest bırakılır.
 - Düşük gecikme kipi açıkken ayrı bir ağ izleyicisi daha kurulmaz; uygulama tek
   bir izleyiciyi paylaşır.
+- Koruma çalışırken 15 saniyede bir sağlık denetimi yapılır. Bu denetim yalnızca
+  birkaç alan okur (süzgeç açık mı, dinleyiciler ayakta mı) — ağa çıkmaz, disk
+  okumaz; bir şey durmuş olmadıkça hiçbir iş yapmaz.
 
 Ayrıntı ve doğrulama adımları için `docs/background-footprint.md`.
 
@@ -929,6 +974,9 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Vodafone Sınırsız Modu kayıtlı ağımı tanımıyor | İki sebebi vardı ve ikisi de giderildi: ağ kimliği yalnız koruma çalışırken okunuyordu, ve eşleştirme erişim noktasının MAC adresini içeren parmak izine bakıyordu — telefon paylaşımı her açılışta yeni bir rastgele MAC dağıttığı için kayıt tanınmıyordu. Artık ağ adı da eşleştirilir, kayıt bu oturumun kimliğiyle güncellenir ve kart kayıtlı ağda "Aktif · \<ağ adı\>" der. Hâlâ tanımıyorsa **"Bu ağı kaydet"** ile bir kez kaydedin |
 | Vodafone Sınırsız Modu açık ama bir şey değişmiyor | Windows'ta modun "açık" olması yetmez; kartta **"Aktif · \<ağ adı\> · TTL 65"** yazmalı ve düzeltilen paket sayacı artmalıdır. "Kurulamadı" diyorsa sebebi hemen yanında yazar: uygulamayı **yönetici olarak** çalıştırın ve kurulum klasöründeki WinDivert dosyalarının yerinde olduğunu doğrulayın. Ağ kayıtlı değilse **"Bu ağı kaydet"** deyin |
 | Linux'ta çalışıyor, Windows'ta çalışmıyordu | Bir ara sürüm Windows tarafında TTL yeniden yazımını tamamen kaldırmış, anahtarı yalnız salt-okunur tanılamaya bağlamıştı. Mekanizma geri getirildi; iki sürüm de aynı TTL (65) ve aynı koruma eşiği (32) ile çalışır |
+| Bağlantı arada bir kesiliyor, sonra kendiliğinden düzeliyor | Paket süzgeci bir sürücü hatasıyla kapanmış olabilir. Artık 15 saniyede bir denetlenip yeniden açılıyor ve kapalı olduğu sürece başlık **"Koruma duraklatıldı, yeniden açılıyor"** diyor. Günlükte "paket süzgeci" geçen satırlara bakın; sürekli tekrarlıyorsa o satırları bildirin |
+| Uykudan sonra internet birkaç saniye açılmıyor | Uyanma artık algılanıyor: şifreli DNS bağlantı havuzu tazeleniyor, ad önbelleği boşaltılıyor ve ağ yeniden yoklanıyor. Sürüyorsa günlükteki "Uyanma algılandı" satırının olup olmadığını bildirin |
+| Hiçbir site adı çözülmüyor | Yerel DNS sunucusu durmuş olabilir. Uygulama bunu fark edip yeniden kuruyor; kuramazsa şifreli DNS'i bırakıp ağın kendi çözümleyicilerini geri yüklüyor (günlükte "makinenin kendi çözümleyicileri geri yükleniyor"). Uygulama hiç çalışmıyorsa `DpiBypass.exe restore-dns` aynı işi yapar |
 | Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
 
 ## Yasal not

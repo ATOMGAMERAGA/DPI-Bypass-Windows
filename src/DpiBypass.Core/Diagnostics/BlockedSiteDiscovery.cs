@@ -136,11 +136,26 @@ public sealed class BlockedSiteDiscovery : IDisposable
                 return;
             }
 
-            // Control arm: this one hostname goes out untouched while every other
-            // connection on the machine keeps its protection.
-            _matcher.ProbePassthroughHost = hostName;
-            var plain = await _tester.ProbeAsync(hostName, fetchHttp: false, cancellationToken).ConfigureAwait(false);
+            // Control arm: this one connection goes out untouched. The exemption is
+            // installed by the callback, which lands after the probe's own connect and
+            // before it writes a single byte - so it names a socket from the moment it
+            // exists and never applies to the whole hostname. That is what keeps a
+            // browser the user has just pointed at the same site protected instead of
+            // letting it eat a reset on the measurement's account. The port is written
+            // first: a packet path that can see the hostname can already see the port.
+            var plain = await _tester
+                .ProbeAsync(
+                    hostName,
+                    fetchHttp: false,
+                    port =>
+                    {
+                        _matcher.ProbePassthroughPort = port;
+                        _matcher.ProbePassthroughHost = hostName;
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
             _matcher.ProbePassthroughHost = null;
+            _matcher.ProbePassthroughPort = 0;
 
             // Only a failure that looks like filtering counts. A site that is simply
             // down, or that we cannot resolve, tells us nothing.
@@ -182,6 +197,7 @@ public sealed class BlockedSiteDiscovery : IDisposable
             // Whatever happened - including cancellation between the two arms - the
             // overrides must not outlive the probe.
             _matcher.ProbePassthroughHost = null;
+            _matcher.ProbePassthroughPort = 0;
             _matcher.ProbeForcedHost = null;
             _concurrency.Release();
         }
