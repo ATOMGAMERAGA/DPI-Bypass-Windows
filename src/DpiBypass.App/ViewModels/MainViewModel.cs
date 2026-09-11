@@ -2802,21 +2802,30 @@ public sealed class MainViewModel : ObservableObject
         IsRunning = _service.State is ProtectionState.Running or ProtectionState.Degraded;
         ProtectionState = _service.State;
 
-        StatusHeadline = _service.State switch
-        {
-            ProtectionState.Running => "Koruma etkin",
-            ProtectionState.Degraded => "Koruma etkin, engel sürüyor",
-            ProtectionState.Starting => "Başlatılıyor…",
-            ProtectionState.Stopping => "Durduruluyor…",
-            _ => "Koruma kapalı",
-        };
+        // A released filter is reported as what it is. The watchdog is reopening it, and
+        // saying "Koruma etkin" over traffic that is going out untouched would be the one
+        // thing this window must never do.
+        var filterDown = _service.IsFilterDown;
 
-        StatusSeverity = _service.State switch
-        {
-            ProtectionState.Running => "ok",
-            ProtectionState.Degraded => "warn",
-            _ => "off",
-        };
+        StatusHeadline = filterDown
+            ? "Koruma duraklatıldı, yeniden açılıyor"
+            : _service.State switch
+            {
+                ProtectionState.Running => "Koruma etkin",
+                ProtectionState.Degraded => "Koruma etkin, engel sürüyor",
+                ProtectionState.Starting => "Başlatılıyor…",
+                ProtectionState.Stopping => "Durduruluyor…",
+                _ => "Koruma kapalı",
+            };
+
+        StatusSeverity = filterDown
+            ? "warn"
+            : _service.State switch
+            {
+                ProtectionState.Running => "ok",
+                ProtectionState.Degraded => "warn",
+                _ => "off",
+            };
 
         StatusDetail = _service.StatusDetail ?? string.Empty;
         RefreshVerification();

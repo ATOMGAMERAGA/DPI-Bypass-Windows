@@ -74,9 +74,29 @@ public sealed class DohResolver : IDisposable
         Cloudflare, CloudflareSecondary, Google, GoogleSecondary, Quad9, Quad9Secondary,
     ];
 
+    /// <summary>
+    /// How long the preferred endpoint gets on its own before a second one is tried
+    /// alongside it.
+    /// </summary>
+    /// <remarks>
+    /// A resolver that is reachable answers in tens of milliseconds, so on a working link
+    /// this never fires and nothing extra is ever sent. It exists for the cases where the
+    /// first endpoint will not answer at all and the old code simply waited out the whole
+    /// per-endpoint budget before trying anyone else: a pooled connection that died while
+    /// the machine was asleep, a NAT that dropped the mapping, an operator throttling one
+    /// address. Those are what a user experiences as "the internet went slow", and the
+    /// cost of covering them is one extra request in exactly those cases.
+    /// </remarks>
+    private static readonly TimeSpan HedgeDelay = TimeSpan.FromMilliseconds(400);
+
+    /// <summary>How many endpoints may be racing at once.</summary>
+    private const int MaxParallelAttempts = 2;
+
     private static readonly MediaTypeHeaderValue DnsMediaType = new("application/dns-message");
 
-    private readonly HttpClient _http;
+    private readonly Lock _clientGate = new();
+    private readonly bool _ownsTransport;
+    private HttpClient _http;
     private readonly IReadOnlyList<DohEndpoint> _chain;
     private readonly TimeSpan _perEndpointTimeout;
     private readonly TimeSpan _overallTimeout;
@@ -112,34 +132,37 @@ public sealed class DohResolver : IDisposable
 
         if (transport is not null)
         {
-            _http = BuildClient(transport);
+            // Supplied by the caller, so it is not ours to replace or to dispose.
+            _ownsTransport = false;
+            _http = BuildClient(transport, disposeHandler: false);
             return;
         }
 
-        var handler = new SocketsHttpHandler
-        {
-            // Long lived pooled HTTP/2 connections keep the added latency at zero
-            // after the first query - a resolve is one round trip on a warm socket.
-            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5),
-            AutomaticDecompression = System.Net.DecompressionMethods.None,
-            ConnectTimeout = TimeSpan.FromSeconds(5),
-            UseProxy = false,
-            AllowAutoRedirect = false,
-            EnableMultipleHttp2Connections = true,
-            SslOptions = new SslClientAuthenticationOptions
-            {
-                EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12
-                    | System.Security.Authentication.SslProtocols.Tls13,
-            },
-        };
-
-        _http = BuildClient(handler);
+        _ownsTransport = true;
+        _http = BuildClient(CreateHandler(), disposeHandler: true);
     }
 
-    private static HttpClient BuildClient(HttpMessageHandler handler)
+    private static SocketsHttpHandler CreateHandler() => new()
     {
-        var client = new HttpClient(handler)
+        // Long lived pooled HTTP/2 connections keep the added latency at zero
+        // after the first query - a resolve is one round trip on a warm socket.
+        PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+        PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5),
+        AutomaticDecompression = System.Net.DecompressionMethods.None,
+        ConnectTimeout = TimeSpan.FromSeconds(5),
+        UseProxy = false,
+        AllowAutoRedirect = false,
+        EnableMultipleHttp2Connections = true,
+        SslOptions = new SslClientAuthenticationOptions
+        {
+            EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12
+                | System.Security.Authentication.SslProtocols.Tls13,
+        },
+    };
+
+    private static HttpClient BuildClient(HttpMessageHandler handler, bool disposeHandler = true)
+    {
+        var client = new HttpClient(handler, disposeHandler)
         {
             DefaultRequestVersion = System.Net.HttpVersion.Version20,
             DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
@@ -212,7 +235,22 @@ public sealed class DohResolver : IDisposable
     /// a hotel network is usually the fastest one at home, and carrying the penalty across
     /// the transition means arriving home on the fallback for the next minute.
     /// </remarks>
-    public void OnNetworkChanged()
+    public void OnNetworkChanged() => Refresh();
+
+    /// <summary>
+    /// The machine has just come back from sleep.
+    /// </summary>
+    /// <remarks>
+    /// Every pooled connection the resolver was keeping warm died while the machine was
+    /// away, and nothing on this side knows that yet: the sockets look open, so the first
+    /// query after the lid opens is dispatched onto a connection whose other end has long
+    /// since forgotten it, and waits out its whole budget before anyone tries anything
+    /// else. That is the pause a user notices as "the internet takes ages after sleep".
+    /// Dropping the pool costs one handshake and removes it.
+    /// </remarks>
+    public void OnResume() => Refresh();
+
+    private void Refresh()
     {
         Interlocked.Increment(ref _epoch);
 
@@ -221,6 +259,61 @@ public sealed class DohResolver : IDisposable
             _health.Clear();
             _verifiedProvider = null;
             _verifiedUrl = null;
+        }
+
+        RecycleConnections();
+    }
+
+    /// <summary>
+    /// Throws away the pooled connections and starts a new client for the next query.
+    /// </summary>
+    /// <remarks>
+    /// The old client is not disposed on the spot: queries already in flight are holding
+    /// it, and disposing it under them would turn a refresh into a burst of failures.
+    /// It is disposed once nothing can still be using it - the overall budget is the
+    /// ceiling on that - or at shutdown, whichever comes first.
+    /// </remarks>
+    private void RecycleConnections()
+    {
+        if (!_ownsTransport || _shutdown.IsCancellationRequested)
+        {
+            // A caller supplied the transport, which means the tests: there is no
+            // connection pool to drop and the handler is not ours to replace.
+            return;
+        }
+
+        HttpClient previous;
+        lock (_clientGate)
+        {
+            previous = _http;
+            _http = BuildClient(CreateHandler());
+        }
+
+        _ = RetireAsync(previous);
+    }
+
+    private async Task RetireAsync(HttpClient client)
+    {
+        try
+        {
+            await Task.Delay(_overallTimeout + TimeSpan.FromSeconds(1), _shutdown.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down; the queries holding it are being cancelled anyway.
+        }
+        catch (Exception)
+        {
+            // Nothing here is worth failing over: the client is being thrown away.
+        }
+
+        try
+        {
+            client.Dispose();
+        }
+        catch (Exception)
+        {
+            // Already gone.
         }
     }
 
@@ -332,74 +425,189 @@ public sealed class DohResolver : IDisposable
         }
     }
 
+    /// <summary>
+    /// Walks the chain, letting a second endpoint start if the first is taking too long.
+    /// </summary>
+    /// <remarks>
+    /// The chain used to be strictly sequential: each endpoint had the floor for its whole
+    /// per-endpoint budget before the next one was even tried, so one resolver that
+    /// accepted the connection and then said nothing cost every lookup four seconds before
+    /// the fallback got a turn. Endpoints now overlap after a short head start, and the
+    /// first valid answer wins. On a working link the head start never elapses, so the
+    /// traffic pattern is exactly what it was.
+    /// </remarks>
     private async Task<byte[]?> SendThroughChainAsync(byte[] query, CancellationToken cancellationToken)
     {
-        using var overall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var overall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         overall.CancelAfter(_overallTimeout);
 
-        foreach (var endpoint in OrderedChain())
+        var chain = OrderedChain();
+        var pending = new List<Task<byte[]?>>(MaxParallelAttempts);
+        var started = 0;
+        byte[]? answer = null;
+
+        try
         {
-            var stopwatch = Stopwatch.StartNew();
-            try
+            while (!overall.IsCancellationRequested)
             {
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(overall.Token);
-                linked.CancelAfter(_perEndpointTimeout);
-
-                using var content = new ByteArrayContent(query);
-                content.Headers.ContentType = DnsMediaType;
-
-                using var response = await _http
-                    .PostAsync(endpoint.Url, content, linked.Token)
-                    .ConfigureAwait(false);
-
-                if (!response.IsSuccessStatusCode)
+                if (started < chain.Count && pending.Count < MaxParallelAttempts)
                 {
-                    RecordFailure(endpoint, $"HTTP {(int)response.StatusCode}");
+                    pending.Add(AttemptAsync(chain[started++], query, overall.Token));
+                }
+                else if (pending.Count == 0)
+                {
+                    break;
+                }
+
+                var hedge = started < chain.Count ? DelayQuietly(HedgeDelay, overall.Token) : null;
+
+                var candidates = new Task[pending.Count + (hedge is null ? 0 : 1)];
+                for (var i = 0; i < pending.Count; i++)
+                {
+                    candidates[i] = pending[i];
+                }
+
+                if (hedge is not null)
+                {
+                    candidates[^1] = hedge;
+                }
+
+                var finished = await Task.WhenAny(candidates).ConfigureAwait(false);
+
+                if (hedge is not null && ReferenceEquals(finished, hedge))
+                {
+                    // The head start ran out. Bring the next endpoint in alongside rather
+                    // than waiting out the rest of this one's budget.
                     continue;
                 }
 
-                if (!string.Equals(
-                        response.Content.Headers.ContentType?.MediaType,
-                        "application/dns-message",
-                        StringComparison.OrdinalIgnoreCase)
-                    || response.Content.Headers.ContentLength > MaxDnsMessageBytes)
-                {
-                    RecordFailure(endpoint, "beklenmeyen içerik türü");
-                    continue;
-                }
+                var attempt = (Task<byte[]?>)finished;
+                pending.Remove(attempt);
 
-                await response.Content.LoadIntoBufferAsync(MaxDnsMessageBytes, linked.Token).ConfigureAwait(false);
-                var payload = await response.Content.ReadAsByteArrayAsync(linked.Token).ConfigureAwait(false);
-                if (payload.Length < DnsMessage.HeaderLength || !DnsMessage.IsResponseForQuery(query, payload))
+                var result = await attempt.ConfigureAwait(false);
+                if (result is not null)
                 {
-                    // An answer to a question nobody asked. This used to move on without
-                    // recording anything, so an endpoint that reliably answered wrongly
-                    // kept its place at the head of the chain and was tried first, every
-                    // time, for as long as it went on being wrong.
-                    RecordFailure(endpoint, "yanıt sorguyla eşleşmedi");
-                    continue;
+                    answer = result;
+                    break;
                 }
-
-                RecordSuccess(endpoint, stopwatch.Elapsed);
-                return payload;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (OperationCanceledException) when (overall.IsCancellationRequested)
-            {
-                return null;
-            }
-            catch (Exception ex)
-            {
-                // Any failure just means "try the next provider". Cloudflare being
-                // unreachable is exactly why Google and Quad9 are in the list.
-                RecordFailure(endpoint, ex.GetType().Name);
             }
         }
+        finally
+        {
+            // Whoever is still running lost the race, or the budget ran out. Either way
+            // they are cancelled here rather than left to finish into nothing.
+            overall.Cancel();
+            RetireWhenIdle(overall, pending);
+        }
 
-        return null;
+        cancellationToken.ThrowIfCancellationRequested();
+        return answer;
+    }
+
+    /// <summary>Asks one endpoint. Never throws; a failure is a null and a recorded penalty.</summary>
+    private async Task<byte[]?> AttemptAsync(DohEndpoint endpoint, byte[] query, CancellationToken chainToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(chainToken);
+            linked.CancelAfter(_perEndpointTimeout);
+
+            using var content = new ByteArrayContent(query);
+            content.Headers.ContentType = DnsMediaType;
+
+            var client = Volatile.Read(ref _http);
+            using var response = await client
+                .PostAsync(endpoint.Url, content, linked.Token)
+                .ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                RecordFailure(endpoint, $"HTTP {(int)response.StatusCode}");
+                return null;
+            }
+
+            if (!string.Equals(
+                    response.Content.Headers.ContentType?.MediaType,
+                    "application/dns-message",
+                    StringComparison.OrdinalIgnoreCase)
+                || response.Content.Headers.ContentLength > MaxDnsMessageBytes)
+            {
+                RecordFailure(endpoint, "beklenmeyen içerik türü");
+                return null;
+            }
+
+            await response.Content.LoadIntoBufferAsync(MaxDnsMessageBytes, linked.Token).ConfigureAwait(false);
+            var payload = await response.Content.ReadAsByteArrayAsync(linked.Token).ConfigureAwait(false);
+            if (payload.Length < DnsMessage.HeaderLength || !DnsMessage.IsResponseForQuery(query, payload))
+            {
+                // An answer to a question nobody asked. This used to move on without
+                // recording anything, so an endpoint that reliably answered wrongly
+                // kept its place at the head of the chain and was tried first, every
+                // time, for as long as it went on being wrong.
+                RecordFailure(endpoint, "yanıt sorguyla eşleşmedi");
+                return null;
+            }
+
+            RecordSuccess(endpoint, stopwatch.Elapsed);
+            return payload;
+        }
+        catch (OperationCanceledException)
+        {
+            // Either the caller walked away, the overall budget ran out, or another
+            // endpoint answered first. None of those is this endpoint's fault, and
+            // penalising it for losing a race would demote the healthy one.
+            if (!chainToken.IsCancellationRequested)
+            {
+                RecordFailure(endpoint, "zaman aşımı");
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            // Any failure just means "try the next provider". Cloudflare being
+            // unreachable is exactly why Google and Quad9 are in the list.
+            RecordFailure(endpoint, ex.GetType().Name);
+            return null;
+        }
+    }
+
+    /// <summary>A delay that ends quietly when its token is cancelled instead of throwing.</summary>
+    private static Task DelayQuietly(TimeSpan delay, CancellationToken cancellationToken)
+        => Task.Delay(delay, cancellationToken).ContinueWith(
+            static task => _ = task.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    /// <summary>
+    /// Disposes the chain's cancellation source once the attempts hanging off it are done.
+    /// </summary>
+    /// <remarks>
+    /// Disposing it while a losing attempt still holds a linked child is how a cancelled
+    /// race turns into an ObjectDisposedException on a background thread, and waiting for
+    /// the losers inline would make every fast answer wait for the slow endpoint to notice
+    /// it had lost.
+    /// </remarks>
+    private static void RetireWhenIdle(CancellationTokenSource source, List<Task<byte[]?>> pending)
+    {
+        if (pending.Count == 0)
+        {
+            source.Dispose();
+            return;
+        }
+
+        _ = Task.WhenAll(pending).ContinueWith(
+            task =>
+            {
+                _ = task.Exception;
+                source.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     public async Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, bool includeIPv6, CancellationToken cancellationToken)
@@ -449,7 +657,7 @@ public sealed class DohResolver : IDisposable
     /// back to its configured position and is tried first again, which is what stops one
     /// bad minute from choosing the user's resolver for the rest of the session.
     /// </remarks>
-    private IEnumerable<DohEndpoint> OrderedChain()
+    private IReadOnlyList<DohEndpoint> OrderedChain()
     {
         var now = DateTimeOffset.UtcNow;
 
@@ -613,6 +821,13 @@ public sealed class DohResolver : IDisposable
         }
 
         _shutdown.Dispose();
-        _http.Dispose();
+
+        HttpClient client;
+        lock (_clientGate)
+        {
+            client = _http;
+        }
+
+        client.Dispose();
     }
 }

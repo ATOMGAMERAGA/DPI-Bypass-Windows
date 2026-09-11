@@ -82,9 +82,26 @@ public sealed class ConnectivityTester : IConnectivityProbe
         _timeout = timeout ?? TimeSpan.FromSeconds(6);
     }
 
-    public async Task<ProbeResult> ProbeAsync(
+    public Task<ProbeResult> ProbeAsync(
         string host,
         bool fetchHttp = false,
+        CancellationToken cancellationToken = default)
+        => ProbeAsync(host, fetchHttp, onLocalPort: null, cancellationToken);
+
+    /// <summary>
+    /// Probes a host and reports the local port of each connection as it is opened.
+    /// </summary>
+    /// <param name="onLocalPort">
+    /// Called once per attempt, after the TCP connect and before a single byte of the
+    /// handshake is written. That ordering is the point: it lets the caller apply a rule
+    /// to this one socket - the discovery pass uses it so its control arm is the only
+    /// connection to the site that goes out unprotected - and a callback that arrived
+    /// after the ClientHello would be useless for that.
+    /// </param>
+    public async Task<ProbeResult> ProbeAsync(
+        string host,
+        bool fetchHttp,
+        Action<int>? onLocalPort,
         CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -107,7 +124,7 @@ public sealed class ConnectivityTester : IConnectivityProbe
         ProbeResult? last = null;
         foreach (var address in addresses.Take(2))
         {
-            last = await ProbeAddressAsync(host, address, fetchHttp, cancellationToken).ConfigureAwait(false);
+            last = await ProbeAddressAsync(host, address, fetchHttp, onLocalPort, cancellationToken).ConfigureAwait(false);
             if (last.Success)
             {
                 return last;
@@ -121,6 +138,7 @@ public sealed class ConnectivityTester : IConnectivityProbe
         string host,
         IPAddress address,
         bool fetchHttp,
+        Action<int>? onLocalPort,
         CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -143,6 +161,18 @@ public sealed class ConnectivityTester : IConnectivityProbe
         catch (SocketException ex)
         {
             return new ProbeResult(ProbeOutcome.ConnectRefused, stopwatch.Elapsed, ex.SocketErrorCode.ToString());
+        }
+
+        if (onLocalPort is not null && socket.LocalEndPoint is IPEndPoint local)
+        {
+            try
+            {
+                onLocalPort(local.Port);
+            }
+            catch (Exception)
+            {
+                // The caller's bookkeeping is not this probe's problem.
+            }
         }
 
         await using var network = new NetworkStream(socket, ownsSocket: false);

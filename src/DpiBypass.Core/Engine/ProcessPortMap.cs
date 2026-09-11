@@ -25,42 +25,116 @@ public sealed class ProcessPortMap : IDisposable
     private static readonly TimeSpan OwnerLifetime = TimeSpan.FromMinutes(1);
 
     private readonly ConcurrentDictionary<ushort, Owner> _owners = new();
-    private readonly CancellationTokenSource _stopping = new();
+    private readonly Lock _lifecycleGate = new();
     private readonly Action<string>? _log;
 
+    private CancellationTokenSource _stopping = new();
     private WinDivertHandle? _handle;
     private Thread? _worker;
+    private short _priority = 990;
+    private bool _disposed;
 
     public ProcessPortMap(Action<string>? log = null) => _log = log;
 
     public bool IsRunning => _handle?.IsOpen == true;
 
+    /// <summary>
+    /// True while the watcher is both open and still being read.
+    /// </summary>
+    /// <remarks>
+    /// The handle alone cannot answer this. A watcher whose thread has gone still holds an
+    /// open socket-layer handle, so it reads as running while every port it is asked about
+    /// comes back unknown - and unknown owners silently widen "only Discord" into "nothing
+    /// matched". The watchdog restarts on this, not on <see cref="IsRunning"/>.
+    /// </remarks>
+    public bool IsHealthy => IsRunning && _worker is { IsAlive: true };
+
     public int KnownPorts => _owners.Count;
 
     public bool TryStart(short priority = 990)
     {
-        try
+        lock (_lifecycleGate)
         {
-            _handle = WinDivertHandle.Open(
-                Filter,
-                WinDivertLayer.Socket,
-                priority,
-                WinDivertFlags.Sniff | WinDivertFlags.RecvOnly);
-        }
-        catch (WinDivertException ex)
-        {
-            _log?.Invoke($"Process attribution unavailable: {ex.Message}");
-            return false;
-        }
+            if (_disposed)
+            {
+                return false;
+            }
 
-        _worker = new Thread(Loop)
+            if (IsHealthy)
+            {
+                return true;
+            }
+
+            _priority = priority;
+
+            if (_stopping.IsCancellationRequested)
+            {
+                _stopping.Dispose();
+                _stopping = new CancellationTokenSource();
+            }
+
+            try
+            {
+                _handle = WinDivertHandle.Open(
+                    Filter,
+                    WinDivertLayer.Socket,
+                    priority,
+                    WinDivertFlags.Sniff | WinDivertFlags.RecvOnly);
+            }
+            catch (WinDivertException ex)
+            {
+                _log?.Invoke($"Process attribution unavailable: {ex.Message}");
+                return false;
+            }
+
+            _worker = new Thread(Loop)
+            {
+                IsBackground = true,
+                Name = "DpiBypass.SocketWatcher",
+                Priority = ThreadPriority.AboveNormal,
+            };
+            _worker.Start();
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Closes the watcher and opens it again, keeping the object the engine holds.
+    /// </summary>
+    /// <remarks>
+    /// The engine is handed this instance once, at construction, so recovery has to happen
+    /// inside it. What is deliberately not kept is the table: every entry maps a port to
+    /// the process that owned it while the watcher was running, and the connects it missed
+    /// while it was down are exactly the ones that would now be attributed wrongly.
+    /// </remarks>
+    public bool Restart()
+    {
+        lock (_lifecycleGate)
         {
-            IsBackground = true,
-            Name = "DpiBypass.SocketWatcher",
-            Priority = ThreadPriority.AboveNormal,
-        };
-        _worker.Start();
-        return true;
+            if (_disposed)
+            {
+                return false;
+            }
+
+            StopCore();
+            _owners.Clear();
+            return TryStart(_priority);
+        }
+    }
+
+    private void StopCore()
+    {
+        _stopping.Cancel();
+
+        // Shut down before closing: the worker is parked inside Receive, and pulling
+        // the handle out from under it is what the loop is guarding against.
+        var handle = Interlocked.Exchange(ref _handle, null);
+        handle?.Shutdown();
+
+        _worker?.Join(TimeSpan.FromSeconds(2));
+        _worker = null;
+
+        handle?.Dispose();
     }
 
     /// <summary>The executable that opened <paramref name="localPort"/>, if we saw it happen.</summary>
@@ -160,18 +234,18 @@ public sealed class ProcessPortMap : IDisposable
 
     public void Dispose()
     {
-        _stopping.Cancel();
+        lock (_lifecycleGate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
 
-        // Shut down before closing: the worker is parked inside Receive, and pulling
-        // the handle out from under it is what the loop is guarding against.
-        var handle = Interlocked.Exchange(ref _handle, null);
-        handle?.Shutdown();
-
-        _worker?.Join(TimeSpan.FromSeconds(2));
-
-        handle?.Dispose();
-        _stopping.Dispose();
-        _owners.Clear();
+            _disposed = true;
+            StopCore();
+            _stopping.Dispose();
+            _owners.Clear();
+        }
     }
 
     private readonly record struct Owner(string ImagePath, DateTime Expires);

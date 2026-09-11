@@ -9,6 +9,7 @@ using DpiBypass.Core.Interop;
 using DpiBypass.Core.Ipc;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.Startup;
+using Microsoft.Win32;
 
 namespace DpiBypass.App;
 
@@ -107,6 +108,7 @@ public partial class App : Application
     private StartupPlan _plan = new(StartupVisibility.ShowWindow, "başlatılıyor");
     private bool _shuttingDown;
     private bool _dnsWatchdogStarted;
+    private bool _powerEventsHooked;
 
     /// <summary>
     /// How long the window has to stay out of sight before its memory is handed back.
@@ -341,6 +343,8 @@ public partial class App : Application
         StartupTrace.Mark("ProtectionService kurucusu başladı");
         _service = new ProtectionService();
         StartupTrace.Mark("ProtectionService kurucusu bitti");
+
+        HookPowerEvents();
 
         StartupTrace.Mark("MainViewModel kurucusu başladı");
         _viewModel = new MainViewModel(_service, Dispatcher);
@@ -1747,6 +1751,7 @@ public partial class App : Application
         try
         {
             StopVisibilityWatchdog();
+            UnhookPowerEvents();
             _idleMemoryTimer?.Stop();
             _idleMemoryTimer = null;
             _window?.Hide();
@@ -1779,6 +1784,85 @@ public partial class App : Application
             AppLog.Shutdown();
             Shutdown(_exitCode);
         }
+    }
+
+    /// <summary>
+    /// Listens for the machine waking up.
+    /// </summary>
+    /// <remarks>
+    /// The service works a resume out for itself from a health tick that arrives far
+    /// later than it asked for, so this is not the only way it finds out - but the power
+    /// event arrives at once and the tick can be most of a minute behind it. Those are
+    /// the seconds in which the first lookup after the lid opens goes out over a
+    /// connection that died while the machine was asleep.
+    /// </remarks>
+    private void HookPowerEvents()
+    {
+        if (_powerEventsHooked)
+        {
+            return;
+        }
+
+        try
+        {
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            _powerEventsHooked = true;
+        }
+        catch (Exception ex)
+        {
+            // A session with no window station cannot subscribe. The health tick still
+            // notices the gap, so this costs promptness rather than the behaviour.
+            AppLog.Warning($"Güç olayları dinlenemedi: {ex.Message}");
+        }
+    }
+
+    private void UnhookPowerEvents()
+    {
+        if (!_powerEventsHooked)
+        {
+            return;
+        }
+
+        _powerEventsHooked = false;
+
+        try
+        {
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        }
+        catch (Exception)
+        {
+            // Going away regardless.
+        }
+    }
+
+    /// <summary>Runs on the SystemEvents thread, so it hands the work straight over.</summary>
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != PowerModes.Resume)
+        {
+            return;
+        }
+
+        var service = _service;
+        if (service is null || _shuttingDown)
+        {
+            return;
+        }
+
+        // Not awaited and not on this thread: SystemEvents delivers on a shared listener
+        // that every subscriber in the process is queued behind, and refreshing the
+        // resolver involves the network.
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                service.OnSystemResumed("Windows uyanma bildirimi");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Uyanma sonrası yenileme başarısız", ex);
+            }
+        });
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
