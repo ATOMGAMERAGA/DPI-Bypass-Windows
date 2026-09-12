@@ -372,13 +372,25 @@ try {
             }
 
             if (Test-Path $exe) {
-                $uninstallStart = @{ FilePath = $exe; ArgumentList = $uninstallArgs; Wait = $true }
+                # No -Wait, for the same reason Setup below is not given one: on Windows
+                # it waits for the whole process tree, and the uninstall runs the
+                # application's own restore verbs and closes the running copy - work that
+                # starts helpers built to outlive the process that started them. Waiting
+                # on the tree left the updater sitting on "Eski sürüm kaldırılıyor..."
+                # with no time limit, long after the uninstall itself had finished.
+                $uninstallStart = @{ FilePath = $exe; ArgumentList = $uninstallArgs; PassThru = $true }
                 if ($SafeWorkingDirectory) { $uninstallStart['WorkingDirectory'] = $SafeWorkingDirectory }
-                Start-Process @uninstallStart | Out-Null
+                $uninstallProcess = Start-Process @uninstallStart
 
-                # Inno's uninstaller copies itself to the temp folder and the first
-                # process exits immediately, so waiting on it proves nothing. The
-                # registry key disappearing is what actually means "finished".
+                # Inno's uninstaller copies itself to the temp folder and this first
+                # process exits immediately, so this returns at once and proves nothing
+                # on its own. It is bounded anyway: an uninstaller that does hold the
+                # foreground must not be able to stop the update either.
+                if ($uninstallProcess) { [void]$uninstallProcess.WaitForExit(60000) }
+
+                # The registry key disappearing is what actually means "finished", and
+                # this wait is the one with the budget that decides how long the update
+                # is willing to wait for it.
                 $deadline = (Get-Date).AddMinutes(3)
                 while ((Test-Path $installed.RegistryPath) -and (Get-Date) -lt $deadline) {
                     Start-Sleep -Milliseconds 500

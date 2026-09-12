@@ -373,6 +373,31 @@ Test-Case 'the installer is asked for a log the failure path can quote' {
     if ($explain -ge $fail) { throw 'the explanation is printed after the script has thrown' }
 }
 
+Test-Case 'the update does not wait on the uninstall process tree' {
+    # The same trap as Setup below, and the one that actually stopped an update: the
+    # uninstall runs the application's restore verbs and closes the running copy, so
+    # its tree contains helpers that are meant to outlive it. With -Wait the updater
+    # sat on "Eski sürüm kaldırılıyor..." with no time limit even though the uninstall
+    # had already finished. What says it finished is the registry key going away.
+    $script = Get-Content -Path $scriptPath -Raw
+    $uninstallStart = [regex]::Match($script, '(?s)\$uninstallStart\s*=\s*@\{(?<body>.*?)\}')
+    if (-not $uninstallStart.Success) { throw 'the uninstaller Start-Process arguments were not found' }
+    if ($uninstallStart.Groups['body'].Value -match '\bWait\s*=') {
+        throw 'the uninstaller is still launched through Start-Process -Wait'
+    }
+
+    $start = $script.IndexOf('$uninstallProcess = Start-Process @uninstallStart', [StringComparison]::Ordinal)
+    if ($start -lt 0) { throw 'the uninstaller is no longer started as a Process object' }
+
+    $rest = $script.Substring($start)
+    if ($rest -notmatch '\$uninstallProcess\.WaitForExit\(\s*\d+\s*\)') {
+        throw 'the uninstaller process is waited for without a time budget'
+    }
+
+    $poll = $script.IndexOf('while ((Test-Path $installed.RegistryPath)', $start, [StringComparison]::Ordinal)
+    if ($poll -lt 0) { throw 'the registry key no longer decides when the uninstall is finished' }
+}
+
 Test-Case 'the install waits only for Setup and not for the application it launches' {
     # Start-Process -Wait follows the child process tree on Windows. Inno Setup's
     # final [Run] entry starts the long-lived application, so using -Wait here leaves
