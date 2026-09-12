@@ -363,7 +363,14 @@ try {
         if ($uninstaller) {
             Write-Step 'Eski sürüm kaldırılıyor...'
             $exe = $uninstaller
-            $uninstallArgs = @('/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES')
+
+            # Asked for a log for the same reason Setup is: when this step is the one
+            # that does not finish, the log is the only thing that says which of the
+            # uninstall's own steps - restoring adapter settings, DNS, the hosts block,
+            # removing the driver - it stopped in. Kept outside the temporary folder,
+            # which is deleted on the way out of this script.
+            $uninstallLog = Join-Path $env:TEMP ('dpibypass-uninstall-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
+            $uninstallArgs = @('/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES', "`"/LOG=$uninstallLog`"")
 
             # UninstallString is a quoted path, sometimes with arguments of its own.
             if ($uninstaller -match '^\s*"([^"]+)"\s*(.*)$') {
@@ -391,13 +398,39 @@ try {
                 # The registry key disappearing is what actually means "finished", and
                 # this wait is the one with the budget that decides how long the update
                 # is willing to wait for it.
-                $deadline = (Get-Date).AddMinutes(3)
-                while ((Test-Path $installed.RegistryPath) -and (Get-Date) -lt $deadline) {
+                #
+                # It counts out loud. The uninstall runs the application's own restore
+                # steps first - adapter properties, DNS, the hosts block, the driver
+                # service - and on a machine where those are slow this is a minute or
+                # more of a console that has printed nothing since "Eski sürüm
+                # kaldırılıyor...". A wait nobody can tell from a hang is reported as a
+                # hang, and the person watching it ends the update that was about to
+                # succeed.
+                $started = Get-Date
+                $announced = 0
+                while ((Test-Path $installed.RegistryPath) -and ((Get-Date) - $started).TotalMinutes -lt 3) {
                     Start-Sleep -Milliseconds 500
+                    $elapsed = [int](((Get-Date) - $started).TotalSeconds)
+                    if ($elapsed -ge $announced + 10) {
+                        $announced = $elapsed - ($elapsed % 10)
+                        Write-Note "Kaldırma sürüyor, bekleniyor... ($announced sn)"
+                    }
                 }
 
                 if (Test-Path $installed.RegistryPath) {
-                    Write-Warn 'Eski sürüm kaldırılamadı; kurulum yine de üzerine yazacak.'
+                    # Not a failure of the update: Setup ends the running copy itself and
+                    # writes over the old installation, which is what the uninstall was
+                    # only making tidier. Saying so keeps the warning from reading like
+                    # the end of the road.
+                    Write-Warn 'Eski sürüm bu süre içinde kaldırılamadı; kurulum üzerine yazarak devam edecek.'
+
+                    if (Test-Path $uninstallLog) {
+                        Write-Note "Kaldırma günlüğü: $uninstallLog"
+                        Write-Note 'Günlüğün son satırları:'
+                        foreach ($line in @(Get-Content -Path $uninstallLog -Tail 8 -ErrorAction SilentlyContinue)) {
+                            Write-Note "  $line"
+                        }
+                    }
                 }
                 else {
                     Write-Ok 'Eski sürüm kaldırıldı.'
