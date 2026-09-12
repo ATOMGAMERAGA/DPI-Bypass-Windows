@@ -4,34 +4,60 @@ using DpiBypass.Core.Net;
 
 namespace DpiBypass.Core.Vodafone;
 
-/// <summary>Segments the Java login handshake on the active hotspot adapter.</summary>
+/// <summary>Segments the Java handshake that joins a server on the active hotspot adapter.</summary>
+/// <remarks>
+/// Both intents that lead into the login phase are covered: the Login (2) the client sends
+/// when the player picks a server, and the Transfer (3) it sends on the fresh connection a
+/// 1.20.5+ server asks for when it hands the player to another server. The two packets
+/// differ in a single byte, so an inspector that blocks one blocks the other - and because
+/// a transfer opens a brand new connection, the client has nothing to report and sits on
+/// "Transferring to new server" for as long as the login answer never comes. Status pings
+/// (1) are deliberately left whole: they are not a join, and the server list sends them
+/// constantly.
+/// </remarks>
 internal static class MinecraftHandshakeSplit
 {
     private const int SplitOffset = 4;
+
+    /// <summary>Next state 2: the player is joining the server they picked.</summary>
+    private const int LoginIntent = 2;
+
+    /// <summary>Next state 3: the same login on a connection the server asked for (1.20.5+).</summary>
+    private const int TransferIntent = 3;
+
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
+    /// <param name="transfer">
+    /// True when the handshake is a transfer rather than a first login. Only worth a log
+    /// line, but that line is how someone whose server moves them between lobbies can see
+    /// the step is being handled at all.
+    /// </param>
     internal static bool TryCreateSegments(
-        ReadOnlySpan<byte> packet, int ttlGuard, out byte[] first, out byte[] second)
+        ReadOnlySpan<byte> packet, int ttlGuard, out byte[] first, out byte[] second, out bool transfer)
     {
         first = second = [];
+        transfer = false;
         var parsed = TcpIpPacket.Parse(packet);
         if (!parsed.IsValid || parsed.TimeToLive < ttlGuard
             || (parsed.Flags & TcpFlags.Ack) == 0
             || (parsed.Flags & (TcpFlags.Syn | TcpFlags.Fin | TcpFlags.Rst | TcpFlags.Urg)) != 0
-            || !IsLoginHandshake(parsed.Payload(packet)))
+            || !IsJoinHandshake(parsed.Payload(packet), out var intent))
         {
             return false;
         }
 
         // No port/hostname list: SRV records and custom servers use other ports.
         // Keep all bytes, including a Login Start coalesced into the same packet.
+        transfer = intent == TransferIntent;
         first = CreateSegment(packet, parsed, 0, SplitOffset);
         second = CreateSegment(packet, parsed, SplitOffset, parsed.PayloadLength - SplitOffset);
         return true;
     }
 
-    internal static bool IsLoginHandshake(ReadOnlySpan<byte> payload)
+    /// <param name="intent">The handshake's next state, valid only when this returns true.</param>
+    internal static bool IsJoinHandshake(ReadOnlySpan<byte> payload, out int intent)
     {
+        intent = 0;
         var offset = 0;
         if (!TryReadVarInt(payload, ref offset, out var frameLength)
             || frameLength < 7 || frameLength > 1030 || frameLength > payload.Length - offset)
@@ -70,8 +96,15 @@ internal static class MinecraftHandshakeSplit
         }
 
         offset += 2;
-        return TryReadVarInt(frame, ref offset, out var nextState)
-            && nextState == 2 && offset == frame.Length;
+        if (!TryReadVarInt(frame, ref offset, out var nextState)
+            || nextState is not (LoginIntent or TransferIntent)
+            || offset != frame.Length)
+        {
+            return false;
+        }
+
+        intent = nextState;
+        return true;
     }
 
     private static bool TryReadVarInt(ReadOnlySpan<byte> data, ref int offset, out int value)

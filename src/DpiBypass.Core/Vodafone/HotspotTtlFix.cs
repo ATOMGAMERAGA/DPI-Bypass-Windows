@@ -77,6 +77,8 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     private long _ipv6Dropped;
     private long _checksumFailures;
     private int _checksumFailureLogged;
+
+    /// <summary>One bit per handshake kind already reported: 1 login, 2 transfer.</summary>
     private int _minecraftSplitLogged;
     private int _minecraftSplitFailureLogged;
 
@@ -288,7 +290,8 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
                     }
                 }
 
-                if (MinecraftHandshakeSplit.TryCreateSegments(packet, Settings.Guard, out var first, out var second))
+                if (MinecraftHandshakeSplit.TryCreateSegments(
+                    packet, Settings.Guard, out var first, out var second, out var transfer))
                 {
                     var firstAddress = address;
                     var secondAddress = address;
@@ -299,9 +302,14 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
                         && handle.Send(first, ref firstAddress)
                         && handle.Send(second, ref secondAddress))
                     {
-                        if (Interlocked.Exchange(ref _minecraftSplitLogged, 1) == 0)
+                        // Once per kind. A server that moves the player between lobbies
+                        // does this over and over, and the transfer line is what shows
+                        // that step is being handled rather than only the first login.
+                        var kind = transfer ? 2 : 1;
+                        if ((Interlocked.Or(ref _minecraftSplitLogged, kind) & kind) == 0)
                         {
-                            _log?.Invoke("Vodafone: Minecraft Java login handshake segmented (4-byte prefix).");
+                            _log?.Invoke($"Vodafone: Minecraft Java {(transfer ? "transfer" : "login")} "
+                                + "handshake segmented (4-byte prefix).");
                         }
 
                         continue;

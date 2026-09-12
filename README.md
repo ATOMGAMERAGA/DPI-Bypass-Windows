@@ -224,6 +224,26 @@ verir; TTL ne olursa olsun operatör aynı aboneden iki farklı kaynak görür. 
 yüzden mod etkinken paylaşılan bağdaştırıcıda giden IPv6 varsayılan olarak
 düşürülür. Karttan kapatılabilir.
 
+**Minecraft Java el sıkışması.** Denetleyici, oyunun ilk paketindeki sunucu
+adını okuyup bağlantıyı sessizce düşürebiliyor. Mod etkinken bu paket, akışa ve
+sıra numaralarına dokunulmadan **4 baytlık bir önek** ile kalanı olarak iki TCP
+parçasına bölünür. Bölme, oyuna girişi başlatan **iki** el sıkışmanın ikisine de
+uygulanır:
+
+- **Giriş** (next state 2) — sunucuyu kendiniz seçtiğinizde gönderilen el sıkışma.
+- **Aktarım** (next state 3) — 1.20.5 ile gelen aktarma paketini alan istemcinin,
+  sunucu sizi başka bir sunucuya devrettiğinde **yeni bir bağlantı** açıp
+  gönderdiği el sıkışma. Girişten tek bir bayt farklıdır, dolayısıyla
+  denetleyici için ikisi aynı pakettir.
+
+İkincisi kapsam dışındayken oyuna giriliyor ama lobiden oyuna geçerken ekran
+**"Transferring to new server"** üzerinde kalıyordu: bağlantı kuruluyor, bölünmemiş
+el sıkışma düşürülüyor ve istemci hiç gelmeyecek yanıtı bekliyordu. Sunucu listesi
+sorguları (next state 1) bir giriş olmadığı ve liste açıkken sürekli gönderildiği
+için bilerek bölünmez. Günlükte hangisinin işlendiğini `Minecraft Java login
+handshake segmented` ve `Minecraft Java transfer handshake segmented` satırları
+söyler; her tür için bir kez yazılır.
+
 ### Tanılama
 
 Kartı açtığınızda bağlı olduğunuz ağı, modun bu ağdaki durumunu ve tek bir
@@ -940,6 +960,7 @@ src/DpiBypass.Core/
   MobileHotspot/HotspotLegacyMigration.cs eski alan adlarını güncel ayarlara taşıma
   Vodafone/HotspotTtlFix.cs               tek bağdaştırıcıda giden TTL'yi yeniden yazma
   Vodafone/TtlFixSettings.cs              TTL, koruma eşiği ve IPv6 seçeneği
+  Vodafone/MinecraftHandshakeSplit.cs     Minecraft giriş ve aktarım el sıkışmasını ikiye bölme
   Ipc/ControlServer.cs        uygulama ↔ komut satırı protokolü
 ```
 
@@ -973,6 +994,7 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Vodafone Sınırsız Modu** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor ölçülen parçalanmasız sınırı söyler; yalnızca belirti varsa bu sınıra yakın bir MTU denenip yeniden doğrulanmalıdır |
 | Vodafone Sınırsız Modu kayıtlı ağımı tanımıyor | İki sebebi vardı ve ikisi de giderildi: ağ kimliği yalnız koruma çalışırken okunuyordu, ve eşleştirme erişim noktasının MAC adresini içeren parmak izine bakıyordu — telefon paylaşımı her açılışta yeni bir rastgele MAC dağıttığı için kayıt tanınmıyordu. Artık ağ adı da eşleştirilir, kayıt bu oturumun kimliğiyle güncellenir ve kart kayıtlı ağda "Aktif · \<ağ adı\>" der. Hâlâ tanımıyorsa **"Bu ağı kaydet"** ile bir kez kaydedin |
 | Vodafone Sınırsız Modu açık ama bir şey değişmiyor | Windows'ta modun "açık" olması yetmez; kartta **"Aktif · \<ağ adı\> · TTL 65"** yazmalı ve düzeltilen paket sayacı artmalıdır. "Kurulamadı" diyorsa sebebi hemen yanında yazar: uygulamayı **yönetici olarak** çalıştırın ve kurulum klasöründeki WinDivert dosyalarının yerinde olduğunu doğrulayın. Ağ kayıtlı değilse **"Bu ağı kaydet"** deyin |
+| Sunucuya giriyorum ama **"Transferring to new server"** ekranında kalıyorum | Vodafone Sınırsız Modu girişin ilk paketini bölerek denetleyiciyi aşıyor, ama oyunun 1.20.5 ile gelen **aktarım** el sıkışması (sunucu sizi başka bir sunucuya devrettiğinde istemcinin açtığı yeni bağlantı) giriş el sıkışmasından tek bir bayt farklı olduğu hâlde bölme kapsamının dışındaydı; engel tam o adımda geri geliyordu. Artık ikisi de bölünüyor. Günlükte `Minecraft Java transfer handshake segmented` satırını görmelisiniz; yoksa kartta modun **"Aktif"** dediğini doğrulayın |
 | Linux'ta çalışıyor, Windows'ta çalışmıyordu | Bir ara sürüm Windows tarafında TTL yeniden yazımını tamamen kaldırmış, anahtarı yalnız salt-okunur tanılamaya bağlamıştı. Mekanizma geri getirildi; iki sürüm de aynı TTL (65) ve aynı koruma eşiği (32) ile çalışır |
 | Bağlantı arada bir kesiliyor, sonra kendiliğinden düzeliyor | Paket süzgeci bir sürücü hatasıyla kapanmış olabilir. Artık 15 saniyede bir denetlenip yeniden açılıyor ve kapalı olduğu sürece başlık **"Koruma duraklatıldı, yeniden açılıyor"** diyor. Günlükte "paket süzgeci" geçen satırlara bakın; sürekli tekrarlıyorsa o satırları bildirin |
 | Uykudan sonra internet birkaç saniye açılmıyor | Uyanma artık algılanıyor: şifreli DNS bağlantı havuzu tazeleniyor, ad önbelleği boşaltılıyor ve ağ yeniden yoklanıyor. Sürüyorsa günlükteki "Uyanma algılandı" satırının olup olmadığını bildirin |
