@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
+using DpiBypass.Core.Dns;
 using DpiBypass.Core.Network;
 
 namespace DpiBypass.Core.MobileHotspot;
@@ -64,6 +65,26 @@ public sealed record HotspotDiagnosticResult
 
     public required bool DnsWorks { get; init; }
 
+    /// <summary>
+    /// True when the network resolves names but this machine's own configuration does not.
+    /// </summary>
+    /// <remarks>
+    /// Established by asking an IPv4 resolver directly once the system path has failed.
+    /// The two faults look identical from the outside and have opposite remedies: one is
+    /// the link, the other is what Windows was told to ask - most often an IPv6 resolver
+    /// on a link whose IPv6 does not carry traffic.
+    /// </remarks>
+    public bool SystemResolverFaulty { get; init; }
+
+    /// <summary>Whether the adapter carries IPv6 DNS servers.</summary>
+    /// <remarks>
+    /// A phone advertises these in its router advertisements, and Windows asks them
+    /// before the IPv4 servers sitting beside them. That ordering is why an adapter with
+    /// unusable IPv6 can resolve nothing at all while every IPv4 route works, so whether
+    /// the servers are there is a fact the card has to carry rather than assume.
+    /// </remarks>
+    public bool HasIpv6Dns { get; init; }
+
     public double? MedianRttMs { get; init; }
 
     public double? P95RttMs { get; init; }
@@ -95,7 +116,7 @@ public sealed record HotspotDiagnosticResult
         builder.AppendLine($"Bağdaştırıcı  : {AdapterName}");
         builder.AppendLine($"IPv4          : {Describe(HasIpv4, Ipv4Works)}");
         builder.AppendLine($"IPv6          : {Describe(HasIpv6, Ipv6Works)}");
-        builder.AppendLine($"DNS           : {(DnsWorks ? "çalışıyor" : "ad çözülemiyor")}");
+        builder.AppendLine($"DNS           : {DescribeDns()}");
         builder.AppendLine($"Adres türü    : {DescribeAddress(AddressKind)}");
         builder.AppendLine($"VPN           : {(VpnAdapterActive
             ? "etkin olabilecek bir VPN/tünel bağdaştırıcısı saptandı (en iyi çaba)"
@@ -131,6 +152,14 @@ public sealed record HotspotDiagnosticResult
 
         return builder.ToString().TrimEnd();
     }
+
+    private string DescribeDns() => (DnsWorks, SystemResolverFaulty, HasIpv6Dns) switch
+    {
+        (true, _, _) => "çalışıyor",
+        (false, true, true) => "bu bilgisayarın ayarlarında çözülemiyor (IPv6 DNS sunucusu var); ağ çözüyor",
+        (false, true, false) => "bu bilgisayarın ayarlarında çözülemiyor; ağ çözüyor",
+        _ => "ad çözülemiyor",
+    };
 
     private static string Describe(bool configured, bool works) => (configured, works) switch
     {
@@ -197,6 +226,23 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
     private static readonly IPAddress Ipv6Target = IPAddress.Parse("2606:4700:4700::1111");
     private const string DnsProbeHost = "cloudflare-dns.com";
 
+    /// <summary>
+    /// How long the machine's own resolvers get before the probe calls it a failure.
+    /// </summary>
+    /// <remarks>
+    /// Bounded rather than open-ended because the failure this card exists to catch is
+    /// precisely a resolver that never answers: Windows works through its server list
+    /// with its own retries, and without a ceiling the check sat there for most of a
+    /// minute and the card said nothing at all while it did.
+    /// </remarks>
+    private static readonly TimeSpan SystemResolverBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>How long one direct UDP query to a named resolver gets.</summary>
+    private static readonly TimeSpan DirectQueryBudget = TimeSpan.FromSeconds(2);
+
+    /// <summary>How many resolvers the direct probe will try before giving up.</summary>
+    private const int MaxDirectResolvers = 2;
+
     private readonly ILatencyProbe _probe;
     private readonly Action<string>? _log;
     private readonly Func<DateTimeOffset> _now;
@@ -222,7 +268,7 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
         var addresses = ReadAddresses(network);
         var latency = await MeasureAsync(network, cancellationToken).ConfigureAwait(false);
         var ipv6Works = addresses.HasIpv6 && await ReachesAsync(Ipv6Target, cancellationToken).ConfigureAwait(false);
-        var dnsWorks = await ResolvesAsync(cancellationToken).ConfigureAwait(false);
+        var dns = await ProbeDnsAsync(addresses, cancellationToken).ConfigureAwait(false);
         var mtu = await ProbeMtuAsync(cancellationToken).ConfigureAwait(false);
 
         var result = new HotspotDiagnosticResult
@@ -235,7 +281,9 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
             HasIpv6 = addresses.HasIpv6,
             Ipv4Works = latency?.HasRemoteConnectivity ?? false,
             Ipv6Works = ipv6Works,
-            DnsWorks = dnsWorks,
+            DnsWorks = dns.SystemResolves,
+            SystemResolverFaulty = dns is { SystemResolves: false, NetworkResolves: true },
+            HasIpv6Dns = addresses.HasIpv6Dns,
             MedianRttMs = latency?.HasRemoteConnectivity == true ? latency.MedianRttMs : null,
             P95RttMs = latency?.HasRemoteConnectivity == true ? latency.P95RttMs : null,
             PacketLossPercent = latency?.PacketLossPercent,
@@ -247,7 +295,9 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
         };
 
         result = result with { Findings = Findings(result), Remediation = Remediation(result) };
-        _log?.Invoke($"hotspot.diagnostics.completed: internet={result.HasInternet} dns={result.DnsWorks} ipv6={result.Ipv6Works}");
+        _log?.Invoke("hotspot.diagnostics.completed: "
+            + $"internet={result.HasInternet} dns={result.DnsWorks} ipv6={result.Ipv6Works} "
+            + $"ipv6dns={result.HasIpv6Dns} networkdns={dns.NetworkResolves}");
 
         return result;
     }
@@ -283,7 +333,22 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
 
         if (!result.DnsWorks)
         {
-            findings.Add("Ad çözümleme başarısız; adresler açılıyorsa sorun DNS tarafındadır.");
+            findings.Add(result.SystemResolverFaulty
+                ? "Ad çözümleme bu bilgisayarın DNS ayarlarında başarısız: doğrudan sorulan bir "
+                    + "IPv4 çözümleyici aynı anda yanıt veriyor, yani ağın kendisi adları çözebiliyor."
+                : "Ad çözümleme başarısız; adresler açılıyorsa sorun DNS tarafındadır.");
+
+            // The specific shape this card exists to name. Windows asks an adapter's IPv6
+            // resolvers before the IPv4 ones beside them, so an unusable IPv6 link takes
+            // name resolution down with it while every IPv4 route keeps working - which
+            // reads to a user as "internet is fine, nothing loads".
+            if (result.HasIpv6Dns && !result.Ipv6Works)
+            {
+                findings.Add(
+                    "Bu ağ IPv6 DNS sunucusu veriyor ama IPv6 trafiği geçmiyor. Windows önce o "
+                    + "sunuculara sorduğu için adlar çözülemiyor; IPv4 bağlantısının çalışıyor "
+                    + "olması bunu değiştirmez.");
+            }
         }
 
         if (result.MtuLooksReduced == true && result.LargestUnfragmentedPayload is { } payload)
@@ -326,6 +391,13 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
 
         if (!result.DnsWorks)
         {
+            if (result.HasIpv6Dns && !result.Ipv6Works)
+            {
+                return "Bağdaştırıcıdaki IPv6 DNS sunucularını kaldırın ya da IPv6'yı yeniden açın. "
+                    + "Vodafone Sınırsız Modu açıkken uygulama IPv6 çözümleyici yazmaz; "
+                    + "eski bir ayar kalmışsa modu kapatıp açmak onu temizler.";
+            }
+
             return "DNS ayarlarını sistem varsayılanına alın veya şifreli DNS'i kapatıp yeniden deneyin.";
         }
 
@@ -375,7 +447,10 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
                     continue;
                 }
 
-                foreach (var address in adapter.GetIPProperties().UnicastAddresses)
+                var properties = adapter.GetIPProperties();
+                ReadResolvers(properties, summary);
+
+                foreach (var address in properties.UnicastAddresses)
                 {
                     switch (address.Address.AddressFamily)
                     {
@@ -404,6 +479,40 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
         }
 
         return summary;
+    }
+
+    /// <summary>
+    /// Records which resolvers the adapter carries, split by family.
+    /// </summary>
+    /// <remarks>
+    /// <c>::1</c> and <c>127.0.0.1</c> are this app's own loopback proxy rather than
+    /// anything the network offered, so a machine resolving through us does not count as
+    /// one the network handed an IPv6 resolver. Getting that wrong would put the IPv6
+    /// finding on a card where it explains nothing.
+    /// </remarks>
+    internal static void ReadResolvers(IPInterfaceProperties properties, AddressSummary summary)
+    {
+        ArgumentNullException.ThrowIfNull(properties);
+        ArgumentNullException.ThrowIfNull(summary);
+
+        foreach (var server in properties.DnsAddresses)
+        {
+            if (IPAddress.IsLoopback(server))
+            {
+                continue;
+            }
+
+            switch (server.AddressFamily)
+            {
+                case AddressFamily.InterNetwork:
+                    summary.Ipv4Dns.Add(server);
+                    break;
+
+                case AddressFamily.InterNetworkV6:
+                    summary.HasIpv6Dns = true;
+                    break;
+            }
+        }
     }
 
     internal static HotspotAddressKind Classify(IPAddress address)
@@ -518,25 +627,165 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
         return TunnelNameHints.Any(identity.Contains);
     }
 
+    /// <summary>
+    /// Whether names resolve, and - when they do not - whether the fault is this machine.
+    /// </summary>
+    /// <remarks>
+    /// Two questions, because "DNS is broken" was never actionable. The system path is
+    /// what every application on the machine uses, so its failure is the symptom. Asking
+    /// an IPv4 resolver directly afterwards says whether the network could have answered,
+    /// which is what separates a dead link from a machine pointed at a resolver that
+    /// cannot be reached - the failure a phone's IPv6 servers produce on a link whose
+    /// IPv6 does not carry traffic.
+    /// </remarks>
+    private async Task<DnsProbe> ProbeDnsAsync(AddressSummary addresses, CancellationToken cancellationToken)
+    {
+        if (await ResolvesAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return new DnsProbe(true, true);
+        }
+
+        var network = await ResolvesDirectlyAsync(addresses, cancellationToken).ConfigureAwait(false);
+        if (network)
+        {
+            _log?.Invoke("hotspot.diagnostics: sistem çözümleyicisi yanıt vermedi, "
+                + "doğrudan sorulan IPv4 çözümleyici yanıt verdi.");
+        }
+
+        return new DnsProbe(false, network);
+    }
+
     private async Task<bool> ResolvesAsync(CancellationToken cancellationToken)
     {
+        // The probe's own ceiling. A resolver that is being black-holed does not refuse,
+        // it says nothing, and Windows works through its server list with its own retries
+        // before giving up - so without this the check outlives the card that is waiting
+        // on it.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(SystemResolverBudget);
+
         try
         {
             var addresses = await System.Net.Dns
-                .GetHostAddressesAsync(DnsProbeHost, cancellationToken)
+                .GetHostAddressesAsync(DnsProbeHost, budget.Token)
                 .ConfigureAwait(false);
 
             return addresses.Length > 0;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // Our ceiling, not the caller's. A resolver that never answered inside the
+            // budget is a resolver this machine cannot use, which is the finding.
+            _log?.Invoke($"hotspot.diagnostics: ad çözümleme {SystemResolverBudget.TotalSeconds:F0} "
+                + "saniyede yanıtlanmadı.");
+            return false;
         }
         catch (Exception ex) when (ex is SocketException or ArgumentException)
         {
             return false;
         }
     }
+
+    /// <summary>Asks an IPv4 resolver directly, bypassing whatever Windows was told to use.</summary>
+    private async Task<bool> ResolvesDirectlyAsync(AddressSummary addresses, CancellationToken cancellationToken)
+    {
+        foreach (var server in DirectResolvers(addresses.Ipv4Dns))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (await QueryAsync(server, cancellationToken).ConfigureAwait(false))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The IPv4 resolvers worth asking directly, most representative first.
+    /// </summary>
+    /// <remarks>
+    /// The adapter's own servers come first because they are what the network offered and
+    /// therefore what "can this network resolve" actually means. Loopback is skipped: it
+    /// is this app's own proxy, and asking it would answer a different question. A public
+    /// resolver finishes the list so an adapter with no usable IPv4 server of its own -
+    /// or one whose only servers are ours - still produces an answer.
+    /// </remarks>
+    internal static IReadOnlyList<IPAddress> DirectResolvers(IEnumerable<IPAddress> configured)
+    {
+        ArgumentNullException.ThrowIfNull(configured);
+
+        var servers = new List<IPAddress>(MaxDirectResolvers);
+
+        foreach (var server in configured)
+        {
+            if (server.AddressFamily != AddressFamily.InterNetwork
+                || IPAddress.IsLoopback(server)
+                || server.Equals(IPAddress.Any)
+                || servers.Contains(server))
+            {
+                continue;
+            }
+
+            servers.Add(server);
+
+            if (servers.Count == MaxDirectResolvers)
+            {
+                return servers;
+            }
+        }
+
+        servers.Add(Ipv4Target);
+        return servers;
+    }
+
+    /// <summary>One UDP question to one resolver. True only when it answers with an address.</summary>
+    private async Task<bool> QueryAsync(IPAddress server, CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(DirectQueryBudget);
+
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            var id = (ushort)Random.Shared.Next(1, ushort.MaxValue);
+            var query = DnsMessage.BuildQuery(id, DnsProbeHost, DnsRecordType.A);
+
+            await socket
+                .SendToAsync(query, new IPEndPoint(server, 53), budget.Token)
+                .ConfigureAwait(false);
+
+            var buffer = new byte[512];
+            var received = await socket
+                .ReceiveFromAsync(buffer, new IPEndPoint(IPAddress.Any, 0), budget.Token)
+                .ConfigureAwait(false);
+
+            var answer = buffer.AsSpan(0, received.ReceivedBytes);
+
+            // The id has to match, or this is a stray datagram rather than our answer.
+            return DnsMessage.GetId(answer) == id
+                && DnsMessage.ReadAnswers(answer).Any(record => record.Type is DnsRecordType.A or DnsRecordType.Cname);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // A resolver that will not answer is the answer. Nothing here is retried:
+            // the next server on the list is the retry.
+            return false;
+        }
+    }
+
+    /// <param name="SystemResolves">Whether the machine's own resolver configuration answered.</param>
+    /// <param name="NetworkResolves">Whether an IPv4 resolver answered when asked directly.</param>
+    private readonly record struct DnsProbe(bool SystemResolves, bool NetworkResolves);
 
     private static async Task<bool> ReachesAsync(IPAddress address, CancellationToken cancellationToken)
     {
@@ -651,11 +900,18 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
         }
     }
 
-    private sealed class AddressSummary
+    /// <summary>What reading the adapter established, before anything was probed.</summary>
+    internal sealed class AddressSummary
     {
         public bool HasIpv4 { get; set; }
 
         public bool HasIpv6 { get; set; }
+
+        /// <summary>Whether the adapter carries an IPv6 resolver the network gave it.</summary>
+        public bool HasIpv6Dns { get; set; }
+
+        /// <summary>The adapter's own IPv4 resolvers, in the order Windows lists them.</summary>
+        public List<IPAddress> Ipv4Dns { get; } = [];
 
         public HotspotAddressKind Kind { get; set; } = HotspotAddressKind.Unknown;
     }

@@ -44,11 +44,21 @@ public sealed record TtlFixSettings
 
     /// <summary>Drop outbound IPv6 on the shared adapter so the operator sees one source.</summary>
     /// <remarks>
+    /// <para>
     /// The Linux build turns IPv6 off on the interface through sysctl for the same
     /// reason: tethering hands the laptop its own global IPv6 address, so one subscriber
     /// shows up as two distinct sources whatever the hop limit says. Dropping the
     /// packets rather than unbinding the protocol leaves nothing behind when the rule
     /// goes away, which is the difference that matters on a machine that crashes.
+    /// </para>
+    /// <para>
+    /// "Drop outbound IPv6" is not "drop every outbound IPv6 packet". The packets that
+    /// never reach the operator anyway - neighbour discovery, router solicitation, MLD,
+    /// DHCPv6 - and the ones name resolution depends on are forwarded, because a phone
+    /// advertises IPv6 resolvers that Windows prefers over the IPv4 ones beside them, and
+    /// a query dropped into silence is never answered and never refused. See
+    /// <c>HotspotIpv6Policy</c> for the exact rule and why each exemption is safe.
+    /// </para>
     /// </remarks>
     public bool DropIPv6 { get; init; } = true;
 

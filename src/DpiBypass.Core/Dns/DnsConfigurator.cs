@@ -58,7 +58,17 @@ public sealed class DnsConfigurator
     /// <summary>True when a snapshot is on disk, meaning DNS is (or was) redirected.</summary>
     public bool HasPendingRestore => File.Exists(_snapshotPath);
 
-    public async Task<bool> ApplyAsync(DnsMode mode, bool loopbackHasIPv6, CancellationToken cancellationToken = default)
+    /// <param name="ipv6Blocked">
+    /// True while Vodafone Sınırsız Modu is dropping outbound IPv6 on the shared adapter.
+    /// A resolver that cannot be reached is worse than no resolver at all - Windows
+    /// prefers the IPv6 servers on an adapter and waits on them - so when this is set the
+    /// app installs no IPv6 server it would then drop.
+    /// </param>
+    public async Task<bool> ApplyAsync(
+        DnsMode mode,
+        bool loopbackHasIPv6,
+        bool ipv6Blocked = false,
+        CancellationToken cancellationToken = default)
     {
         if (mode == DnsMode.SystemDefault)
         {
@@ -110,9 +120,13 @@ public sealed class DnsConfigurator
         PersistSnapshot(snapshot);
 
         var v4 = mode == DnsMode.EncryptedLoopback ? ["127.0.0.1"] : PublicV4;
-        var v6 = mode == DnsMode.EncryptedLoopback
-            ? (loopbackHasIPv6 ? ["::1"] : PublicV6)
-            : PublicV6;
+        var v6 = ChooseIpv6Servers(mode, loopbackHasIPv6, ipv6Blocked);
+
+        if (v6 is null)
+        {
+            _log?.Invoke("Outbound IPv6 is being dropped on the shared adapter; "
+                + "leaving the IPv6 resolvers alone rather than installing ones that cannot answer.");
+        }
 
         var writes = new List<DnsWrite>(adapters.Count * 2);
         var v4Writes = new List<int>(adapters.Count);
@@ -122,7 +136,7 @@ public sealed class DnsConfigurator
             v4Writes.Add(writes.Count);
             writes.Add(new DnsWrite(adapter.InterfaceIndexV4, v4));
 
-            if (adapter.InterfaceIndexV6 > 0)
+            if (v6 is not null && adapter.InterfaceIndexV6 > 0)
             {
                 writes.Add(new DnsWrite(adapter.InterfaceIndexV6, v6));
             }
@@ -155,6 +169,34 @@ public sealed class DnsConfigurator
         CurrentMode = mode;
         _log?.Invoke($"DNS set to {(mode == DnsMode.EncryptedLoopback ? "encrypted loopback proxy" : "public resolvers")} on {applied} adapter(s).");
         return true;
+    }
+
+    /// <summary>
+    /// The IPv6 resolvers to install, or null to leave the adapter's own alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Loopback is not on the shared adapter, so <c>::1</c> is reachable whatever the
+    /// hotspot rule is doing to that adapter's IPv6 and stays the right answer.
+    /// </para>
+    /// <para>
+    /// The public IPv6 resolvers are the ones that must not be written while outbound
+    /// IPv6 is being dropped. Doing so pointed Windows - which prefers an adapter's IPv6
+    /// servers over the IPv4 ones beside them - at addresses this app was itself
+    /// black-holing, and the machine kept full IPv4 connectivity while resolving no names
+    /// at all. Nothing is written for the family instead: the IPv4 servers on the same
+    /// adapter are the ones that answer, and leaving the originals in place is also what
+    /// makes the restore a no-op for a family nobody touched.
+    /// </para>
+    /// </remarks>
+    internal static string[]? ChooseIpv6Servers(DnsMode mode, bool loopbackHasIPv6, bool ipv6Blocked)
+    {
+        if (mode == DnsMode.EncryptedLoopback && loopbackHasIPv6)
+        {
+            return ["::1"];
+        }
+
+        return ipv6Blocked ? null : PublicV6;
     }
 
     public async Task RestoreAsync(CancellationToken cancellationToken = default)

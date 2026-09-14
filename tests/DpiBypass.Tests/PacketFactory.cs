@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Net;
 using System.Text;
 
 namespace DpiBypass.Tests;
@@ -65,6 +66,39 @@ internal static class PacketFactory
         packet[tcpOffset + 13] = 0x18;
 
         payload.CopyTo(packet, tcpOffset + 20);
+        return packet;
+    }
+
+    /// <summary>An IPv6 packet over an arbitrary next header, addressed where the test wants it.</summary>
+    /// <remarks>
+    /// The hotspot rule decides what to drop from the destination address and the
+    /// destination port, so both have to be things a test can set. Used for the
+    /// link-scoped plumbing (neighbour discovery, DHCPv6) as well as for DNS.
+    /// </remarks>
+    public static byte[] BuildIPv6(
+        byte nextHeader,
+        string destination,
+        ushort sourcePort = 49000,
+        ushort destinationPort = 443,
+        byte hopLimit = 64,
+        int payloadBytes = 8)
+    {
+        var packet = new byte[40 + payloadBytes];
+
+        packet[0] = 0x60;
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(4), (ushort)payloadBytes);
+        packet[6] = nextHeader;
+        packet[7] = hopLimit;
+
+        IPAddress.Parse("fd00::1").GetAddressBytes().CopyTo(packet, 8);
+        IPAddress.Parse(destination).GetAddressBytes().CopyTo(packet, 24);
+
+        if (nextHeader is 6 or 17 && payloadBytes >= 4)
+        {
+            BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(40), sourcePort);
+            BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(42), destinationPort);
+        }
+
         return packet;
     }
 
