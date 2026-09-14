@@ -245,9 +245,13 @@ sunuculardan **önce** sorar. Her giden IPv6 paketi düşürüldüğünde bu sor
 yanıtsız da kalmıyordu, reddedilmiyordu da: kayboluyorlardı. Sonuç, IPv4
 bağlantısı kusursuz çalışırken **tek bir adın çözülemediği** bir makineydi —
 kartta "İnternet erişimi: Çalışıyor · Ad çözümleme: Ad çözülemiyor". Uygulama
-ayrıca, mod IPv6'yı düşürürken bağdaştırıcıya **kendi genel IPv6
-çözümleyicilerini yazmaz**; kural kalkıp indikçe çözümleyici listesi yeniden
-yazılır.
+yerel şifreli DNS sunucusu `::1` üzerinde dinleyebiliyorsa IPv6 DNS buraya
+yönlendirilir. Dinleyemiyorsa veya genel DNS kipinde IPv6 düşürülüyorsa
+**IPv6 DNS listesi açıkça temizlenir**; eski hotspot adresleri yerinde bırakılmaz.
+Özgün ayarlar kurtarma dosyasında korunur. Aynı Wi-Fi bağdaştırıcısıyla başka
+bir hotspota geçildiğinde de DNS yeniden uygulanır ve tanılama bu işlemden
+sonra başlar. "Bağlantıyı kontrol et" düğmesi de uygulamanın DNS ayarlarını
+yenileyerek ölçer. Sistem DNS kipi seçiliyse ağın ayarlarına dokunulmaz.
 
 **Minecraft Java el sıkışması.** Denetleyici, oyunun ilk paketindeki sunucu
 adını okuyup bağlantıyı sessizce düşürebiliyor. Mod etkinken bu paket, akışa ve
@@ -1020,7 +1024,7 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Telefon paylaşımında bazı sayfalar yarım yükleniyor | **DNS ve ayarlar → Vodafone Sınırsız Modu** → *Tanıla*. 1500 baytlık paketler geçmiyorsa rapor ölçülen parçalanmasız sınırı söyler; yalnızca belirti varsa bu sınıra yakın bir MTU denenip yeniden doğrulanmalıdır |
 | Vodafone Sınırsız Modu kayıtlı ağımı tanımıyor | İki sebebi vardı ve ikisi de giderildi: ağ kimliği yalnız koruma çalışırken okunuyordu, ve eşleştirme erişim noktasının MAC adresini içeren parmak izine bakıyordu — telefon paylaşımı her açılışta yeni bir rastgele MAC dağıttığı için kayıt tanınmıyordu. Artık ağ adı da eşleştirilir, kayıt bu oturumun kimliğiyle güncellenir ve kart kayıtlı ağda "Aktif · \<ağ adı\>" der. Hâlâ tanımıyorsa **"Bu ağı kaydet"** ile bir kez kaydedin |
 | Vodafone Sınırsız Modu açık ama bir şey değişmiyor | Windows'ta modun "açık" olması yetmez; kartta **"Aktif · \<ağ adı\> · TTL 65"** yazmalı ve düzeltilen paket sayacı artmalıdır. "Kurulamadı" diyorsa sebebi hemen yanında yazar: uygulamayı **yönetici olarak** çalıştırın ve kurulum klasöründeki WinDivert dosyalarının yerinde olduğunu doğrulayın. Ağ kayıtlı değilse **"Bu ağı kaydet"** deyin |
-| Vodafone Sınırsız Modu açıkken internet var ama **hiçbir ad çözülmüyor** | Modun "giden IPv6'yı düşür" seçeneği, adı çözen paketleri de düşürüyordu. Telefon yönlendirici duyurularında bilgisayara IPv6 DNS sunucusu verir ve Windows onlara IPv4 sunuculardan önce sorar; o sorular yanıtsız kalmaz, kaybolurdu. Kartta "İnternet erişimi: Çalışıyor · Ad çözümleme: Ad çözülemiyor" tam olarak buydu. Artık ad çözümleme ve komşu keşfi düşürülmüyor, ve mod IPv6'yı düşürürken uygulama bağdaştırıcıya IPv6 çözümleyici yazmıyor. Sürümü güncelleyin; kartta "ad çözümleme ve komşu keşfi için … IPv6 paketi geçirildi" satırını görmelisiniz |
+| Vodafone Sınırsız Modu açıkken internet var ama **hiçbir ad çözülmüyor** | Önceki hotspotun IPv6 DNS adresleri kalabiliyordu. Güncel sürüm, çalışan IPv6 yerel DNS sunucusunu kullanır veya kullanılamayan IPv6 DNS listesini temizler. Aynı bağdaştırıcıda hotspot değiştirildiğinde DNS yeniden uygulanır. Sürümü güncelleyip şifreli DNS açıkken "Bağlantıyı kontrol et" düğmesine basın. Ayar uygulanamazsa günlükte hata bildirilir; tanı raporu aynı sağlayıcının birden fazla satırı olsa da kaydedilir. |
 | Sunucuya giriyorum ama **"Transferring to new server"** ekranında kalıyorum | Vodafone Sınırsız Modu girişin ilk paketini bölerek denetleyiciyi aşıyor, ama oyunun 1.20.5 ile gelen **aktarım** el sıkışması (sunucu sizi başka bir sunucuya devrettiğinde istemcinin açtığı yeni bağlantı) giriş el sıkışmasından tek bir bayt farklı olduğu hâlde bölme kapsamının dışındaydı; engel tam o adımda geri geliyordu. Artık ikisi de bölünüyor. Günlükte `Minecraft Java transfer handshake segmented` satırını görmelisiniz; yoksa kartta modun **"Aktif"** dediğini doğrulayın |
 | Linux'ta çalışıyor, Windows'ta çalışmıyordu | Bir ara sürüm Windows tarafında TTL yeniden yazımını tamamen kaldırmış, anahtarı yalnız salt-okunur tanılamaya bağlamıştı. Mekanizma geri getirildi; iki sürüm de aynı TTL (65) ve aynı koruma eşiği (32) ile çalışır |
 | Bağlantı arada bir kesiliyor, sonra kendiliğinden düzeliyor | Paket süzgeci bir sürücü hatasıyla kapanmış olabilir. Artık 15 saniyede bir denetlenip yeniden açılıyor ve kapalı olduğu sürece başlık **"Koruma duraklatıldı, yeniden açılıyor"** diyor. Günlükte "paket süzgeci" geçen satırlara bakın; sürekli tekrarlıyorsa o satırları bildirin |

@@ -40,21 +40,37 @@ public sealed class HotspotDnsBlackHoleTests
     /// </summary>
     /// <remarks>
     /// Writing these pointed Windows at addresses this same process was black-holing. The
-    /// IPv4 servers on the same adapter are the ones that answer, so nothing is written
-    /// for the family at all - which also leaves the user's own IPv6 servers untouched for
-    /// the restore to find.
+    /// IPv4 servers on the same adapter are the ones that answer, so clear IPv6 DNS
+    /// explicitly. Leaving it untouched preserves the previous hotspot's broken servers.
     /// </remarks>
     [Theory]
     [InlineData(DnsMode.EncryptedLoopback)]
     [InlineData(DnsMode.PublicResolvers)]
     public void NoIpv6ResolverIsInstalledWhileOutboundIpv6IsDropped(DnsMode mode)
     {
-        Assert.Null(DnsConfigurator.ChooseIpv6Servers(mode, loopbackHasIPv6: false, ipv6Blocked: true));
+        Assert.Empty(DnsConfigurator.ChooseIpv6Servers(mode, loopbackHasIPv6: false, ipv6Blocked: true)!);
+    }
+
+    [Fact]
+    public void Ipv4OnlyProxyClearsIpv6ResolversEvenWithoutTheHotspotRule()
+    {
+        Assert.Empty(DnsConfigurator.ChooseIpv6Servers(
+            DnsMode.EncryptedLoopback, loopbackHasIPv6: false, ipv6Blocked: false)!);
+    }
+
+    [Fact]
+    public void ClearingIpv6DnsUsesStaticNoneAndChecksTheNativeExitCode()
+    {
+        var script = DnsConfigurator.BuildWriteScript(
+            [new DnsConfigurator.DnsWrite(17, [])], flushCache: true);
+
+        Assert.Contains("ipv6 set dnsservers name=17 source=static address=none", script);
+        Assert.Contains("$LASTEXITCODE", script);
+        Assert.DoesNotContain("-ResetServerAddresses", script);
     }
 
     /// <summary>With IPv6 passing, the public resolvers go on as they always did.</summary>
     [Theory]
-    [InlineData(DnsMode.EncryptedLoopback)]
     [InlineData(DnsMode.PublicResolvers)]
     public void ThePublicResolversAreStillInstalledWhenIpv6Works(DnsMode mode)
     {

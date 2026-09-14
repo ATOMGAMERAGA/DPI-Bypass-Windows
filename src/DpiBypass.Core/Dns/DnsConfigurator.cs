@@ -46,11 +46,24 @@ public sealed class DnsConfigurator
 
     private readonly string _snapshotPath;
     private readonly Action<string>? _log;
+    private readonly Func<CancellationToken, Task<IReadOnlyList<AdapterDnsSnapshot>>> _enumerate;
+    private readonly Func<IReadOnlyList<DnsWrite>, bool, CancellationToken, Task<bool[]>> _write;
 
     public DnsConfigurator(string stateDirectory, Action<string>? log = null)
     {
         _snapshotPath = Path.Combine(stateDirectory, "dns-snapshot.json");
         _log = log;
+        _enumerate = EnumerateAsync;
+        _write = ApplyWritesAsync;
+    }
+
+    internal DnsConfigurator(string stateDirectory,
+        Func<CancellationToken, Task<IReadOnlyList<AdapterDnsSnapshot>>> enumerate,
+        Func<IReadOnlyList<DnsWrite>, bool, CancellationToken, Task<bool[]>> write)
+        : this(stateDirectory)
+    {
+        _enumerate = enumerate;
+        _write = write;
     }
 
     public DnsMode CurrentMode { get; private set; } = DnsMode.SystemDefault;
@@ -76,7 +89,7 @@ public sealed class DnsConfigurator
             return true;
         }
 
-        var adapters = await EnumerateAsync(cancellationToken).ConfigureAwait(false);
+        var adapters = await _enumerate(cancellationToken).ConfigureAwait(false);
         if (adapters.Count == 0)
         {
             _log?.Invoke("No active adapter found; leaving DNS untouched.");
@@ -107,7 +120,7 @@ public sealed class DnsConfigurator
 
                 PreserveUnreadableSnapshot();
                 previousSnapshot = [];
-                adapters = await EnumerateAsync(cancellationToken).ConfigureAwait(false);
+                adapters = await _enumerate(cancellationToken).ConfigureAwait(false);
                 if (adapters.Count == 0)
                 {
                     _log?.Invoke("No active adapter found after DNS recovery; leaving DNS untouched.");
@@ -122,21 +135,18 @@ public sealed class DnsConfigurator
         var v4 = mode == DnsMode.EncryptedLoopback ? ["127.0.0.1"] : PublicV4;
         var v6 = ChooseIpv6Servers(mode, loopbackHasIPv6, ipv6Blocked);
 
-        if (v6 is null)
+        if (v6.Length == 0)
         {
-            _log?.Invoke("Outbound IPv6 is being dropped on the shared adapter; "
-                + "leaving the IPv6 resolvers alone rather than installing ones that cannot answer.");
+            _log?.Invoke("Clearing external IPv6 DNS servers; name resolution will use IPv4.");
         }
 
         var writes = new List<DnsWrite>(adapters.Count * 2);
-        var v4Writes = new List<int>(adapters.Count);
 
         foreach (var adapter in adapters)
         {
-            v4Writes.Add(writes.Count);
             writes.Add(new DnsWrite(adapter.InterfaceIndexV4, v4));
 
-            if (v6 is not null && adapter.InterfaceIndexV6 > 0)
+            if (adapter.InterfaceIndexV6 > 0)
             {
                 writes.Add(new DnsWrite(adapter.InterfaceIndexV6, v6));
             }
@@ -144,35 +154,22 @@ public sealed class DnsConfigurator
 
         // One PowerShell process for the whole machine, cache flush included, rather
         // than one per adapter and family. See ApplyWritesAsync.
-        var outcome = await ApplyWritesAsync(writes, flushCache: true, cancellationToken).ConfigureAwait(false);
-        var applied = v4Writes.Count(index => outcome[index]);
-
-        if (applied == 0)
+        // Once writes start, even a timeout can leave a partial redirect. Keep the
+        // durable originals and mark the attempted mode so refresh/restore can repair it.
+        CurrentMode = mode;
+        var outcome = await _write(writes, true, cancellationToken).ConfigureAwait(false);
+        if (outcome.Length != writes.Count || outcome.Any(accepted => !accepted))
         {
-            _log?.Invoke("No adapter accepted the new DNS servers; the previous configuration is still in place.");
-
-            // Put the snapshot file back exactly as it was. A brand-new one would
-            // claim a change happened when none did; an older one still represents a
-            // redirect from the earlier run and must remain available for recovery.
-            if (previousSnapshot is null or { Count: 0 })
-            {
-                DeleteSnapshot();
-            }
-            else
-            {
-                PersistSnapshot(previousSnapshot);
-            }
-
+            _log?.Invoke("DNS configuration was not completed for every address family; recovery data is retained.");
             return false;
         }
 
-        CurrentMode = mode;
-        _log?.Invoke($"DNS set to {(mode == DnsMode.EncryptedLoopback ? "encrypted loopback proxy" : "public resolvers")} on {applied} adapter(s).");
+        _log?.Invoke($"DNS set to {(mode == DnsMode.EncryptedLoopback ? "encrypted loopback proxy" : "public resolvers")} on {adapters.Count} adapter(s).");
         return true;
     }
 
     /// <summary>
-    /// The IPv6 resolvers to install, or null to leave the adapter's own alone.
+    /// The IPv6 resolvers to install, or an empty list to explicitly clear the family.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -180,23 +177,20 @@ public sealed class DnsConfigurator
     /// hotspot rule is doing to that adapter's IPv6 and stays the right answer.
     /// </para>
     /// <para>
-    /// The public IPv6 resolvers are the ones that must not be written while outbound
-    /// IPv6 is being dropped. Doing so pointed Windows - which prefers an adapter's IPv6
-    /// servers over the IPv4 ones beside them - at addresses this app was itself
-    /// black-holing, and the machine kept full IPv4 connectivity while resolving no names
-    /// at all. Nothing is written for the family instead: the IPv4 servers on the same
-    /// adapter are the ones that answer, and leaving the originals in place is also what
-    /// makes the restore a no-op for a family nobody touched.
+    /// Leaving the family untouched preserves unreachable DNS from a previous hotspot.
+    /// An IPv4-only encrypted proxy must also clear it, even without a drop rule, so
+    /// Windows cannot bypass the proxy through an external IPv6 resolver. Originals
+    /// remain in the durable snapshot for restore.
     /// </para>
     /// </remarks>
-    internal static string[]? ChooseIpv6Servers(DnsMode mode, bool loopbackHasIPv6, bool ipv6Blocked)
+    internal static string[] ChooseIpv6Servers(DnsMode mode, bool loopbackHasIPv6, bool ipv6Blocked)
     {
         if (mode == DnsMode.EncryptedLoopback && loopbackHasIPv6)
         {
             return ["::1"];
         }
 
-        return ipv6Blocked ? null : PublicV6;
+        return ipv6Blocked || mode == DnsMode.EncryptedLoopback ? [] : PublicV6;
     }
 
     public async Task RestoreAsync(CancellationToken cancellationToken = default)
@@ -304,7 +298,7 @@ public sealed class DnsConfigurator
             perAdapter.Add((adapter, ordinals, repairable));
         }
 
-        var outcome = await ApplyWritesAsync(writes, flushCache: true, cancellationToken).ConfigureAwait(false);
+        var outcome = await _write(writes, true, cancellationToken).ConfigureAwait(false);
 
         foreach (var (adapter, ordinals, repairable) in perAdapter)
         {
@@ -658,7 +652,7 @@ public sealed class DnsConfigurator
     /// One adapter change: the servers to set, or nothing at all to clear them.
     /// </summary>
     /// <param name="InterfaceIndex">The kernel index the cmdlet is scoped to.</param>
-    /// <param name="Servers">The addresses to install, or null for a reset.</param>
+    /// <param name="Servers">Addresses to install; null resets defaults, empty clears IPv6 DNS.</param>
     internal readonly record struct DnsWrite(int InterfaceIndex, string[]? Servers)
     {
         public bool IsReset => Servers is null;
@@ -743,10 +737,33 @@ public sealed class DnsConfigurator
 
             // Both interpolations are machine values, never user text: an integer the
             // kernel handed us, and addresses that have been through IPAddress.Parse.
-            var command = write.IsReset
-                ? $"Set-DnsClientServerAddress -InterfaceIndex {write.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop"
-                : $"Set-DnsClientServerAddress -InterfaceIndex {write.InterfaceIndex} "
-                    + $"-ServerAddresses ({FormatServers(write.Servers!)}) -ErrorAction Stop";
+            string command;
+            if (write.IsReset)
+            {
+                command = $"Set-DnsClientServerAddress -InterfaceIndex {write.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop";
+            }
+            else if (write.Servers!.Length == 0)
+            {
+                // ResetServerAddresses restores DHCP/RA DNS; it does not clear it.
+                // An absolute executable path prevents elevation through cwd lookup.
+                command = $"& \"$env:SystemRoot\\System32\\netsh.exe\" interface ipv6 set dnsservers name={write.InterfaceIndex} source=static address=none validate=no | Out-Null; "
+                    + "if ($LASTEXITCODE -ne 0) { throw 'IPv6 DNS clear failed' }";
+            }
+            else
+            {
+                var servers = write.Servers.Where(server => IPAddress.TryParse(server, out _)).ToArray();
+                if (servers.Length == 0)
+                {
+                    command = "throw 'No valid DNS server address'";
+                }
+                else
+                {
+                    var family = IPAddress.Parse(servers[0]).AddressFamily == AddressFamily.InterNetworkV6 ? "IPv6" : "IPv4";
+                    command = $"$dnsTarget = @(Get-DnsClientServerAddress -InterfaceIndex {write.InterfaceIndex} -AddressFamily {family} -ErrorAction Stop); "
+                        + "if ($dnsTarget.Count -eq 0) { throw 'DNS address family not found' }; "
+                        + $"Set-DnsClientServerAddress -InputObject $dnsTarget -ServerAddresses ({FormatServers(servers)}) -ErrorAction Stop";
+                }
+            }
 
             script.Append("try { ")
                 .Append(command)
