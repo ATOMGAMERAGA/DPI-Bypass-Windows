@@ -394,8 +394,8 @@ public sealed class MobileHotspotDiagnostics : IMobileHotspotDiagnostics
             if (result.HasIpv6Dns && !result.Ipv6Works)
             {
                 return "Bağdaştırıcıdaki IPv6 DNS sunucularını kaldırın ya da IPv6'yı yeniden açın. "
-                    + "Vodafone Sınırsız Modu açıkken uygulama IPv6 çözümleyici yazmaz; "
-                    + "eski bir ayar kalmışsa modu kapatıp açmak onu temizler.";
+                    + "Şifreli DNS'i açıp bağlantıyı yeniden kontrol edin. Sorun sürerse "
+                    + "DNS ayarlarının uygulanamadığına ilişkin günlük kaydını inceleyin.";
             }
 
             return "DNS ayarlarını sistem varsayılanına alın veya şifreli DNS'i kapatıp yeniden deneyin.";

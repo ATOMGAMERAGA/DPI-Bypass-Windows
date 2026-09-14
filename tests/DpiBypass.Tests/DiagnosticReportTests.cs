@@ -121,6 +121,31 @@ public sealed class DiagnosticRedactionTests
 /// </summary>
 public sealed class DiagnosticReportWriterTests
 {
+    [Fact]
+    public async Task DuplicateProviderRowsAreSavedWithoutLosingEitherEndpoint()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("duplicate-providers.zip");
+        var snapshot = Snapshot() with
+        {
+            Sections = [new("DNS", [
+                new("Sağlayıcı: Cloudflare", "first endpoint"),
+                new("Sağlayıcı: Cloudflare", "second endpoint"),
+                new("Sağlayıcı: Cloudflare (2)", "third endpoint")])],
+        };
+
+        var result = await DiagnosticReportWriter.WriteAsync(path, snapshot);
+        Assert.True(result.Saved, result.Failure);
+        using var archive = ZipFile.OpenRead(path);
+        using var json = JsonDocument.Parse(Read(archive, "tani.json"));
+        var values = json.RootElement.GetProperty("sections")[0].GetProperty("values");
+        Assert.Equal(3, values.EnumerateObject().Count());
+        Assert.Equal("third endpoint", values.GetProperty("Sağlayıcı: Cloudflare (2)").GetString());
+        Assert.Contains(values.EnumerateObject(), p => p.Value.GetString() == "first endpoint");
+        Assert.Contains(values.EnumerateObject(), p => p.Value.GetString() == "second endpoint");
+        Assert.Contains(values.EnumerateObject(), p => p.Value.GetString() == "third endpoint");
+    }
+
     private static DiagnosticSnapshot Snapshot(
         IReadOnlyList<string>? log = null,
         long droppedLogLines = 0) => new()

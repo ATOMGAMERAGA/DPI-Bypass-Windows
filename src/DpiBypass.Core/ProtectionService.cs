@@ -1865,9 +1865,12 @@ public sealed class ProtectionService : IAsyncDisposable
         // start that happens while Vodafone Sınırsız Modu is running must not install the
         // public IPv6 resolvers that rule is dropping.
         var ipv6Blocked = VodafoneDropsIPv6;
-        await _dnsConfigurator!
+        if (!await _dnsConfigurator!
             .ApplyAsync(mode, loopbackHasIPv6, ipv6Blocked, cancellationToken)
-            .ConfigureAwait(false);
+            .ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("DNS ayarları tüm adres ailelerinde uygulanamadı; kurtarma bilgisi korundu.");
+        }
         Volatile.Write(ref _dnsWrittenForIpv6Drop, ipv6Blocked ? 1 : 0);
     }
 
@@ -2060,6 +2063,8 @@ public sealed class ProtectionService : IAsyncDisposable
 
         try
         {
+            await ReapplyDnsForIpv6Async(operation.Token).ConfigureAwait(false);
+            operation.Token.ThrowIfCancellationRequested();
             var result = await _hotspot.RunAsync(network, operation.Token).ConfigureAwait(false);
             operation.Token.ThrowIfCancellationRequested();
 
@@ -2246,7 +2251,8 @@ public sealed class ProtectionService : IAsyncDisposable
         var written = Volatile.Read(ref _dnsWrittenForIpv6Drop);
         if (written >= 0 && (written == 1) != VodafoneDropsIPv6)
         {
-            _ = Task.Run(ReapplyDnsForIpv6Async);
+            var token = _lifetime?.Token ?? CancellationToken.None;
+            _ = Task.Run(() => ReapplyDnsForIpv6Async(token));
             return;
         }
 
@@ -2277,7 +2283,7 @@ public sealed class ProtectionService : IAsyncDisposable
     /// proxy that is already running. Serialised on the start/stop gate so it can never
     /// reinstall our servers underneath a stop that is putting the user's back.
     /// </remarks>
-    private async Task ReapplyDnsForIpv6Async()
+    private async Task ReapplyDnsForIpv6Async(CancellationToken cancellationToken = default)
     {
         var held = false;
 
@@ -2286,7 +2292,7 @@ public sealed class ProtectionService : IAsyncDisposable
             // Inside the try: this runs on a pool thread nobody awaits, and a shutdown
             // that disposed the gate underneath it would otherwise leave an exception
             // with no owner.
-            await _gate.WaitAsync().ConfigureAwait(false);
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             held = true;
 
             var configurator = _dnsConfigurator;
@@ -2304,13 +2310,22 @@ public sealed class ProtectionService : IAsyncDisposable
             var loopbackHasIPv6 = mode == DnsMode.EncryptedLoopback
                 && _dnsProxy is { IsRunning: true, HasIPv6: true };
 
-            await configurator
+            if (!await configurator
                 .ApplyAsync(mode, loopbackHasIPv6, dropping, CancellationToken.None)
-                .ConfigureAwait(false);
+                .ConfigureAwait(false))
+            {
+                AppLog.Warning("DNS sunucuları tüm adres ailelerinde yenilenemedi; kurtarma bilgisi korundu.");
+                return;
+            }
 
             Volatile.Write(ref _dnsWrittenForIpv6Drop, dropping ? 1 : 0);
             AppLog.Info("vodafone: ad çözümleme sunucuları yenilendi "
                 + $"(IPv6 {(dropping ? "düşürülüyor" : "geçiyor")}).");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Shutdown owns the gate and will restore DNS. A queued refresh must
+            // finish without waiting for that gate while teardown drains its tasks.
         }
         catch (Exception ex)
         {
@@ -2509,6 +2524,17 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         AdoptNetwork(fingerprint);
 
+        // DHCP/RA can replace DNS even when the adapter index and TTL rule did not
+        // change. Renew before diagnostics, including networks with diagnostics off.
+        var dnsToken = _lifetime?.Token ?? CancellationToken.None;
+        var dnsRefresh = _background.Track(Task.Run(async () =>
+        {
+            if (fingerprint.IsOnline && string.Equals(Network.Key, fingerprint.Key, StringComparison.Ordinal))
+            {
+                await ReapplyDnsForIpv6Async(dnsToken).ConfigureAwait(false);
+            }
+        }));
+
         // A different network means the previous diagnostics describe a link that is no
         // longer under us, so the panel goes back to "not run here yet".
         LastHotspotDiagnostics = null;
@@ -2526,7 +2552,7 @@ public sealed class ProtectionService : IAsyncDisposable
             var diagnostics = CreateHotspotDiagnosticsCancellation(CancellationToken.None);
             // Always enter the delegate so its finally block disposes the linked source,
             // even if shutdown cancels it between creation and queueing.
-            _ = Task.Run(() => RunHotspotDiagnosticsOnTransitionAsync(fingerprint, diagnostics));
+            _ = Task.Run(() => RunHotspotDiagnosticsOnTransitionAsync(fingerprint, diagnostics, dnsRefresh));
         }
         else
         {
@@ -2582,12 +2608,16 @@ public sealed class ProtectionService : IAsyncDisposable
     /// </remarks>
     private async Task RunHotspotDiagnosticsOnTransitionAsync(
         NetworkFingerprint fingerprint,
-        CancellationTokenSource operation)
+        CancellationTokenSource operation,
+        Task? dnsRefresh = null)
     {
         var token = operation.Token;
 
         try
         {
+            if (dnsRefresh is not null) await dnsRefresh.WaitAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (!string.Equals(Network.Key, fingerprint.Key, StringComparison.Ordinal)) return;
             AppLog.Info($"hotspot.diagnostics: '{fingerprint.DisplayName}' ağına geçildi; bağlantı inceleniyor.");
 
             var result = await _hotspot.RunAsync(fingerprint, token).ConfigureAwait(false);

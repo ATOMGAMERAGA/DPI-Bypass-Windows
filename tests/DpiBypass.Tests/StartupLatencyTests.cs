@@ -27,8 +27,10 @@ public sealed class StartupLatencyTests
             ],
             flushCache: true);
 
-        Assert.Contains("-InterfaceIndex 5 -ServerAddresses ('127.0.0.1')", script, StringComparison.Ordinal);
-        Assert.Contains("-InterfaceIndex 6 -ServerAddresses ('::1')", script, StringComparison.Ordinal);
+        Assert.Contains("Get-DnsClientServerAddress -InterfaceIndex 5 -AddressFamily IPv4", script, StringComparison.Ordinal);
+        Assert.Contains("Get-DnsClientServerAddress -InterfaceIndex 6 -AddressFamily IPv6", script, StringComparison.Ordinal);
+        Assert.Contains("Set-DnsClientServerAddress -InputObject $dnsTarget", script, StringComparison.Ordinal);
+        Assert.Contains("$dnsTarget.Count -eq 0", script, StringComparison.Ordinal);
         Assert.Contains("-InterfaceIndex 11 -ResetServerAddresses", script, StringComparison.Ordinal);
 
         // The flush rides along rather than starting a process of its own.

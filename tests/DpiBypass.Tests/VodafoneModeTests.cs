@@ -1,5 +1,8 @@
 using DpiBypass.Core;
 using DpiBypass.Core.Config;
+using DpiBypass.Core.Dns;
+using DpiBypass.Core.Diagnostics;
+using System.Reflection;
 using DpiBypass.Core.MobileHotspot;
 using DpiBypass.Core.Network;
 using DpiBypass.Core.Vodafone;
@@ -19,6 +22,78 @@ namespace DpiBypass.Tests;
 /// </remarks>
 public sealed class VodafoneModeTests
 {
+    [Fact]
+    public async Task StoppingCancelsADnsRefreshWaitingBehindTheLifecycleGate()
+    {
+        using var directory = new TempDirectory();
+        await using var service = new ProtectionService(
+            new ConfigStore(directory.File("settings.json"), directory.File("networks.json")),
+            new LearnedDomainStore(directory.File("learned.json")), ttlFix: new FakeTtlFix());
+        service.Settings.HotspotDiagnostics = false;
+        using var lifetime = new CancellationTokenSource();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        typeof(ProtectionService).GetField("_lifetime", flags)!.SetValue(service, lifetime);
+        var gate = (SemaphoreSlim)typeof(ProtectionService).GetField("_gate", flags)!.GetValue(service)!;
+        var background = (TrackedWork)typeof(ProtectionService).GetField("_background", flags)!.GetValue(service)!;
+        await gate.WaitAsync();
+        try
+        {
+            service.OnNetworkChanged(new NetworkFingerprint { Ssid = "Galaxy S24", AdapterName = "Wi-Fi", InterfaceIndex = 17 });
+            await lifetime.CancelAsync();
+            Assert.True(await background.DrainAsync(TimeSpan.FromSeconds(1)), "DNS refresh blocked shutdown behind its lifecycle gate.");
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SwitchingHotspotsOnTheSameAdapterRenewsDnsBeforeDiagnostics(bool diagnosticsEnabled)
+    {
+        using var directory = new TempDirectory();
+        var writes = 0;
+        var writesAtProbe = 0;
+        var renewed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var configurator = new DnsConfigurator(directory.File("dns"),
+            _ => Task.FromResult<IReadOnlyList<AdapterDnsSnapshot>>([
+                new("wifi", "Wi-Fi", 17, 17, ["192.168.43.1"], ["fe80::1%17"])]),
+            (batch, _, _) =>
+            {
+                if (Interlocked.Increment(ref writes) >= 2) renewed.TrySetResult();
+                return Task.FromResult(batch.Select(_ => true).ToArray());
+            });
+        Assert.True(await configurator.ApplyAsync(DnsMode.PublicResolvers, false, true));
+        var diagnostics = new RecordingHotspotDiagnostics(() => writesAtProbe = Volatile.Read(ref writes));
+        var rule = new FakeTtlFix();
+        await using var service = new ProtectionService(
+            new ConfigStore(directory.File("settings.json"), directory.File("networks.json")),
+            new LearnedDomainStore(directory.File("learned.json")), hotspotDiagnostics: diagnostics, ttlFix: rule);
+        var first = new NetworkFingerprint { Ssid = "Galaxy S25", AdapterName = "Wi-Fi", InterfaceIndex = 17 };
+        var second = first with { Ssid = "Galaxy S24" };
+        service.EnableVodafoneMode(first);
+        service.Settings.RememberVodafoneNetwork(second);
+        service.Settings.HotspotDiagnostics = diagnosticsEnabled;
+        typeof(ProtectionService).GetField("_dnsConfigurator", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, configurator);
+        typeof(ProtectionService).GetField("_dnsWrittenForIpv6Drop", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, 1);
+
+        service.OnNetworkChanged(second);
+        if (diagnosticsEnabled)
+        {
+            await diagnostics.Ran.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(writesAtProbe >= 2, "DNS was not renewed before probing the second hotspot.");
+        }
+        else
+        {
+            await renewed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.Equal([17], rule.AppliedTo);
+    }
+
     /// <summary>
     /// A phone hotspot is a different key every session and the same network every time.
     /// </summary>
@@ -238,7 +313,7 @@ public sealed class VodafoneModeTests
         Assert.Equal([7], rule.AppliedTo);
     }
 
-    private sealed class RecordingHotspotDiagnostics : IMobileHotspotDiagnostics
+    private sealed class RecordingHotspotDiagnostics(Action? beforeRun = null) : IMobileHotspotDiagnostics
     {
         public TaskCompletionSource<bool> Ran { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -246,6 +321,7 @@ public sealed class VodafoneModeTests
             NetworkFingerprint network,
             CancellationToken cancellationToken = default)
         {
+            beforeRun?.Invoke();
             var result = new HotspotDiagnosticResult
             {
                 NetworkName = network.DisplayName,

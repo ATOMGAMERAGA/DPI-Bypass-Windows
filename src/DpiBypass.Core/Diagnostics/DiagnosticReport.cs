@@ -247,7 +247,7 @@ public static class DiagnosticReportWriter
         sections = snapshot.Sections.Select(section => new
         {
             title = section.Title,
-            values = section.Rows.ToDictionary(row => row.Key, row => row.Value),
+            values = UniqueValues(section.Rows),
         }),
         privacy = new
         {
@@ -256,6 +256,23 @@ public static class DiagnosticReportWriter
             uploaded = false,
         },
     };
+
+    private static Dictionary<string, string> UniqueValues(IReadOnlyList<KeyValuePair<string, string>> rows)
+    {
+        var reserved = rows.Select(row => row.Key).ToHashSet(StringComparer.Ordinal);
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            var key = row.Key;
+            for (var suffix = 2; values.ContainsKey(key); suffix++)
+            {
+                key = $"{row.Key} ({suffix})";
+                while (reserved.Contains(key)) key = $"{row.Key} ({++suffix})";
+            }
+            values.Add(key, row.Value);
+        }
+        return values;
+    }
 
     private static string LogText(DiagnosticSnapshot snapshot)
     {
