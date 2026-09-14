@@ -1499,7 +1499,7 @@
                                         <TextBlock Style="{StaticResource HintStyle}"
                                                    Margin="26,2,0,0"
                                                    TextWrapping="Wrap"
-                                                   Text="Telefon paylaşımı sırasında bilgisayara ayrı bir IPv6 adresi verilir; TTL ne olursa olsun bu tek başına paylaşımı belli eder. Kapalı bırakmak yalnızca IPv6 gerektiren bir işiniz varsa mantıklıdır." />
+                                                   Text="Telefon paylaşımı sırasında bilgisayara ayrı bir IPv6 adresi verilir; TTL ne olursa olsun bu tek başına paylaşımı belli eder. Ad çözümleme ve komşu keşfi geçmeye devam eder, bağlantınız kopmaz. Kapalı bırakmak yalnızca IPv6 gerektiren bir işiniz varsa mantıklıdır." />
                                     </StackPanel>
                                 </Border>
 

@@ -27,6 +27,9 @@ public interface IHotspotTtlFix : IDisposable
 
     long DroppedIPv6Packets { get; }
 
+    /// <summary>Outbound IPv6 packets forwarded because dropping them breaks the link.</summary>
+    long ForwardedIPv6Packets { get; }
+
     void Apply(int interfaceIndex, TtlFixSettings settings);
 
     void Clear();
@@ -59,6 +62,13 @@ public interface IHotspotTtlFix : IDisposable
 /// stops it by itself rather than quietly rewriting TTLs on a network where it
 /// makes no sense.
 /// </para>
+/// <para>
+/// <see cref="TtlFixSettings.DropIPv6"/> additionally drops outbound IPv6, but not
+/// indiscriminately: <see cref="HotspotIpv6Policy"/> keeps the packets whose loss would
+/// break the connection instead of disguising it - neighbour discovery and the rest of
+/// the link-scoped plumbing, and name resolution. Dropping those was how the mode could
+/// leave a machine with working IPv4 and no DNS at all.
+/// </para>
 /// </remarks>
 public sealed class HotspotTtlFix : IHotspotTtlFix
 {
@@ -75,6 +85,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     private Thread? _worker;
     private long _rewritten;
     private long _ipv6Dropped;
+    private long _ipv6Forwarded;
     private long _checksumFailures;
     private int _checksumFailureLogged;
 
@@ -94,6 +105,17 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     public long RewrittenPackets => Interlocked.Read(ref _rewritten);
 
     public long DroppedIPv6Packets => Interlocked.Read(ref _ipv6Dropped);
+
+    /// <summary>
+    /// Outbound IPv6 packets the drop deliberately let through.
+    /// </summary>
+    /// <remarks>
+    /// Neighbour discovery, the rest of the link-scoped plumbing, and name resolution.
+    /// See <see cref="HotspotIpv6Policy"/> for why each is forwarded; the count is here so
+    /// the card can show that the exemption is doing something rather than leaving the
+    /// user to infer it from DNS having stopped failing.
+    /// </remarks>
+    public long ForwardedIPv6Packets => Interlocked.Read(ref _ipv6Forwarded);
 
     /// <summary>
     /// Packets put back the way they arrived because the checksum could not be redone.
@@ -158,6 +180,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
 
             Interlocked.Exchange(ref _rewritten, 0);
             Interlocked.Exchange(ref _ipv6Dropped, 0);
+            Interlocked.Exchange(ref _ipv6Forwarded, 0);
             Interlocked.Exchange(ref _checksumFailures, 0);
             Interlocked.Exchange(ref _checksumFailureLogged, 0);
             Interlocked.Exchange(ref _minecraftSplitLogged, 0);
@@ -228,6 +251,11 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
         // see two distinct sources from one subscriber no matter what the hop limit
         // says. Dropping outbound IPv6 on this adapter closes that hole and, unlike
         // unbinding the protocol, leaves nothing behind when the rule goes away.
+        //
+        // Every outbound IPv6 packet is matched, not only the ones above the guard,
+        // because which of them may be dropped is not something a hop limit answers:
+        // HotspotIpv6Policy decides that per packet in the loop, and a neighbour
+        // solicitation or a DNS query has to reach that decision to be let through.
         var ipv6 = settings.DropIPv6
             ? "ipv6"
             : $"(ipv6 and ipv6.HopLimit >= {settings.Guard})";
@@ -261,9 +289,10 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
 
                 var packet = buffer.AsSpan(0, length);
 
+                // TryFix counts what it drops and what it deliberately forwards; here a
+                // false simply means the packet is not to be sent.
                 if (!TryFix(packet, out var change))
                 {
-                    Interlocked.Increment(ref _ipv6Dropped);
                     continue;
                 }
 
@@ -375,7 +404,12 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     /// Where the TTL was written and what was there before, or null when nothing changed.
     /// The caller needs both to put the packet back exactly as it arrived.
     /// </param>
-    private bool TryFix(Span<byte> packet, out (int Offset, byte Previous)? change)
+    /// <remarks>
+    /// Internal so the drop decision can be pinned without a driver: which outbound IPv6
+    /// packets survive this method is the difference between a disguised connection and
+    /// one that resolves no names, and it is not something to discover on a user's laptop.
+    /// </remarks>
+    internal bool TryFix(Span<byte> packet, out (int Offset, byte Previous)? change)
     {
         change = null;
 
@@ -391,7 +425,23 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
         {
             if (settings.DropIPv6)
             {
-                return false;
+                switch (HotspotIpv6Policy.Decide(packet))
+                {
+                    case Ipv6Disposition.Drop:
+                        Interlocked.Increment(ref _ipv6Dropped);
+                        return false;
+
+                    // Never reaches the operator, and neighbour discovery is discarded by
+                    // the receiver unless its hop limit is still 255. Rewriting it would
+                    // break the plumbing the exemption exists to protect.
+                    case Ipv6Disposition.ForwardOnLink:
+                        Interlocked.Increment(ref _ipv6Forwarded);
+                        return true;
+
+                    default:
+                        Interlocked.Increment(ref _ipv6Forwarded);
+                        break;
+                }
             }
 
             if (packet.Length < 40)
@@ -399,6 +449,9 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
                 return true;
             }
 
+            // This one does leave the phone, so it is rewritten like any other packet: an
+            // exempt query still carrying the routed-once value would be a tell of exactly
+            // the kind the rest of this class exists to remove.
             change = Rewrite(packet, offset: 7, settings);
             return true;
         }

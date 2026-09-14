@@ -32,6 +32,8 @@ internal sealed class FakeTtlFix : IHotspotTtlFix
 
     public long DroppedIPv6Packets { get; set; }
 
+    public long ForwardedIPv6Packets { get; set; }
+
     /// <summary>How many times a rule was installed, successfully or not.</summary>
     public int Applies { get; private set; }
 

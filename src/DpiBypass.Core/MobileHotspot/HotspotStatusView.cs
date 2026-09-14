@@ -121,6 +121,9 @@ public sealed record HotspotStatusView
     /// <summary>Outbound IPv6 packets dropped on the shared adapter.</summary>
     public long DroppedIPv6Packets { get; init; }
 
+    /// <summary>Outbound IPv6 packets the drop let through so the link keeps working.</summary>
+    public long ForwardedIPv6Packets { get; init; }
+
     /// <summary>One line about the rewrite itself, shown whether or not a check has run.</summary>
     public required string RewriteLine { get; init; }
 
@@ -204,13 +207,13 @@ public sealed record HotspotStatusView
             AdapterName = status.AdapterName,
             Run = run,
             CheckedAt = run == HotspotRunState.Completed ? result!.CompletedAt : null,
-            Cards = run == HotspotRunState.Completed ? BuildCards(result!) : [],
+            Cards = run == HotspotRunState.Completed ? BuildCards(result!, status.DropIPv6Active) : [],
 
             // The rewrite row leads the technical details whether or not a check has run:
             // it is the one line that answers "is this doing anything", and it is
             // available the moment the mode is switched on.
             TechnicalDetails = run == HotspotRunState.Completed
-                ? [RewriteCard(status), .. BuildDetails(result!)]
+                ? [RewriteCard(status), .. BuildDetails(result!, status.DropIPv6Active)]
                 : [RewriteCard(status)],
             Findings = result?.Findings ?? [],
             Report = result?.ToReport() ?? string.Empty,
@@ -221,13 +224,17 @@ public sealed record HotspotStatusView
             TtlValue = status.TtlValue,
             RewrittenPackets = status.RewrittenPackets,
             DroppedIPv6Packets = status.DroppedIPv6Packets,
+            ForwardedIPv6Packets = status.ForwardedIPv6Packets,
             RewriteLine = DescribeRewrite(status),
             RewriteSeverity = DescribeRewriteSeverity(status),
             LegacyCleanupAvailable = legacyResidue,
         };
     }
 
-    private static IReadOnlyList<HotspotCheckCard> BuildCards(HotspotDiagnosticResult result) =>
+    /// <param name="dropsIPv6">
+    /// Whether Vodafone Sınırsız Modu is dropping outbound IPv6 as this card is drawn.
+    /// </param>
+    private static IReadOnlyList<HotspotCheckCard> BuildCards(HotspotDiagnosticResult result, bool dropsIPv6) =>
     [
         new()
         {
@@ -243,7 +250,7 @@ public sealed record HotspotStatusView
             Title = "Ad çözümleme (DNS)",
             State = result.DnsWorks ? HotspotCheckState.Ok : HotspotCheckState.Failed,
             Value = result.DnsWorks ? "Çalışıyor" : "Ad çözülemiyor",
-            Detail = result.DnsWorks ? null : "Site adları IP adresine çevrilemiyor.",
+            Detail = DescribeDnsDetail(result),
         },
         QualityCard(result),
         new()
@@ -294,12 +301,43 @@ public sealed record HotspotStatusView
         };
     }
 
-    private static IReadOnlyList<HotspotCheckCard> BuildDetails(HotspotDiagnosticResult result)
+    /// <summary>
+    /// Why the DNS card failed, in the terms the user can act on.
+    /// </summary>
+    /// <remarks>
+    /// "Site adları IP adresine çevrilemiyor" describes the symptom and stops there, which
+    /// is no help at all when the network resolves perfectly and it is this machine asking
+    /// a resolver it cannot reach. The probe can tell those apart, so the card says which.
+    /// </remarks>
+    internal static string? DescribeDnsDetail(HotspotDiagnosticResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (result.DnsWorks)
+        {
+            return null;
+        }
+
+        if (result.SystemResolverFaulty && result is { HasIpv6Dns: true, Ipv6Works: false })
+        {
+            return "Ağ adları çözebiliyor; bu bilgisayar sorusunu IPv6 DNS sunucusuna soruyor "
+                + "ve bu ağda IPv6 trafiği geçmiyor.";
+        }
+
+        return result.SystemResolverFaulty
+            ? "Ağ adları çözebiliyor; sorun bu bilgisayarın DNS ayarlarında."
+            : "Site adları IP adresine çevrilemiyor.";
+    }
+
+    /// <param name="dropsIPv6">
+    /// Whether Vodafone Sınırsız Modu is dropping outbound IPv6 as this card is drawn.
+    /// </param>
+    private static IReadOnlyList<HotspotCheckCard> BuildDetails(HotspotDiagnosticResult result, bool dropsIPv6)
     {
         var details = new List<HotspotCheckCard>
         {
             AddressCard("IPv4", result.HasIpv4, result.Ipv4Works),
-            AddressCard("IPv6", result.HasIpv6, result.Ipv6Works),
+            AddressCard("IPv6", result.HasIpv6, result.Ipv6Works, dropsIPv6),
             new()
             {
                 Title = "Adres türü",
@@ -356,25 +394,42 @@ public sealed record HotspotStatusView
     /// <summary>
     /// An address family's state, where "not configured" is not a failure.
     /// </summary>
-    private static HotspotCheckCard AddressCard(string title, bool configured, bool works) => new()
+    /// <param name="byDesign">
+    /// True when this app is the reason the family carries no traffic. An IPv6 family the
+    /// hotspot rule is deliberately dropping is not a fault to report back to the person
+    /// who switched the rule on - and calling it one sends them looking for a problem with
+    /// their phone.
+    /// </param>
+    private static HotspotCheckCard AddressCard(string title, bool configured, bool works, bool byDesign = false)
     {
-        Title = title,
-        State = (configured, works) switch
+        var suppressed = configured && !works && byDesign;
+
+        return new HotspotCheckCard
         {
-            (false, _) => HotspotCheckState.NotUsed,
-            (true, true) => HotspotCheckState.Ok,
-            _ => HotspotCheckState.Failed,
-        },
-        Value = (configured, works) switch
-        {
-            (false, _) => "Bu ağda kullanılmıyor",
-            (true, true) => "Çalışıyor",
-            _ => "Adres var, trafik geçmiyor",
-        },
-        Detail = configured || title != "IPv6"
-            ? null
-            : "Mobil bağlantıların çoğunda normaldir.",
-    };
+            Title = title,
+            State = (configured, works, suppressed) switch
+            {
+                (false, _, _) => HotspotCheckState.NotUsed,
+                (true, true, _) => HotspotCheckState.Ok,
+                (_, _, true) => HotspotCheckState.NotUsed,
+                _ => HotspotCheckState.Failed,
+            },
+            Value = (configured, works, suppressed) switch
+            {
+                (false, _, _) => "Bu ağda kullanılmıyor",
+                (true, true, _) => "Çalışıyor",
+                (_, _, true) => "Vodafone Sınırsız Modu kapatıyor",
+                _ => "Adres var, trafik geçmiyor",
+            },
+            Detail = (title, configured, suppressed) switch
+            {
+                (_, _, true) => "Ad çözümleme ve komşu keşfi geçmeye devam eder; "
+                    + "IPv6 gereken bir işiniz varsa \"Giden IPv6 trafiğini kapat\" seçeneğini kapatın.",
+                ("IPv6", false, _) => "Mobil bağlantıların çoğunda normaldir.",
+                _ => null,
+            },
+        };
+    }
 
     private static string DescribeAddressKind(HotspotAddressKind kind) => kind switch
     {
@@ -454,8 +509,15 @@ public sealed record HotspotStatusView
             ? $" · {status.DroppedIPv6Packets:N0} IPv6 paketi düşürüldü"
             : string.Empty;
 
+        // Said out loud, because "IPv6 paketi düşürüldü" on its own reads as "IPv6 is
+        // switched off here" - and a user whose names stopped resolving would be right to
+        // suspect it. The rule keeps the packets the link cannot work without.
+        var allowed = status.ForwardedIPv6Packets > 0
+            ? $" · ad çözümleme ve komşu keşfi için {status.ForwardedIPv6Packets:N0} IPv6 paketi geçirildi"
+            : string.Empty;
+
         return $"Giden paketler TTL {status.TtlValue} ile yollanıyor · "
-            + $"{status.RewrittenPackets:N0} paket düzeltildi{ipv6}";
+            + $"{status.RewrittenPackets:N0} paket düzeltildi{ipv6}{allowed}";
     }
 
     private static string DescribeRewriteSeverity(HotspotStatus status) => status switch

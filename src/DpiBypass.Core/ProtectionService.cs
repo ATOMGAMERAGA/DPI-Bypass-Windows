@@ -54,6 +54,17 @@ public sealed record LunarAdBlockState(
 /// carried rather than inferred.
 /// </param>
 /// <param name="DroppedIPv6Packets">Outbound IPv6 packets dropped on the shared adapter.</param>
+/// <param name="ForwardedIPv6Packets">
+/// Outbound IPv6 packets the drop deliberately let through: neighbour discovery and the
+/// rest of the link-scoped plumbing, and name resolution. Carried so the card can show
+/// that the exemption is live, rather than leaving a user to work it out from DNS having
+/// stopped failing.
+/// </param>
+/// <param name="DropIPv6Active">
+/// Whether the running rule is dropping outbound IPv6. Carried so the card can say that an
+/// IPv6 family with no traffic on it is this feature doing its job, rather than reporting
+/// the user's own setting back to them as a fault.
+/// </param>
 /// <param name="TtlFailure">Why the rule is not installed, when it should have been.</param>
 public sealed record HotspotStatus(
     bool VodafoneModeEnabled,
@@ -68,6 +79,8 @@ public sealed record HotspotStatus(
     int TtlValue = TtlFixSettings.DefaultTimeToLive,
     long RewrittenPackets = 0,
     long DroppedIPv6Packets = 0,
+    long ForwardedIPv6Packets = 0,
+    bool DropIPv6Active = false,
     string? TtlFailure = null);
 
 /// <summary>
@@ -172,6 +185,18 @@ public sealed class ProtectionService : IAsyncDisposable
     private DohResolver? _resolver;
     private DnsProxyServer? _dnsProxy;
     private DnsConfigurator? _dnsConfigurator;
+
+    /// <summary>
+    /// Whether the resolvers last installed were chosen with outbound IPv6 being dropped:
+    /// 1 yes, 0 no, -1 nothing has been installed this run.
+    /// </summary>
+    /// <remarks>
+    /// The right IPv6 resolver for a machine depends on the hotspot rule, and that rule
+    /// goes up and down on network changes long after the DNS configuration was written.
+    /// Without remembering which way it was written, a rule coming up left Windows
+    /// pointed at public IPv6 servers this process had started dropping.
+    /// </remarks>
+    private int _dnsWrittenForIpv6Drop = -1;
     private ProcessPortMap? _portMap;
     private BypassEngine? _engine;
     private NetworkMonitor? _monitor;
@@ -450,6 +475,8 @@ public sealed class ProtectionService : IAsyncDisposable
         TtlValue: _ttlFix.IsActive ? _ttlFix.Settings.TimeToLive : Settings.VodafoneTtl,
         RewrittenPackets: _ttlFix.RewrittenPackets,
         DroppedIPv6Packets: _ttlFix.DroppedIPv6Packets,
+        ForwardedIPv6Packets: _ttlFix.ForwardedIPv6Packets,
+        DropIPv6Active: VodafoneDropsIPv6,
         TtlFailure: LastVodafoneFailure);
 
     /// <summary>The most recent diagnostics pass, if one has run this session.</summary>
@@ -1834,7 +1861,14 @@ public sealed class ProtectionService : IAsyncDisposable
             }
         }
 
-        await _dnsConfigurator!.ApplyAsync(mode, loopbackHasIPv6, cancellationToken).ConfigureAwait(false);
+        // The rule can already be up: it is deliberately not gated on the engine, so a
+        // start that happens while Vodafone Sınırsız Modu is running must not install the
+        // public IPv6 resolvers that rule is dropping.
+        var ipv6Blocked = VodafoneDropsIPv6;
+        await _dnsConfigurator!
+            .ApplyAsync(mode, loopbackHasIPv6, ipv6Blocked, cancellationToken)
+            .ConfigureAwait(false);
+        Volatile.Write(ref _dnsWrittenForIpv6Drop, ipv6Blocked ? 1 : 0);
     }
 
     /// <summary>
@@ -1849,7 +1883,7 @@ public sealed class ProtectionService : IAsyncDisposable
     {
         var proxy = new DnsProxyServer(_resolver!, AppLog.InfoSink)
         {
-            SuppressIPv6Answers = () => _ttlFix.IsActive && _ttlFix.Settings.DropIPv6,
+            SuppressIPv6Answers = () => VodafoneDropsIPv6,
 
             // Read per query rather than captured, so the switch takes effect on the
             // next lookup instead of on the next start of the service.
@@ -2091,6 +2125,17 @@ public sealed class ProtectionService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Whether the hotspot rule is dropping outbound IPv6 on the shared adapter right now.
+    /// </summary>
+    /// <remarks>
+    /// One definition, because three things have to agree about it: the AAAA answers the
+    /// local proxy suppresses, the IPv6 resolvers the app installs, and what the
+    /// diagnostics card tells the user. Two of those disagreeing is what left a machine
+    /// with working IPv4 and no name resolution.
+    /// </remarks>
+    internal bool VodafoneDropsIPv6 => _ttlFix.IsActive && _ttlFix.Settings.DropIPv6;
+
+    /// <summary>
     /// Brings the TTL rule into line with the settings and the network under us.
     /// </summary>
     /// <remarks>
@@ -2187,12 +2232,29 @@ public sealed class ProtectionService : IAsyncDisposable
 
     private void RefreshVodafoneDns()
     {
-        if (_dnsProxy is not { IsRunning: true } proxy)
+        if (_dnsProxy is { IsRunning: true } proxy)
+        {
+            proxy.ClearCache();
+        }
+
+        // Which IPv6 resolvers belong on this machine depends on whether the rule that
+        // just went up - or just came down - is dropping outbound IPv6. Leaving the old
+        // choice in place is exactly how a machine ends up pointed at public IPv6 servers
+        // this process is itself black-holing: full IPv4 connectivity, and not one name
+        // resolved. The rewrite flushes the cache on its way through, so it stands in for
+        // the flush below rather than running alongside it.
+        var written = Volatile.Read(ref _dnsWrittenForIpv6Drop);
+        if (written >= 0 && (written == 1) != VodafoneDropsIPv6)
+        {
+            _ = Task.Run(ReapplyDnsForIpv6Async);
+            return;
+        }
+
+        if (_dnsProxy is not { IsRunning: true })
         {
             return;
         }
 
-        proxy.ClearCache();
         _ = Task.Run(async () =>
         {
             try
@@ -2204,6 +2266,63 @@ public sealed class ProtectionService : IAsyncDisposable
                 AppLog.Error("Vodafone DNS önbelleği yenilenemedi", ex);
             }
         });
+    }
+
+    /// <summary>
+    /// Rewrites the machine's resolvers for the hotspot rule's current IPv6 state.
+    /// </summary>
+    /// <remarks>
+    /// Only the resolver list is redone. Restarting the loopback listener would rebind
+    /// port 53 - a window in which nothing resolves at all - to arrive at the same DoH
+    /// proxy that is already running. Serialised on the start/stop gate so it can never
+    /// reinstall our servers underneath a stop that is putting the user's back.
+    /// </remarks>
+    private async Task ReapplyDnsForIpv6Async()
+    {
+        var held = false;
+
+        try
+        {
+            // Inside the try: this runs on a pool thread nobody awaits, and a shutdown
+            // that disposed the gate underneath it would otherwise leave an exception
+            // with no owner.
+            await _gate.WaitAsync().ConfigureAwait(false);
+            held = true;
+
+            var configurator = _dnsConfigurator;
+
+            // SystemDefault means nothing of ours is installed, so nothing of ours points
+            // at an address the rule is dropping: the network's own servers stay the
+            // user's to keep.
+            if (configurator is null || configurator.CurrentMode == DnsMode.SystemDefault)
+            {
+                return;
+            }
+
+            var mode = configurator.CurrentMode;
+            var dropping = VodafoneDropsIPv6;
+            var loopbackHasIPv6 = mode == DnsMode.EncryptedLoopback
+                && _dnsProxy is { IsRunning: true, HasIPv6: true };
+
+            await configurator
+                .ApplyAsync(mode, loopbackHasIPv6, dropping, CancellationToken.None)
+                .ConfigureAwait(false);
+
+            Volatile.Write(ref _dnsWrittenForIpv6Drop, dropping ? 1 : 0);
+            AppLog.Info("vodafone: ad çözümleme sunucuları yenilendi "
+                + $"(IPv6 {(dropping ? "düşürülüyor" : "geçiyor")}).");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Vodafone DNS sunucuları yenilenemedi", ex);
+        }
+        finally
+        {
+            if (held)
+            {
+                _gate.Release();
+            }
+        }
     }
 
     internal void EnableVodafoneMode(NetworkFingerprint network)
