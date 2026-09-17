@@ -24,6 +24,10 @@
          than strokes drawn here by hand. FluentIcon resolves symbol + size to the
          right drawing; see Infrastructure/FluentIcon.cs and Theme/Icons.xaml. -->
 
+    <!-- No template: FluentIcon draws itself. A templated Path with Stretch="None" reports
+         its geometry's bounds as its desired size, and WPF layout-clips anything arranged
+         into less than it asked for - so every 16 DIP icon would lose its right and bottom
+         fifth before the transform that would have made it fit ever ran. -->
     <Style TargetType="{x:Type infra:FluentIcon}">
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
         <Setter Property="Size" Value="{StaticResource IconSize.Body}" />
@@ -31,27 +35,6 @@
         <Setter Property="HorizontalAlignment" Value="Center" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
         <Setter Property="UseLayoutRounding" Value="True" />
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="{x:Type infra:FluentIcon}">
-                    <!-- The box is the icon's design grid scaled to Size, so every glyph
-                         occupies the same square whatever share of its grid it fills.
-                         ClipToBounds keeps a glyph that overhangs its grid by a fraction
-                         of a unit from nudging the layout around it. -->
-                    <Grid Width="{TemplateBinding Size}"
-                          Height="{TemplateBinding Size}"
-                          Background="Transparent"
-                          ClipToBounds="True"
-                          SnapsToDevicePixels="True"
-                          UseLayoutRounding="True">
-                        <Path Data="{TemplateBinding Data}"
-                              Fill="{TemplateBinding Foreground}"
-                              Stretch="None"
-                              RenderTransform="{TemplateBinding GlyphScale}" />
-                    </Grid>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
     </Style>
 
     <!-- Navigation rail icon: secondary while resting, accent and filled once its page

@@ -186,17 +186,20 @@
                                            AutomationProperties.Name="Hedef site doğrulaması"
                                            AutomationProperties.LiveSetting="Polite" />
 
-                                <!-- Cancel only exists while there is something to cancel,
-                                     and it takes its own space rather than displacing the
-                                     text above it. -->
+                                <!-- Cancel is only there while there is something to
+                                     cancel, but its space always is: Hidden rather than
+                                     Collapsed, so pressing connect does not push the rest
+                                     of the card down by 50 DIP at the exact moment the
+                                     user is watching it. -->
                                 <Button Content="İptal et"
                                         Margin="0,14,0,0"
                                         MinWidth="120"
                                         HorizontalAlignment="Center"
                                         Style="{StaticResource SecondaryActionButtonStyle}"
                                         infra:ActionButton.Symbol="Dismiss"
+                                        IsTabStop="{Binding CanCancelConnection}"
                                         Command="{Binding CancelConnectionCommand}"
-                                        Visibility="{Binding CanCancelConnection, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                        Visibility="{Binding CanCancelConnection, Converter={StaticResource BoolToHiddenConverter}}" />
 
                                 <TextBlock Style="{StaticResource CaptionStyle}"
                                            Margin="0,14,0,0"

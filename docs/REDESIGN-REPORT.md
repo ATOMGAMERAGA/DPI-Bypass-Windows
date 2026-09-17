@@ -17,12 +17,12 @@ açıkça yazılıdır.
 | Kapı | Referans (`adcb136`) | Bu dalda |
 | --- | --- | --- |
 | `dotnet build DpiBypass.slnx -c Release` | başarılı | başarılı, 0 uyarı |
-| `dotnet test` | 1155 başarılı / 0 başarısız | **1267 başarılı / 0 başarısız** |
+| `dotnet test` | 1155 başarılı / 0 başarısız | **1268 başarılı / 0 başarısız** |
 | `dotnet publish … -o artifacts/publish` | — | başarılı; `DpiBypass.exe` + `DpiBypass.Recovery.exe` üretildi (self-contained win-x64, 258 dosya) |
 | `scripts/tests/xaml-resources.tests.ps1` | başarılı | **çalıştırılamadı** (PowerShell yok); betiğin mantığı Python'da birebir yeniden uygulanarak çalıştırıldı: 289 anahtar, 596 başvuru, eksik/ileri başvuru yok |
 | `--ui-selftest` (gerçek WPF penceresi) | CI'da çalışır | **çalıştırılamadı** (Windows yok); kapsamı genişletildi, aşağıya bakınız |
 
-Eklenen test sayısı: **112**. Değişen dosyalar: 41 (`+7907 / −595`).
+Eklenen test sayısı: **113**.
 
 ---
 
@@ -49,10 +49,10 @@ evenodd'dur ve ön ek olmadan alt yolları aynı yönde dönen her simge delik d
 çizilirdi.
 
 `Infrastructure/FluentIcon.cs` boyutu geometriye çevirir: 16-20 DIP için 20
-piksellik çizim, üstü için 24 piksellik çizim. `Stretch="None"` kullanılır ve
-**simgenin tasarım ızgarası** ölçeklenir, yol sınırları değil — yol sınırlarını
-kutuya yaymak, ızgarasının üçte birini dolduran chevron'u neredeyse tamamını
-dolduran kalkanla aynı boyutta gösterir ve ailenin optik ritmini bozardı.
+piksellik çizim, üstü için 24 piksellik çizim. Ölçeklenen **simgenin tasarım
+ızgarasıdır**, yol sınırları değil — yol sınırlarını kutuya yaymak, ızgarasının
+üçte birini dolduran chevron'u neredeyse tamamını dolduran kalkanla aynı
+boyutta gösterir ve ailenin optik ritmini bozardı.
 
 Ayrıca `Theme/Tokens.xaml`: 4/8 DIP boşluk ritmi, köşe yarıçapları, tipografi
 ölçeği, kenarlık kalınlıkları, simge boyutları ve hareket süreleri/easing'leri.
@@ -75,6 +75,17 @@ palette kalır; iki palet arasında değişmesi gereken tek eksen odur.
   yakalayamadığı tek ölümcül kaynak hatasıdır: çözülemeyen bir
   `StaticResource`, pencere kurulurken fırlatır ve uygulama açılıp penceresiz
   kalır.
+
+`FluentIcon` bir `ControlTemplate` içindeki `Path` değil, kendi kendini çizen bir
+`FrameworkElement`'tir. Bu bir tercih değil zorunluluktur: `Stretch="None"` olan
+bir `Path`, istenen boyutu olarak geometrisinin sınırlarını bildirir ve WPF,
+istediğinden küçük bir alana yerleştirilen her öğeye bir yerleşim kırpması
+uygular. 20 birimlik bir çizimi 16 DIP'lik bir kutuya koymak, ölçek dönüşümü
+çalışmadan **önce** simgenin sağ ve alt beşte birini keserdi — ve bu penceredeki
+her düğme simgesi 16 DIP'tir. `MeasureOverride` istenen boyutu döndürüp ölçek
+`OnRender` içinde uygulandığında kırpılacak bir yerleşim yoktur; maliyeti tek
+bir geometri çizimidir. Bir test, stilin yeniden `Template` kazanmadığını
+doğruluyor.
 
 Lisans bildirimi `THIRD-PARTY-NOTICES.md` içine eklendi (MIT).
 
@@ -394,7 +405,7 @@ ve `docs/background-footprint.md` var; bu geçiş onlara sayı eklemedi.
 **Yapılan.**
 
 - `dotnet build` (Release) — 0 uyarı, 0 hata.
-- `dotnet test` — 1267 test, hepsi başarılı (referansta 1155).
+- `dotnet test` — 1268 test, hepsi başarılı (referansta 1155).
 - `dotnet publish` — self-contained win-x64 paket üretildi; `DpiBypass.exe` ve
   `DpiBypass.Recovery.exe` mevcut. WinDivert ikilileri **yok**, çünkü onları
   derleme hattı çekiyor (`tools/fetch-windivert.ps1`) ve bu ortamda
@@ -467,7 +478,7 @@ değişikliklerin gerçek ekran görüntülerini üretir. Bu geçişte üretilme
 | `src/DpiBypass.Core/Diagnostics/StrategySelectionPolicy.cs` | Seçim politikası ve eşikleri |
 | `src/DpiBypass.Core/Diagnostics/ThroughputProbe.cs` | Kullanıcının başlattığı hız ölçümü |
 | `tools/fetch-fluent-icons.py` | Simge üreteci (`--check` ile doğrulama) |
-| `tests/…/DesignSystemTests.cs` · `BackdropPolicyTests.cs` · `ConnectionFlowTests.cs` · `WelcomeFlowTests.cs` · `StrategySelectionTests.cs` · `StrategySweepBehaviourTests.cs` | 112 yeni test |
+| `tests/…/DesignSystemTests.cs` · `BackdropPolicyTests.cs` · `ConnectionFlowTests.cs` · `WelcomeFlowTests.cs` · `StrategySelectionTests.cs` · `StrategySweepBehaviourTests.cs` | 113 yeni test |
 
 **Yeniden yazılan**
 

@@ -304,4 +304,33 @@ public sealed class DesignSystemTests
         var firstElement = document.Root!.Elements().First();
         Assert.Equal("ResourceDictionary.MergedDictionaries", firstElement.Name.LocalName);
     }
+
+    /// <summary>
+    /// The icon control draws itself rather than templating a Path.
+    /// </summary>
+    /// <remarks>
+    /// Not a style preference. A Path with Stretch="None" reports its geometry's bounds as
+    /// its desired size, and WPF layout-clips any element arranged into less than it asked
+    /// for - so a 20-unit glyph inside a 16 DIP box loses its right and bottom fifth,
+    /// before the render transform that would have made it fit ever runs. Every icon on a
+    /// button in this window is 16 DIP. Putting a Template setter back would bring that
+    /// back with it.
+    /// </remarks>
+    [Fact]
+    public void TheIconControlHasNoTemplateToBeLayoutClippedBy()
+    {
+        var document = XDocument.Load(RepoFiles.SharedThemeXaml);
+        var ns = document.Root!.Name.Namespace;
+
+        var style = document
+            .Descendants(ns + "Style")
+            .Single(element => (string?)element.Attribute("TargetType") == "{x:Type infra:FluentIcon}"
+                && element.Attribute(X + "Key") is null);
+
+        Assert.DoesNotContain(
+            style.Elements(ns + "Setter"),
+            setter => (string?)setter.Attribute("Property") == "Template");
+
+        Assert.DoesNotContain(style.Descendants(), element => element.Name.LocalName is "ControlTemplate" or "Path");
+    }
 }
