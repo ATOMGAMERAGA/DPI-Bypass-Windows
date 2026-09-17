@@ -155,12 +155,14 @@ public sealed class FluentIcon : System.Windows.Controls.Control
         // A symbol Fluent draws only one way must not vanish because a selected state
         // asked for the variant it does not have.
         var variant = Filled ? "Filled" : "Regular";
-        var (geometry, grid) =
+        var found =
             Lookup(symbol, preferred, variant)
             ?? Lookup(symbol, preferred, "Regular")
             ?? Lookup(symbol, other, variant)
-            ?? Lookup(symbol, other, "Regular")
-            ?? (null, preferred);
+            ?? Lookup(symbol, other, "Regular");
+
+        var geometry = found?.Geometry;
+        var grid = found?.Grid ?? preferred;
 
         // The scale follows the drawing that was actually found, not the one asked for:
         // a 24-unit glyph scaled as though it were 20 units renders a fifth too large.

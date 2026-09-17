@@ -223,4 +223,85 @@ public sealed class DesignSystemTests
 
         Assert.InRange(duration.TotalMilliseconds, lowerMs, upperMs);
     }
+
+    /// <summary>
+    /// Every StaticResource in the window and the theme names a key that exists.
+    /// </summary>
+    /// <remarks>
+    /// This is the one resource mistake that is fatal rather than cosmetic. A
+    /// DynamicResource that resolves to nothing leaves an element unpainted; a
+    /// StaticResource that resolves to nothing throws while the window is being built, so
+    /// the app starts and then has no window - which is exactly the failure mode the whole
+    /// window-recovery path in App.xaml.cs exists to survive. It cannot be caught by
+    /// compiling, because BAML defers the lookup to load time, and it cannot be caught by
+    /// the existing tests, which read bindings rather than resources.
+    /// </remarks>
+    [Fact]
+    public void EveryStaticResourceReferenceNamesAKeyThatExists()
+    {
+        var declared = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var file in new[] { TokensXaml, IconsXaml, LightXaml, DarkXaml, RepoFiles.SharedThemeXaml, RepoFiles.MainWindowXaml })
+        {
+            foreach (var key in KeysIn(file))
+            {
+                declared.Add(key);
+            }
+        }
+
+        var unresolved = new List<string>();
+
+        foreach (var file in new[] { RepoFiles.SharedThemeXaml, RepoFiles.MainWindowXaml })
+        {
+            var markup = File.ReadAllText(file);
+
+            foreach (Match match in Regex.Matches(markup, @"\{StaticResource\s+(?<key>[^}\s]+)\s*\}"))
+            {
+                var key = match.Groups["key"].Value;
+
+                // "{StaticResource {x:Type infra:FluentIcon}}" names an implicit style,
+                // whose key is the type rather than a string.
+                if (key.StartsWith("{x:Type", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (!declared.Contains(key))
+                {
+                    unresolved.Add($"{Path.GetFileName(file)}: {key}");
+                }
+            }
+        }
+
+        Assert.Empty(unresolved);
+    }
+
+    /// <summary>
+    /// The theme dictionaries the application loads are all of them, and they are merged
+    /// in an order where a StaticResource can see what it needs.
+    /// </summary>
+    /// <remarks>
+    /// StaticResource is resolved as the dictionary is parsed, so a token dictionary
+    /// merged after the styles that read from it resolves to nothing and throws. Shared
+    /// merges its own dependencies rather than relying on App to do it in the right order.
+    /// </remarks>
+    [Fact]
+    public void TheThemeMergesItsTokensAndIconsBeforeItUsesThem()
+    {
+        var document = XDocument.Load(RepoFiles.SharedThemeXaml);
+        var ns = document.Root!.Name.Namespace;
+
+        var merged = document
+            .Descendants(ns + "ResourceDictionary.MergedDictionaries")
+            .SelectMany(holder => holder.Elements(ns + "ResourceDictionary"))
+            .Select(element => (string?)element.Attribute("Source") ?? string.Empty)
+            .ToArray();
+
+        Assert.Equal(["Tokens.xaml", "Icons.xaml"], merged);
+
+        // And the merge block is the first thing in the dictionary, ahead of every style
+        // that reads from it.
+        var firstElement = document.Root!.Elements().First();
+        Assert.Equal("ResourceDictionary.MergedDictionaries", firstElement.Name.LocalName);
+    }
 }

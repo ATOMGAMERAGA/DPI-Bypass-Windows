@@ -50,9 +50,16 @@ foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
         $key = $match.Groups[2].Value.Trim()
         $references++
 
-        # A key with a dot in it is a framework resource (SystemColors.*, the
-        # Fluent theme's own brushes); those are not ours to define.
-        if ($key.Contains('.')) { continue }
+        # An implicit style is keyed by a type rather than by a string:
+        # {StaticResource {x:Type infra:FluentIcon}}. There is no string key to
+        # look up, and the compiler has already resolved the type.
+        if ($key.StartsWith('{')) { continue }
+
+        # Resources the framework owns rather than us. Named by prefix rather
+        # than by "contains a dot", which used to be the rule and silently
+        # skipped every design token the moment Theme/Tokens.xaml started
+        # naming them Space.8 and Motion.Fast.
+        if ($key -match '^(SystemColors|SystemParameters|SystemFonts)\.') { continue }
 
         if (-not $defined.Contains($key)) {
             $missing.Add("$($file.Name): $kind $key")
@@ -73,6 +80,8 @@ foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
 
         foreach ($reference in [regex]::Matches($text, '\{StaticResource\s+([^},]+)\}')) {
             $key = $reference.Groups[1].Value.Trim()
+            if ($key.StartsWith('{')) { continue }
+
             if ($definitions.ContainsKey($key) -and $definitions[$key] -gt $reference.Index) {
                 $line = 1 + $text.Substring(0, $reference.Index).Split("`n").Count - 1
                 $forwardReferences.Add("$($file.Name):$line StaticResource $key is declared later")
