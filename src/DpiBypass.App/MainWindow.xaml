@@ -79,7 +79,7 @@
                         ToolTip="{Binding StatusDetail}"
                         AutomationProperties.Name="Koruma durumu">
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource StatusPillIconStyle}" />
+                        <infra:FluentIcon Style="{StaticResource StatusPillIconStyle}" />
                         <TextBlock Text="{Binding StatusHeadline}"
                                    FontSize="12.5"
                                    MaxWidth="180" TextTrimming="CharacterEllipsis"
@@ -95,7 +95,7 @@
                         Style="{StaticResource PrimaryActionButtonStyle}"
                         Width="190"
                         VerticalAlignment="Center"
-                        infra:ActionButton.Icon="{StaticResource IconShieldGeometry}"
+                        infra:ActionButton.Symbol="Shield"
                         Command="{Binding ToggleCommand}"
                         Content="{Binding ToggleCaption}" />
             </Grid>
@@ -112,7 +112,7 @@
                      AutomationProperties.Name="Durum">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconShieldGeometry}" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Shield" />
                         <AccessText Text="_Durum" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
@@ -133,7 +133,7 @@
                                         Style="{StaticResource StatusHeroDiscStyle}"
                                         Margin="0,0,16,0"
                                         VerticalAlignment="Top">
-                                    <Path Style="{StaticResource StatusHeroIconStyle}" />
+                                    <infra:FluentIcon Style="{StaticResource StatusHeroIconStyle}" />
                                 </Border>
 
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
@@ -172,7 +172,7 @@
                                             MinWidth="190"
                                             MinHeight="40"
                                             HorizontalAlignment="Stretch"
-                                            infra:ActionButton.Icon="{StaticResource IconShieldGeometry}"
+                                            infra:ActionButton.Symbol="Shield"
                                             Command="{Binding ToggleCommand}"
                                             Content="{Binding ToggleCaption}" />
                                     <!-- Real busy state: visible only while the
@@ -201,15 +201,12 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <Path Grid.Column="0"
-                                      Style="{StaticResource StrokeIconStyle}"
-                                      Data="{StaticResource IconWarningGeometry}"
-                                      Width="18"
-                                      Height="18"
-                                      Stretch="Uniform"
-                                      Margin="0,0,12,0"
-                                      VerticalAlignment="Center"
-                                      Stroke="{DynamicResource AppWarningBrush}" />
+                                <infra:FluentIcon Grid.Column="0"
+                                                  Symbol="Warning"
+                                                  Filled="True"
+                                                  Size="{StaticResource IconSize.Body}"
+                                                  Margin="0,0,12,0"
+                                                  Foreground="{DynamicResource AppWarningBrush}" />
                                 <TextBlock Grid.Column="1"
                                            Style="{StaticResource NoticeTextStyle}"
                                            VerticalAlignment="Center"
@@ -309,7 +306,7 @@
                      AutomationProperties.Name="Kapsam">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLayersGeometry}" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Target" />
                         <AccessText Text="_Kapsam" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
@@ -381,7 +378,7 @@
                      AutomationProperties.Name="Siteler">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconGlobeGeometry}" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Globe" />
                         <AccessText Text="_Siteler" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
@@ -422,7 +419,7 @@
                                         MinWidth="100"
                                         Margin="8,0,0,0"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
-                                        infra:ActionButton.Icon="{StaticResource IconPlusGeometry}"
+                                        infra:ActionButton.Symbol="Add"
                                         Command="{Binding AddDomainCommand}" />
                                 <Button Grid.Column="2"
                                         Content="Seçileni çıkar"
@@ -464,17 +461,12 @@
                                              Padding="30,6,8,6"
                                              AutomationProperties.Name="Alan adı ara"
                                              Text="{Binding DomainFilter, UpdateSourceTrigger=PropertyChanged}" />
-                                    <Path Data="{StaticResource IconSearchGeometry}"
-                                          Width="14"
-                                          Height="14"
-                                          Stretch="Uniform"
-                                          HorizontalAlignment="Left"
-                                          Margin="10,0,0,0"
-                                          IsHitTestVisible="False"
-                                          Stroke="{DynamicResource AppTextSecondaryBrush}"
-                                          StrokeThickness="1.8"
-                                          StrokeStartLineCap="Round"
-                                          StrokeEndLineCap="Round" />
+                                    <infra:FluentIcon Symbol="Search"
+                                                      Size="{StaticResource IconSize.Small}"
+                                                      HorizontalAlignment="Left"
+                                                      Margin="10,0,0,0"
+                                                      IsHitTestVisible="False"
+                                                      Foreground="{DynamicResource AppTextSecondaryBrush}" />
                                 </Grid>
                                 <Button Grid.Column="1"
                                         Style="{StaticResource GhostIconButtonStyle}"
@@ -482,14 +474,9 @@
                                         Command="{Binding ClearDomainFilterCommand}"
                                         ToolTip="Aramayı temizle"
                                         AutomationProperties.Name="Aramayı temizle">
-                                    <Path Data="{StaticResource IconCloseGeometry}"
-                                          Width="12"
-                                          Height="12"
-                                          Stretch="Uniform"
-                                          Stroke="{DynamicResource AppTextSecondaryBrush}"
-                                          StrokeThickness="1.8"
-                                          StrokeStartLineCap="Round"
-                                          StrokeEndLineCap="Round" />
+                                    <infra:FluentIcon Symbol="Dismiss"
+                                                      Size="{StaticResource IconSize.Small}"
+                                                      Foreground="{DynamicResource AppTextSecondaryBrush}" />
                                 </Button>
                             </Grid>
 
@@ -548,7 +535,7 @@
                      AutomationProperties.Name="Ağ ve yöntem">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSignalGeometry}" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="TopSpeed" />
                         <AccessText Text="Ağ ve _yöntem" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
@@ -623,7 +610,7 @@
                                     <Button Content="Yeniden tara"
                                             MinWidth="150"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
-                                            infra:ActionButton.Icon="{StaticResource IconRefreshGeometry}"
+                                            infra:ActionButton.Symbol="ArrowClockwise"
                                             Command="{Binding RetuneCommand}" />
                                     <!-- Real tuning progress: only while the sweep runs. -->
                                     <ProgressBar Width="90"
@@ -661,7 +648,7 @@
                      AutomationProperties.Name="DNS ve ayarlar">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSlidersGeometry}" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Options" />
                         <AccessText Text="DNS ve _ayarlar" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
@@ -900,7 +887,7 @@
                                             MinWidth="90"
                                             Margin="8,0,0,0"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
-                                            infra:ActionButton.Icon="{StaticResource IconRefreshGeometry}"
+                                            infra:ActionButton.Symbol="ArrowClockwise"
                                             Command="{Binding RefreshLatencyProcessesCommand}" />
                                 </Grid>
 
@@ -938,7 +925,7 @@
                                         Margin="0,16,0,0"
                                         HorizontalAlignment="Left"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
-                                        infra:ActionButton.Icon="{StaticResource IconSignalGeometry}"
+                                        infra:ActionButton.Symbol="TopSpeed"
                                         Command="{Binding LatencyPrimaryCommand}" />
 
                                 <!-- This slot stays in the layout while idle: starting a run
@@ -1402,7 +1389,7 @@
                                         Margin="0,14,0,0"
                                         HorizontalAlignment="Left"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
-                                        infra:ActionButton.Icon="{StaticResource IconSearchGeometry}"
+                                        infra:ActionButton.Symbol="Search"
                                         Command="{Binding HotspotDiagnoseCommand}" />
 
                                 <ProgressBar Height="3"
@@ -1633,7 +1620,7 @@
                      AutomationProperties.Name="Günlük">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLogGeometry}" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="TextBulletList" />
                         <AccessText Text="_Günlük" Margin="10,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>

@@ -24,6 +24,25 @@ kütüphaneyi kendi derlediği uyumlu bir sürümle değiştirebilir: kurulum
 klasöründeki `WinDivert.dll` ve `WinDivert64.sys` dosyalarını aynı ada sahip
 uyumlu dosyalarla değiştirmek yeterlidir.
 
+## Microsoft Fluent System Icons
+
+- Proje: <https://github.com/microsoft/fluentui-system-icons>
+- Lisans: MIT
+
+Arayüzdeki simgeler bu aileden alınmıştır. `src/DpiBypass.App/Theme/Icons.xaml`
+dosyasındaki her geometri, resmî SVG varlıklarının yol verisidir; elle yeniden
+çizilmemiş, yalnızca WPF'nin yol dilbilgisine aktarılmıştır (dolgu kuralı `F1`,
+SVG'nin varsayılan `nonzero` kuralına karşılık gelir). Dosya
+`tools/fetch-fluent-icons.py` ile üretilir; aynı betik `--check` seçeneğiyle
+çalıştırıldığında depodaki geometrilerin hâlâ üst kaynakla aynı olduğunu
+doğrular.
+
+Her simge, çizildiği boyutta indirilir: 16-20 DIP için 20 piksellik çizim,
+24 DIP ve üzeri için 24 piksellik çizim kullanılır. Ölçeklenmiş tek bir çizim
+kullanılmaz.
+
+MIT lisans metni yukarıdaki bağlantıdaki `LICENSE` dosyasında yer alır.
+
 ## .NET çalışma zamanı
 
 - Proje: <https://github.com/dotnet/runtime>
