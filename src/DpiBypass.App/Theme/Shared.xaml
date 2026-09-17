@@ -896,6 +896,275 @@
         </Setter>
     </Style>
 
+    <!-- ======== The connection control ========
+         The one thing the main screen is for. A ring around a round button: the ring
+         carries the state, the button carries the action, and the label under them says
+         in words what both of them are showing.
+
+         Every animation here is opacity or a RenderTransform, which are the two things
+         WPF composites without re-laying anything out. Nothing blurs, nothing resizes a
+         layout slot, and nothing runs at all while the window is off screen - the whole
+         control's motion is gated on MotionEnabled, which is Windows' own animation
+         preference AND the app's own switch. -->
+
+    <!-- The unlit ring. Always drawn, so the control has the same silhouette in every
+         state and the lit arc has something to travel along. -->
+    <Style x:Key="ConnectionRingTrackStyle" TargetType="Ellipse">
+        <Setter Property="Stroke" Value="{DynamicResource AppDividerBrush}" />
+        <Setter Property="StrokeThickness" Value="3" />
+        <Setter Property="Fill" Value="Transparent" />
+    </Style>
+
+    <!--
+      The travelling arc.
+
+      StrokeDashArray is in multiples of StrokeThickness, so at thickness 3 the ring's
+      553 DIP circumference is 184 units: a 46/139 pattern draws one quarter of the
+      circle and leaves the rest open. It turns by rotating the whole ellipse, which is
+      a composited transform rather than a per-frame geometry rebuild.
+
+      The RotateTransform itself is declared on the element in MainWindow.xaml, never
+      here. A Freezable in a Style setter is frozen and shared by every element the
+      style touches, and animating it throws "cannot animate on an immutable object
+      instance" - which is how this window once shipped a page transition that never
+      ran for the life of the process.
+    -->
+    <Style x:Key="ConnectionRingArcStyle" TargetType="Ellipse">
+        <Setter Property="Stroke" Value="{DynamicResource AppAccentBrush}" />
+        <Setter Property="StrokeThickness" Value="3" />
+        <Setter Property="StrokeDashArray" Value="46 139" />
+        <Setter Property="StrokeDashCap" Value="Round" />
+        <Setter Property="Fill" Value="Transparent" />
+        <Setter Property="Opacity" Value="0" />
+        <Setter Property="IsHitTestVisible" Value="False" />
+        <Style.Triggers>
+            <!-- Turning: something is actually happening and motion is allowed. -->
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsConnectionWorking}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard x:Name="SpinStoryboard">
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="1"
+                                             Duration="{StaticResource Motion.Fast}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(RotateTransform.Angle)"
+                                             From="0" To="360"
+                                             Duration="{StaticResource Motion.RingSpin}"
+                                             RepeatBehavior="Forever" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+                <MultiDataTrigger.ExitActions>
+                    <StopStoryboard BeginStoryboardName="SpinStoryboard" />
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="0"
+                                             Duration="{StaticResource Motion.Fast}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.ExitActions>
+            </MultiDataTrigger>
+
+            <!-- Working with motion switched off: the arc is shown standing still, so the
+                 state is still visible without anything moving. -->
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsConnectionWorking}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="False" />
+                </MultiDataTrigger.Conditions>
+                <Setter Property="Opacity" Value="1" />
+            </MultiDataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- The finished ring: a complete circle that arrives once, on success. -->
+    <Style x:Key="ConnectionRingCompleteStyle" TargetType="Ellipse">
+        <Setter Property="Stroke" Value="{DynamicResource AppSuccessBrush}" />
+        <Setter Property="StrokeThickness" Value="3" />
+        <Setter Property="Fill" Value="Transparent" />
+        <Setter Property="Opacity" Value="0" />
+        <Setter Property="IsHitTestVisible" Value="False" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Connected">
+                <DataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.EnterActions>
+                <DataTrigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="0"
+                                             Duration="{StaticResource Motion.Content}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.ExitActions>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Failed">
+                <Setter Property="Stroke" Value="{DynamicResource AppDangerBrush}" />
+                <Setter Property="Opacity" Value="1" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
+      The button in the middle. Its template is the only place the disc, the glyph and
+      the press response are described, so every state of the control is one file.
+    -->
+    <Style x:Key="ConnectButtonStyle" TargetType="Button">
+        <Setter Property="Background" Value="{DynamicResource AppAccentBrush}" />
+        <Setter Property="Foreground" Value="{DynamicResource AppOnAccentTextBrush}" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Width" Value="132" />
+        <Setter Property="Height" Value="132" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid x:Name="Root" RenderTransformOrigin="0.5,0.5" Background="Transparent">
+                        <Grid.RenderTransform>
+                            <ScaleTransform ScaleX="1" ScaleY="1" />
+                        </Grid.RenderTransform>
+
+                        <Ellipse x:Name="FocusRing"
+                                 Stroke="{DynamicResource AppFocusStrokeBrush}"
+                                 StrokeThickness="{StaticResource Stroke.Focus}"
+                                 Margin="-6"
+                                 Opacity="0"
+                                 IsHitTestVisible="False" />
+
+                        <Ellipse x:Name="Disc" Fill="{TemplateBinding Background}" />
+
+                        <infra:FluentIcon x:Name="Glyph"
+                                          Symbol="{Binding ConnectionSymbol}"
+                                          Size="{StaticResource IconSize.Hero}"
+                                          Foreground="{TemplateBinding Foreground}"
+                                          RenderTransformOrigin="0.5,0.5">
+                            <infra:FluentIcon.RenderTransform>
+                                <ScaleTransform ScaleX="1" ScaleY="1" />
+                            </infra:FluentIcon.RenderTransform>
+                        </infra:FluentIcon>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppAccentHoverBrush}" />
+                        </Trigger>
+
+                        <!-- The press response: a small, quick squeeze. Scale rather than
+                             a colour change, because the disc already changes colour with
+                             the connection state and two meanings on one channel is how a
+                             control stops reading. -->
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppAccentPressedBrush}" />
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)"
+                                                         To="0.96" Duration="{StaticResource Motion.Instant}" />
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)"
+                                                         To="0.96" Duration="{StaticResource Motion.Instant}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)"
+                                                         To="1" Duration="{StaticResource Motion.Fast}"
+                                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)"
+                                                         To="1" Duration="{StaticResource Motion.Fast}"
+                                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="FocusRing" Property="Opacity" Value="1" />
+                        </Trigger>
+
+                        <!-- Connected: the disc goes green and the tick arrives with a
+                             single settling step rather than appearing. -->
+                        <DataTrigger Binding="{Binding ConnectionPhase}" Value="Connected">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppSuccessBrush}" />
+                            <DataTrigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Glyph"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)"
+                                                         From="0.6" To="1"
+                                                         Duration="{StaticResource Motion.State}"
+                                                         EasingFunction="{StaticResource Motion.Overshoot}" />
+                                        <DoubleAnimation Storyboard.TargetName="Glyph"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)"
+                                                         From="0.6" To="1"
+                                                         Duration="{StaticResource Motion.State}"
+                                                         EasingFunction="{StaticResource Motion.Overshoot}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </DataTrigger.EnterActions>
+                        </DataTrigger>
+
+                        <DataTrigger Binding="{Binding ConnectionPhase}" Value="Failed">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppDangerBrush}" />
+                        </DataTrigger>
+
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.6" />
+                            <Setter Property="Cursor" Value="Arrow" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- The headline under the ring. It changes often, so it changes with a short
+         cross-fade rather than snapping - which at this size reads as a jump. -->
+    <Style x:Key="ConnectionTitleStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource Type.Subtitle}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Connected">
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Failed">
+                <Setter Property="Foreground" Value="{DynamicResource AppDangerBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="ConnectionDetailStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="MaxWidth" Value="360" />
+        <Setter Property="Margin" Value="0,6,0,0" />
+        <Style.Triggers>
+            <Trigger Property="Text" Value="">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
     <!-- ======== Page transitions ======== -->
 
     <!-- Everything a page surface is, minus the entrance. App.ApplyMotionPreference
@@ -926,7 +1195,7 @@
       the dispatcher's handler, and left an error in the log for a 180ms flourish that
       never once ran.
     -->
-    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer" BasedOn="{StaticResource PageSurfaceStaticStyle}">
+    <Style x:Key="PageSurfaceAnimatedStyle" TargetType="ScrollViewer" BasedOn="{StaticResource PageSurfaceStaticStyle}">
         <Style.Triggers>
             <EventTrigger RoutedEvent="Loaded">
                 <BeginStoryboard>
@@ -942,5 +1211,11 @@
             </EventTrigger>
         </Style.Triggers>
     </Style>
+
+    <!-- What the pages actually use. App.ApplyMotionPreference points this key at one of
+         the two above, before the window is built and again when the preference changes:
+         a Style is sealed the first time it is applied, so the choice has to be made by
+         swapping the resource rather than by editing a trigger collection at runtime. -->
+    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer" BasedOn="{StaticResource PageSurfaceAnimatedStyle}" />
 
 </ResourceDictionary>

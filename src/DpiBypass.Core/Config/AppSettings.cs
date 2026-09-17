@@ -175,6 +175,30 @@ public sealed record AppSettings : IHotspotLegacyState
     /// </remarks>
     public bool DisableWindowBackdrop { get; set; }
 
+    /// <summary>What the window should look like: system default, Mica, Acrylic or flat.</summary>
+    /// <remarks>
+    /// Microsoft's recommendation for a main window is Mica, and that is what "system"
+    /// gives. Acrylic over a whole window is a deliberate departure from it - real
+    /// translucency costs more than a wallpaper tint and some people want it anyway - so
+    /// it is offered as a choice rather than made the default.
+    /// <para>
+    /// A settings file written before this property existed carries
+    /// <see cref="DisableWindowBackdrop"/> instead, and the loader folds one into the
+    /// other: a machine that had already opted out stays opted out, under the name the
+    /// interface can now show and change.
+    /// </para>
+    /// </remarks>
+    public AppearanceMode Appearance { get; set; } = AppearanceMode.System;
+
+    /// <summary>Whether the app plays its own animations. Windows' own preference wins over this.</summary>
+    /// <remarks>
+    /// Windows already has "show animations in Windows", and the app honours it. This is
+    /// the narrower switch for somebody who wants motion everywhere else and not here -
+    /// a person who finds the connection ring distracting should not have to turn off
+    /// every animation on the machine to be rid of it.
+    /// </remarks>
+    public bool ReduceMotion { get; set; }
+
     public DnsMode DnsMode { get; set; } = DnsMode.EncryptedLoopback;
 
     public bool BlockQuicHandshakes { get; set; } = true;
@@ -620,6 +644,21 @@ public sealed class ConfigStore
     /// </summary>
     private static void Normalise(AppSettings settings)
     {
+        if (!Enum.IsDefined(settings.Appearance))
+        {
+            settings.Appearance = AppearanceMode.System;
+        }
+
+        // A file written before Appearance existed says the same thing in the old words.
+        // Folded rather than read alongside, so there is exactly one property deciding
+        // what the window looks like and the interface can change it.
+        if (settings.DisableWindowBackdrop && settings.Appearance == AppearanceMode.System)
+        {
+            settings.Appearance = AppearanceMode.Plain;
+        }
+
+        settings.DisableWindowBackdrop = settings.Appearance == AppearanceMode.Plain;
+
         // "Latency": null is valid JSON and the deserialiser writes that null straight
         // over the property initialiser, so every load puts it back.
         settings.Latency ??= new LatencyPreferences();

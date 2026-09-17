@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using DpiBypass.App.Infrastructure;
 using DpiBypass.App.ViewModels;
+using DpiBypass.Core.Config;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.Network;
 using DpiBypass.Core.Startup;
@@ -18,7 +19,8 @@ public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel;
     private readonly ThemeManager? _theme;
-    private bool _micaApplied;
+    private AppearanceMode _appearance = AppearanceMode.System;
+    private bool _backdropActive;
     private bool _backdropSuppressed;
     private nint _backdropHandle;
     private bool _scrollPending;
@@ -116,7 +118,10 @@ public partial class MainWindow : Window
     public WindowReadiness Readiness { get; private set; } = WindowReadiness.None;
 
     /// <summary>Whether the client area is currently handed to the compositor.</summary>
-    public bool BackdropActive => _micaApplied;
+    public bool BackdropActive => _backdropActive;
+
+    /// <summary>The appearance the user asked for, whatever this machine could deliver.</summary>
+    public AppearanceMode Appearance => _appearance;
 
     protected override void OnSourceInitialized(EventArgs e)
     {
@@ -221,68 +226,98 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Asks Windows for the Mica material, if it is safe to ask for it here.
+    /// Asks Windows for the material the user picked, if it is safe to ask for it here.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Called only once the window has been confirmed on screen, and that ordering is
-    /// the fix rather than a detail. Turning the material on means telling WPF to stop
-    /// painting the client area, because the compositor is going to paint it instead -
-    /// so when the compositor does not, the window becomes a transparent hole with the
-    /// controls floating in it. Doing that during <c>OnSourceInitialized</c>, as this
-    /// used to, put the failure in front of the very first frame: the app's first ever
-    /// window was the one at risk of being invisible, on a machine where nobody had
-    /// seen the app before and had no reason to look in the notification area.
+    /// Called only once the window has been confirmed on screen, and that ordering is the
+    /// fix rather than a detail. Turning a material on means telling WPF to stop painting
+    /// the client area, because the compositor is going to paint it instead - so when the
+    /// compositor does not, the window becomes a transparent hole with the controls
+    /// floating in it. Doing that during <c>OnSourceInitialized</c>, as this used to, put
+    /// the failure in front of the very first frame: the app's first ever window was the
+    /// one at risk of being invisible, on a machine where nobody had seen the app before
+    /// and had no reason to look in the notification area.
     /// </para>
     /// <para>
     /// Now the first frame is always opaque and always drawn by WPF. The material is a
-    /// second step applied to a window already proved reachable, and it is dropped
-    /// again the moment anything about it is in doubt.
+    /// second step applied to a window already proved reachable, and it is dropped again
+    /// the moment anything about it is in doubt.
+    /// </para>
+    /// <para>
+    /// A request the user made themselves also clears a suppression an earlier watchdog
+    /// put in place. Without that, one bad launch - a slow first frame, a second shortcut
+    /// double-clicked while the window was already up - left the machine flat for good,
+    /// with nothing in the interface able to undo it.
     /// </para>
     /// </remarks>
-    public void EnableBackdrop()
+    public BackdropOutcome ApplyAppearance(AppearanceMode appearance, bool userInitiated = false)
     {
-        if (_micaApplied || _backdropSuppressed || Readiness < WindowReadiness.Rendered)
+        _appearance = appearance;
+
+        if (userInitiated)
         {
-            return;
+            _backdropSuppressed = false;
+        }
+
+        if (Readiness < WindowReadiness.Rendered)
+        {
+            // Deferred, not dropped: the confirmation path calls back here.
+            return WindowBackdrop.Last;
+        }
+
+        if (_backdropSuppressed)
+        {
+            GoFlat("bu oturumda kapatıldı");
+            return WindowBackdrop.Last;
         }
 
         try
         {
-            _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
-            _backdropHandle = _micaApplied ? new WindowInteropHelper(this).Handle : nint.Zero;
-            AppLog.Info($"Pencere arka planı: {WindowBackdrop.Availability}.");
+            var outcome = WindowBackdrop.Apply(this, appearance, _theme?.IsDark ?? false);
+            _backdropActive = outcome.Applied;
+            _backdropHandle = outcome.Applied ? new WindowInteropHelper(this).Handle : nint.Zero;
+
+            if (!outcome.Applied)
+            {
+                RestoreOpaqueBackground();
+            }
+
+            AppLog.Info($"Pencere görünümü · {WindowBackdrop.Explain()}");
+            _viewModel.ReportAppearance(outcome);
+            return outcome;
         }
         catch (Exception ex)
         {
-            _micaApplied = false;
+            _backdropActive = false;
             _backdropHandle = nint.Zero;
+            RestoreOpaqueBackground();
             AppLog.Error("Pencere arka planı uygulanamadı", ex);
+            return WindowBackdrop.Last;
         }
     }
 
     /// <summary>
-    /// Takes the client area back off the compositor for good and paints it here.
+    /// Takes the client area back off the compositor for the rest of the session and
+    /// paints it here.
     /// </summary>
     /// <remarks>
     /// The escape hatch for the one failure that cannot be detected from inside this
     /// process: DWM accepting the backdrop request and then not drawing the material.
     /// Nothing Windows will answer distinguishes that from a window that is being drawn
-    /// perfectly, so the recovery is driven by the user - a second launch of an app
-    /// whose window this process believes is already in front of them - and by the
-    /// visibility watchdog. Suppressed rather than merely removed, so nothing turns it
-    /// back on later in the same session.
+    /// perfectly, so the recovery is driven by the user - a second launch of an app whose
+    /// window this process believes is already in front of them - and by the visibility
+    /// watchdog. Suppressed rather than merely removed, so nothing turns it back on later
+    /// in the same session except the user asking for it in Settings.
     /// </remarks>
     public void DisableBackdrop(string reason)
     {
         _backdropSuppressed = true;
+        GoFlat(reason);
+    }
 
-        if (!_micaApplied)
-        {
-            RestoreOpaqueBackground();
-            return;
-        }
-
+    private void GoFlat(string reason)
+    {
         try
         {
             WindowBackdrop.Remove(this);
@@ -292,10 +327,16 @@ public partial class MainWindow : Window
             AppLog.Error("Pencere arka planı kaldırılamadı", ex);
         }
 
-        _micaApplied = false;
+        var wasActive = _backdropActive;
+        _backdropActive = false;
         _backdropHandle = nint.Zero;
         RestoreOpaqueBackground();
-        AppLog.Warning($"Pencere arka planı düz renge alındı: {reason}.");
+        _viewModel.ReportAppearance(WindowBackdrop.Last);
+
+        if (wasActive)
+        {
+            AppLog.Warning($"Pencere arka planı düz renge alındı: {reason}.");
+        }
     }
 
     /// <summary>Forces a layout and paint pass. Used only by recovery.</summary>
@@ -362,29 +403,36 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (_micaApplied)
+            if (_backdropActive)
             {
                 var handle = new WindowInteropHelper(this).Handle;
                 if (handle != nint.Zero && handle != _backdropHandle)
                 {
-                    // New handle: ask for the material again rather than assuming the
-                    // old answer still holds.
-                    _micaApplied = WindowBackdrop.TryApply(this, _theme?.IsDark ?? false);
-                    _backdropHandle = _micaApplied ? handle : nint.Zero;
+                    // New handle: ask for the material again rather than assuming the old
+                    // answer still holds.
+                    ApplyAppearance(_appearance);
+                    return;
                 }
 
-                if (_micaApplied && WindowBackdrop.DescribeUnavailability() is null)
+                if (WindowBackdrop.DescribeLoss(_appearance) is null)
                 {
                     return;
                 }
+
+                GoFlat("Windows artık bu malzemeyi çizmiyor");
+                return;
             }
 
-            if (_micaApplied)
+            // Not on the compositor. If the machine has since become able to draw what the
+            // user asked for - transparency switched back on, the high contrast theme
+            // turned off - take it back, rather than leaving them flat until they restart.
+            if (!_backdropSuppressed
+                && _appearance != AppearanceMode.Plain
+                && Readiness >= WindowReadiness.Rendered
+                && WindowBackdrop.DescribeLoss(_appearance) is null)
             {
-                WindowBackdrop.Remove(this);
-                _micaApplied = false;
-                _backdropHandle = nint.Zero;
-                AppLog.Info("Pencere arka planı düz renge alındı.");
+                ApplyAppearance(_appearance);
+                return;
             }
 
             RestoreOpaqueBackground();
@@ -438,7 +486,7 @@ public partial class MainWindow : Window
     {
         WindowBackdrop.UpdateTitleBarTheme(this, isDark);
 
-        if (!_micaApplied)
+        if (!_backdropActive)
         {
             // Re-pointed rather than left alone: the backdrop path replaces this with a
             // local transparent brush, and a window that came back from it has no

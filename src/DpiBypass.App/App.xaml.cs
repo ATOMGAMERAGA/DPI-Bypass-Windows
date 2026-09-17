@@ -6,6 +6,7 @@ using DpiBypass.App.ViewModels;
 using DpiBypass.Core;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Interop;
+using DpiBypass.Core.Config;
 using DpiBypass.Core.Ipc;
 using DpiBypass.Core.Logging;
 using DpiBypass.Core.Startup;
@@ -562,15 +563,18 @@ public partial class App : Application
     {
         try
         {
-            if (SystemParameters.ClientAreaAnimation)
-            {
-                return;
-            }
+            // Windows' own preference wins outright; the app's switch can only turn motion
+            // further down. Somebody who asked Windows for no animation does not then get
+            // some because an application's own default disagreed.
+            var wanted = SystemParameters.ClientAreaAnimation && _service?.Settings.ReduceMotion != true;
 
-            if (Resources["PageSurfaceStaticStyle"] is Style still)
+            var replacement = wanted ? "PageSurfaceAnimatedStyle" : "PageSurfaceStaticStyle";
+            if (Resources[replacement] is Style style && !ReferenceEquals(Resources["PageSurfaceStyle"], style))
             {
-                Resources["PageSurfaceStyle"] = still;
-                AppLog.Info("Sistem animasyonları kapalı; sayfa geçiş animasyonu kullanılmıyor.");
+                Resources["PageSurfaceStyle"] = style;
+                AppLog.Info(wanted
+                    ? "Sayfa geçiş animasyonu açık."
+                    : "Hareket azaltma etkin; sayfa geçiş animasyonu kullanılmıyor.");
             }
         }
         catch (Exception ex)
@@ -585,6 +589,10 @@ public partial class App : Application
         try
         {
             _window = new MainWindow(_viewModel!, _theme);
+            _viewModel!.AppearanceRequested -= OnAppearanceRequested;
+            _viewModel.AppearanceRequested += OnAppearanceRequested;
+            _viewModel.MotionPreferenceChanged -= OnMotionPreferenceChanged;
+            _viewModel.MotionPreferenceChanged += OnMotionPreferenceChanged;
             _window.PresentationChanged += OnPresentationChanged;
             _window.CloseToTrayRequested += OnCloseToTray;
             _window.ExitRequested += () => _ = ShutdownAsync();
@@ -1065,7 +1073,7 @@ public partial class App : Application
         return window is null ? description : $"{description} · {WindowInspector.Inspect(window)}";
     }
 
-    /// <summary>Turns on the compositor material, unless this machine has ruled it out.</summary>
+    /// <summary>Applies the appearance the settings ask for, as far as this machine goes.</summary>
     private void EnableWindowBackdrop()
     {
         if (_window is null)
@@ -1073,13 +1081,37 @@ public partial class App : Application
             return;
         }
 
-        if (_service?.Settings.DisableWindowBackdrop == true)
+        _window.ApplyAppearance(_service?.Settings.Appearance ?? AppearanceMode.System);
+    }
+
+    /// <summary>
+    /// Re-applies the window material after the user picked a different one in Settings.
+    /// </summary>
+    /// <remarks>
+    /// Marked as the user's own request, which is what lets it clear a suppression an
+    /// earlier watchdog put in place. Somebody opening Settings and choosing Mica has told
+    /// us more directly than any heuristic could that they can see their window.
+    /// </remarks>
+    /// <summary>
+    /// Re-picks the page surface style after the user changed the motion preference.
+    /// </summary>
+    /// <remarks>
+    /// The connection ring reacts immediately, because it reads the preference through a
+    /// binding. The page entrance cannot: it is an EventTrigger in a Style, and a Style is
+    /// sealed the first time it is applied, so an already-built page keeps the animation it
+    /// was created with. Swapping the resource covers every page not yet visited - the rail
+    /// builds them on first use - and the rest follow on the next launch.
+    /// </remarks>
+    private void OnMotionPreferenceChanged(bool _) => ApplyMotionPreference();
+
+    private void OnAppearanceRequested(AppearanceMode appearance)
+    {
+        if (_window is null)
         {
-            _window.DisableBackdrop("ayarlarda kapatılmış");
             return;
         }
 
-        _window.EnableBackdrop();
+        _window.ApplyAppearance(appearance, userInitiated: true);
     }
 
     /// <summary>

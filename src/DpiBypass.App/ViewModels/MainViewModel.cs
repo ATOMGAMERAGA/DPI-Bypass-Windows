@@ -122,7 +122,7 @@ public sealed record DnsOption(DnsMode Mode, string Display, string Description)
 }
 
 /// <summary>Everything the main window binds to.</summary>
-public sealed class MainViewModel : ObservableObject
+public sealed partial class MainViewModel : ObservableObject
 {
     /// <summary>How many lines the log page keeps. The file keeps everything.</summary>
     private const int LogCapacity = 500;
@@ -370,7 +370,8 @@ public sealed class MainViewModel : ObservableObject
         // and stops from the launch path, the tray menu and the control channel, and a
         // button that offers to start something already starting does nothing when it is
         // pressed.
-        ToggleCommand = new AsyncRelayCommand(ToggleAsync, () => !_isBusy && !IsTransitioning);
+        InitialiseConnection();
+        ToggleCommand = ConnectCommand;
         TestCommand = new AsyncRelayCommand(TestAsync);
         RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !IsTuning);
         TestAllCommand = new AsyncRelayCommand(TestAllAsync);
@@ -408,6 +409,8 @@ public sealed class MainViewModel : ObservableObject
         SaveDiagnosticReportCommand = new AsyncRelayCommand(SaveDiagnosticReportAsync);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
+
+        InitialiseAppearance();
 
         _service.SaveStatusChanged += OnSaveStatusChanged;
         _service.Changed += OnServiceChanged;
@@ -2664,37 +2667,6 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public async Task ToggleAsync()
-    {
-        IsBusy = true;
-        var wasRunning = _isRunning;
-
-        try
-        {
-            if (wasRunning)
-            {
-                await _service.StopAsync().ConfigureAwait(true);
-            }
-            else
-            {
-                await _service.StartAsync().ConfigureAwait(true);
-            }
-        }
-        catch (Exception ex)
-        {
-            // Which of the two was attempted matters: a stop that could not put the
-            // machine's DNS back reported as "could not start" sends the user looking for
-            // the wrong problem.
-            AppLog.Error(wasRunning ? "Koruma durdurulamadı" : "Koruma başlatılamadı", ex);
-            StatusHeadline = wasRunning ? "Tam olarak durdurulamadı" : "Başlatılamadı";
-            StatusDetail = ex.Message;
-        }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
-
     private async Task RestartAsync()
     {
         IsBusy = true;
@@ -2801,6 +2773,7 @@ public sealed class MainViewModel : ObservableObject
 
         IsRunning = _service.State is ProtectionState.Running or ProtectionState.Degraded;
         ProtectionState = _service.State;
+        SyncConnectionWithService();
 
         // A released filter is reported as what it is. The watchdog is reopening it, and
         // saying "Koruma etkin" over traffic that is going out untouched would be the one
@@ -2855,6 +2828,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         RefreshCounters();
+        RefreshOverview();
         Raise(nameof(VodafoneModeEnabled));
         Raise(nameof(VodafoneDropIPv6));
         Raise(nameof(HotspotDiagnostics));
@@ -3193,6 +3167,7 @@ public sealed class MainViewModel : ObservableObject
     private void RefreshPresentation()
     {
         RefreshCounters();
+        RefreshTraffic();
         UpdateLatencyElapsed();
 
         // The wording is relative ("3 dk önce"), so it goes stale on its own even when
@@ -3312,6 +3287,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         TuningStatus = $"Deneniyor ({index}/{total}): {name}";
+        ReportProfileTrial(name, index, total);
     }
 
     /// <summary>
@@ -3642,5 +3618,6 @@ public sealed class MainViewModel : ObservableObject
         _service.TuningProgress -= OnTuningProgress;
         _service.DomainLearned -= OnDomainLearned;
         AppLog.Written -= OnLogWritten;
+        DisposeConnection();
     }
 }
