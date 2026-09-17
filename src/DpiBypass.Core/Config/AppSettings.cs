@@ -190,6 +190,22 @@ public sealed record AppSettings : IHotspotLegacyState
     /// </remarks>
     public AppearanceMode Appearance { get; set; } = AppearanceMode.System;
 
+    /// <summary>Whether the four-card introduction has ever been finished or skipped.</summary>
+    /// <remarks>
+    /// Written once, the first time somebody reaches the end of it or presses "Atla".
+    /// Missing from an older settings file reads as false, which is right: a user
+    /// updating from a build that had no introduction has not seen it.
+    /// </remarks>
+    public bool WelcomeCompleted { get; set; }
+
+    /// <summary>The "Açılışta göster" preference for the short greeting.</summary>
+    /// <remarks>
+    /// Only covers the brief greeting on a later manual launch. The first run's
+    /// introduction ignores it, because somebody who has never seen the app cannot have
+    /// meaningfully turned it off.
+    /// </remarks>
+    public bool ShowWelcomeOnStartup { get; set; } = true;
+
     /// <summary>Whether the app plays its own animations. Windows' own preference wins over this.</summary>
     /// <remarks>
     /// Windows already has "show animations in Windows", and the app honours it. This is

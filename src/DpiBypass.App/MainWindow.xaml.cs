@@ -50,6 +50,7 @@ public partial class MainWindow : Window
         }
 
         ((INotifyCollectionChanged)_viewModel.VisibleLogLines).CollectionChanged += OnLogLinesChanged;
+        _viewModel.WelcomeFinished += OnWelcomeFinished;
 
         // Away in the notification area or shrunk to a taskbar button, the only thing the
         // counter timer produces is formatted text nobody can see. Protection and the
@@ -478,9 +479,30 @@ public partial class MainWindow : Window
 
         Loaded -= OnWindowLoaded;
         CompositionTarget.Rendering -= OnComposition;
+        _viewModel.WelcomeFinished -= OnWelcomeFinished;
         ((INotifyCollectionChanged)_viewModel.VisibleLogLines).CollectionChanged -= OnLogLinesChanged;
         IsVisibleChanged -= OnWindowVisibilityChanged;
     }
+
+    /// <summary>
+    /// Moves the keyboard into the app once the greeting hands the window over.
+    /// </summary>
+    /// <remarks>
+    /// Focus was on a button that has just been collapsed, and WPF leaves it there: a
+    /// keyboard user pressing Tab would start from nowhere and a screen reader would
+    /// announce nothing. Queued behind the layout pass the collapse causes, because the
+    /// rail does not exist as a focusable thing until it has been arranged.
+    /// </remarks>
+    private void OnWelcomeFinished()
+        => Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            if (_detached)
+            {
+                return;
+            }
+
+            NavigationTabs.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
+        }));
 
     private void OnThemeChanged(bool isDark)
     {

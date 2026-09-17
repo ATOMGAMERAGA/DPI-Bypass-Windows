@@ -26,11 +26,21 @@
         <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
     </Window.Resources>
 
+    <!-- Two layers in the same window: the app, and the greeting that covers it.
+
+         The greeting fills the content area and nothing more. The window keeps its size,
+         its position and its system title bar - close, minimise and maximise stay exactly
+         where they were and keep working - because everything here is inside the client
+         area and nothing touches WindowState or WindowStyle. The shell is collapsed rather
+         than merely covered, so keyboard focus cannot reach a control behind the greeting.
+    -->
+    <Grid>
+
     <!-- Shell: a compact top bar (brand, live protection status, primary action),
          a navigation rail on the left and a footer with version and exit. The bar,
          the rail and the footer stay transparent so Mica shows through; hairlines
          separate them from the page content. -->
-    <Grid>
+    <Grid x:Name="AppShell" Style="{StaticResource AppShellStyle}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -800,6 +810,24 @@
                                           Margin="0,10,0,0"
                                           Style="{StaticResource SwitchStyle}"
                                           IsChecked="{Binding MinimiseToTrayOnClose, Mode=TwoWay}" />
+
+                                <CheckBox Content="Açılışta karşılamayı göster"
+                                          Margin="0,10,0,0"
+                                          Style="{StaticResource SwitchStyle}"
+                                          AutomationProperties.Name="Açılışta karşılamayı göster"
+                                          IsChecked="{Binding ShowWelcomeOnStartup, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="26,4,0,0"
+                                           Text="Uygulamayı elle açtığınızda kısa bir karşılama görürsünüz. Windows ile sessiz başlangıçta ve tepsiden geri dönüşte gösterilmez." />
+
+                                <Button Content="Tanıtımı yeniden göster"
+                                        MinWidth="200"
+                                        Margin="0,12,0,0"
+                                        HorizontalAlignment="Left"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"
+                                        infra:ActionButton.Symbol="BookOpen"
+                                        AutomationProperties.Name="Tanıtımı yeniden göster"
+                                        Command="{Binding ShowWelcomeTourCommand}" />
                             </StackPanel>
                         </Border>
 
@@ -1852,5 +1880,128 @@
                         Click="OnExitClicked" />
             </Grid>
         </Border>
+    </Grid>
+
+    <!-- ======================= Karşılama =======================
+         Brand, one card, and the way forward. The copy is four short sentences in
+         Turkish, and it promises only what the app does: it finds settings that work on
+         this network. No VPN, no anonymity, no encryption of the user's traffic. -->
+    <Grid x:Name="WelcomeOverlay"
+          Style="{StaticResource WelcomeOverlayStyle}"
+          AutomationProperties.Name="Karşılama">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- The card column is centred and capped, so the greeting reads the same in a
+             narrow window and a maximised one, and scrolls rather than clipping when the
+             window is short or the text scale is large. -->
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Padding="24,0">
+            <StackPanel MaxWidth="560"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Margin="0,40">
+
+                <!-- Brand. The existing identity, at a size that stays sharp at 200%. -->
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,32">
+                    <Border Width="52" Height="52"
+                            Background="{DynamicResource AppAccentSoftBrush}"
+                            CornerRadius="{StaticResource Radius.Tile}">
+                        <Image Width="40" Height="40"
+                               RenderOptions.BitmapScalingMode="HighQuality"
+                               Source="Assets/dpibypass-256.png" />
+                    </Border>
+                    <TextBlock Text="{Binding ProductTitle}"
+                               FontSize="{StaticResource Type.Subtitle}"
+                               FontWeight="SemiBold"
+                               Margin="14,0,0,0"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource AppTextPrimaryBrush}" />
+                </StackPanel>
+
+                <!-- The card itself. Bound to the index rather than to the text, so moving
+                     between cards re-instantiates the template and its Loaded trigger runs
+                     the cross-fade: one place, no per-card triggers, and nothing to keep in
+                     step when a card is added. -->
+                <ContentControl Content="{Binding WelcomeIndex}"
+                                ContentTemplate="{StaticResource WelcomeCardTemplate}"
+                                HorizontalAlignment="Stretch" />
+
+                <!-- Progress. Dots for the tour, nothing for the one-line greeting. -->
+                <ItemsControl ItemsSource="{Binding WelcomeSteps}"
+                              HorizontalAlignment="Center"
+                              Margin="0,32,0,0"
+                              Focusable="False"
+                              AutomationProperties.Name="{Binding WelcomeProgress}"
+                              Visibility="{Binding IsWelcomeTour, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Style="{StaticResource WelcomeDotStyle}" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Actions. Skip on the left because it is the quiet way out; Back and the
+             primary action on the right, where the eye finishes. -->
+        <Border Grid.Row="1"
+                Style="{StaticResource ChromeBorderStyle}"
+                BorderThickness="0,1,0,0"
+                Padding="24,16">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Button Grid.Column="0"
+                        Content="_Atla"
+                        MinWidth="110"
+                        Style="{StaticResource SecondaryActionButtonStyle}"
+                        AutomationProperties.Name="Tanıtımı atla"
+                        Command="{Binding WelcomeSkipCommand}"
+                        Visibility="{Binding IsWelcomeTour, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                <CheckBox Grid.Column="1"
+                          Content="Açılışta göster"
+                          Margin="20,0"
+                          HorizontalAlignment="Left"
+                          VerticalAlignment="Center"
+                          Style="{StaticResource SwitchStyle}"
+                          AutomationProperties.Name="Karşılamayı açılışta göster"
+                          IsChecked="{Binding ShowWelcomeOnStartup, Mode=TwoWay}" />
+
+                <Button Grid.Column="2"
+                        Content="_Geri"
+                        MinWidth="110"
+                        Margin="0,0,8,0"
+                        Style="{StaticResource SecondaryActionButtonStyle}"
+                        infra:ActionButton.Symbol="ArrowLeft"
+                        Command="{Binding WelcomeBackCommand}"
+                        Visibility="{Binding IsWelcomeTour, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                <Button Grid.Column="3"
+                        Content="{Binding WelcomePrimaryAction}"
+                        MinWidth="140"
+                        IsDefault="True"
+                        Style="{StaticResource PrimaryActionButtonStyle}"
+                        infra:ActionButton.Symbol="ArrowRight"
+                        Command="{Binding WelcomeNextCommand}" />
+            </Grid>
+        </Border>
+    </Grid>
+
     </Grid>
 </Window>

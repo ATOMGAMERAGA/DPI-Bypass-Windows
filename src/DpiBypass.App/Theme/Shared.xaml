@@ -1165,6 +1165,123 @@
         </Style.Triggers>
     </Style>
 
+    <!-- ======== The welcome layer ========
+         Two styles and a template. The shell and the greeting swap by Visibility rather
+         than by opacity, so focus and hit-testing follow the switch and a control behind
+         the greeting cannot be reached with Tab. -->
+
+    <Style x:Key="AppShellStyle" TargetType="Grid">
+        <Setter Property="Visibility" Value="Visible" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsWelcomeVisible}" Value="True">
+                <Setter Property="Visibility" Value="Collapsed" />
+
+                <!-- ExitActions, not EnterActions: they run when the greeting ends, and
+                     they do not run at all on a launch that never showed one. A fade-in on
+                     every start would delay the first frame for no reason. -->
+                <DataTrigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.ContentSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.ExitActions>
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="WelcomeOverlayStyle" TargetType="Grid">
+        <Setter Property="Visibility" Value="Collapsed" />
+        <Setter Property="Background" Value="Transparent" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsWelcomeVisible}" Value="True">
+                <Setter Property="Visibility" Value="Visible" />
+                <DataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.ContentSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.EnterActions>
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
+      One card of the greeting.
+
+      Bound to the card index rather than to its text: changing the index re-instantiates
+      the template, whose Loaded trigger cross-fades the new card in. That is one
+      animation for any number of cards, and nothing to keep in step when one is added.
+
+      The fade is opacity only - no slide, no scale. Reduced-motion guidance is about
+      movement rather than about change, so this stays on whatever the motion preference
+      says, and the animations that do move (the connection ring, the tick) are the ones
+      gated on it.
+    -->
+    <DataTemplate x:Key="WelcomeCardTemplate">
+        <StackPanel HorizontalAlignment="Center">
+            <StackPanel.Triggers>
+                <EventTrigger RoutedEvent="Loaded">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.Micro}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </StackPanel.Triggers>
+
+            <Border Width="72" Height="72"
+                    HorizontalAlignment="Center"
+                    CornerRadius="{StaticResource Radius.Surface}"
+                    Background="{DynamicResource AppAccentSoftBrush}">
+                <infra:FluentIcon Symbol="{Binding DataContext.WelcomeSymbol, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  Filled="True"
+                                  Size="{StaticResource IconSize.Hero}"
+                                  Foreground="{DynamicResource AppAccentBrush}" />
+            </Border>
+
+            <TextBlock Text="{Binding DataContext.WelcomeTitle, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.Display}"
+                       FontWeight="SemiBold"
+                       Margin="0,24,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource AppTextPrimaryBrush}" />
+
+            <TextBlock Text="{Binding DataContext.WelcomeBody, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.BodyLarge}"
+                       Margin="0,12,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       LineHeight="24"
+                       Foreground="{DynamicResource AppTextSecondaryBrush}" />
+        </StackPanel>
+    </DataTemplate>
+
+    <Style x:Key="WelcomeDotStyle" TargetType="Border">
+        <Setter Property="Width" Value="8" />
+        <Setter Property="Height" Value="8" />
+        <Setter Property="Margin" Value="4,0" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
+        <Setter Property="Background" Value="{DynamicResource AppDividerBrush}" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                <Setter Property="Background" Value="{DynamicResource AppAccentBrush}" />
+                <Setter Property="Width" Value="22" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
     <!-- ======== Page transitions ======== -->
 
     <!-- Everything a page surface is, minus the entrance. App.ApplyMotionPreference

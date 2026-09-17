@@ -9,6 +9,7 @@ using DpiBypass.Core.Interop;
 using DpiBypass.Core.Config;
 using DpiBypass.Core.Ipc;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.Onboarding;
 using DpiBypass.Core.Startup;
 using Microsoft.Win32;
 
@@ -391,6 +392,11 @@ public partial class App : Application
         StartupTrace.Mark($"açılış kararı · {(_plan.ShowsWindow ? "pencere" : "tepsi")} ({_plan.Reason})");
 
         _windowWanted = _plan.ShowsWindow;
+
+        // Decided before the window is raised, so the greeting is part of the first frame
+        // rather than something that appears over an app the user has already started
+        // reading. A launch that goes to the notification area greets nobody.
+        BeginWelcomeIfThisLaunchDeservesOne(e.Args);
 
         if (_plan.ShowsWindow)
         {
@@ -1483,6 +1489,41 @@ public partial class App : Application
     /// been drawn, because that is a different question with a different answer and
     /// conflating the two is the bug this whole path was rebuilt around.
     /// </remarks>
+    /// <summary>
+    /// Shows the greeting when this launch is one somebody made.
+    /// </summary>
+    /// <remarks>
+    /// The logon task's launch and a launch that goes straight to the notification area
+    /// are not arrivals, and neither is the window coming back from the tray later in the
+    /// session - that path never reaches here, which is the point of deciding it once, at
+    /// start-up, rather than every time the window is raised.
+    /// </remarks>
+    private void BeginWelcomeIfThisLaunchDeservesOne(string[] arguments)
+    {
+        if (_viewModel is null || _service is null || _selfTest)
+        {
+            return;
+        }
+
+        try
+        {
+            var kind = WelcomeFlow.Decide(new WelcomeContext(
+                LaunchedByUser: !StartupPlan.StartedByWindows(arguments),
+                StartingMinimised: !_plan.ShowsWindow,
+                RestoredFromTray: false,
+                HasSeenTour: _service.Settings.WelcomeCompleted,
+                ShowOnStartup: _service.Settings.ShowWelcomeOnStartup));
+
+            _viewModel.BeginWelcome(kind);
+            AppLog.Info($"Karşılama: {kind}.");
+        }
+        catch (Exception ex)
+        {
+            // A greeting is not worth a failed start.
+            AppLog.Error("Karşılama kararı verilemedi", ex);
+        }
+    }
+
     private void ShowMainWindow()
     {
         if (_window is null)

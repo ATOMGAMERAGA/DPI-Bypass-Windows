@@ -411,6 +411,7 @@ public sealed partial class MainViewModel : ObservableObject
         ClearLogCommand = new RelayCommand(ClearLogView);
 
         InitialiseAppearance();
+        InitialiseWelcome();
 
         _service.SaveStatusChanged += OnSaveStatusChanged;
         _service.Changed += OnServiceChanged;
