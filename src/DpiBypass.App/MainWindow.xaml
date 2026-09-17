@@ -696,16 +696,51 @@
                                            Style="{StaticResource CaptionStyle}"
                                            Margin="0,8,0,0" />
 
-                                <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <!-- Two buttons, because they cost different things. The
+                                     first measures reach, stability and latency and moves
+                                     almost nothing; the second adds a transfer per
+                                     candidate and says how much data that is before it is
+                                     pressed. A user finding out what a button spent after
+                                     pressing it is not a choice they made. -->
+                                <WrapPanel Margin="0,14,0,0">
                                     <Button Content="Yeniden tara"
                                             MinWidth="150"
+                                            Margin="0,0,8,8"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             infra:ActionButton.Symbol="ArrowClockwise"
                                             Command="{Binding RetuneCommand}" />
+                                    <Button Content="Hızı da ölçerek tara"
+                                            MinWidth="190"
+                                            Margin="0,0,8,8"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            infra:ActionButton.Symbol="TopSpeed"
+                                            ToolTip="{Binding ThroughputCostSummary}"
+                                            AutomationProperties.Name="Hızı da ölçerek yeniden tara"
+                                            Command="{Binding RetuneWithSpeedCommand}" />
+                                </WrapPanel>
+
+                                <TextBlock Style="{StaticResource HintStyle}"
+                                           Margin="0,0,0,10"
+                                           TextWrapping="Wrap">
+                                    <Run Text="Hız ölçümü her aday için gerçek bir aktarım yapar." />
+                                    <Run Text="{Binding ThroughputCostSummary, Mode=OneWay}" />
+                                </TextBlock>
+
+                                <CheckBox Content="Her otomatik taramada hızı da ölç"
+                                          Margin="0,0,0,10"
+                                          Style="{StaticResource SwitchStyle}"
+                                          AutomationProperties.Name="Her otomatik taramada hızı da ölç"
+                                          IsChecked="{Binding MeasureThroughputDuringTuning, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource HintStyle}"
+                                           Margin="26,0,0,10"
+                                           TextWrapping="Wrap"
+                                           Text="Kapalıyken tarama erişim, kararlılık ve gecikmeyi ölçer; hız ölçülmez ve sonuçta &quot;hız testi yapılmadı&quot; yazar. Ağ her değiştiğinde tarama çalıştığı için bu seçenek mobil veri kullanımını artırabilir." />
+
+                                <StackPanel Orientation="Horizontal">
                                     <!-- Real tuning progress: only while the sweep runs. -->
                                     <ProgressBar Width="90"
                                                  Height="3"
-                                                 Margin="12,0,0,0"
+                                                 Margin="0,0,0,0"
                                                  VerticalAlignment="Center"
                                                  IsIndeterminate="{Binding IsTuning}"
                                                  Visibility="{Binding IsTuning, Converter={StaticResource BoolToVisibilityConverter}}"

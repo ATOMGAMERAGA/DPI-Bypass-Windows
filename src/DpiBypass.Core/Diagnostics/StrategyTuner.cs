@@ -26,6 +26,12 @@ public enum SweepEnding
 
     /// <summary>Nothing got through on this network.</summary>
     NothingWorked = 4,
+
+    /// <summary>
+    /// The machine does not appear to have a working connection at all, so there is
+    /// nothing for a bypass recipe to be measured against.
+    /// </summary>
+    NetworkUnavailable = 5,
 }
 
 public sealed record TuningResult(
@@ -50,6 +56,7 @@ public sealed record TuningResult(
         SweepEnding.Superseded => "Ölçüm, ağ değiştiği için yarıda bırakıldı; hiçbir şey uygulanmadı.",
         SweepEnding.NothingWorked => "Denenen profillerin hiçbiri hedeflere ulaşamadı.",
         SweepEnding.BudgetSpent => "Süre bütçesi doldu; ölçülebilen adaylar arasından seçildi.",
+        SweepEnding.NetworkUnavailable => "Çalışan bir ağ bağlantısı görünmüyor; tarama yapılmadı.",
         _ => "Ölçüm yapılmadı.",
     };
 }
@@ -79,13 +86,14 @@ public sealed record TuningResult(
 /// restore on its way out, which used to be how a stale sweep undid the live one's winner.
 /// </para>
 /// <para>
-/// The load test that would measure sustained throughput is deliberately not here. It
-/// costs the user's data, so it is started by them rather than by a sweep that runs
-/// whenever a network changes; the selection policy handles its absence by saying "hız
-/// testi yapılmadı" rather than by guessing.
+/// The load test that measures sustained throughput is a third stage and it is off unless
+/// the user turned it on, because it costs their data - a sweep that moved several
+/// megabytes every time a network changed would spend a mobile allowance on their behalf.
+/// When it is off the selection policy says "hız testi yapılmadı" rather than guessing,
+/// and a transfer that fails leaves the candidate's throughput unknown rather than slow.
 /// </para>
 /// </remarks>
-public sealed class StrategyTuner
+public sealed class StrategyTuner : IDisposable
 {
     private readonly IConnectivityProbe _tester;
     private readonly Action<string>? _log;
@@ -107,7 +115,10 @@ public sealed class StrategyTuner
     /// this multiplies the whole measurement stage; and past the first few the ordering a
     /// profile supplies is guesswork anyway.
     /// </remarks>
-    public int ShortlistSize { get; init; } = 4;
+    public int ShortlistSize { get; init; } = DefaultShortlistSize;
+
+    /// <summary>The shortlist size a sweep uses unless it is told otherwise.</summary>
+    public const int DefaultShortlistSize = 4;
 
     /// <summary>How many times each shortlisted candidate is measured.</summary>
     /// <remarks>
@@ -120,8 +131,50 @@ public sealed class StrategyTuner
     /// <summary>How long screening may take before the shortlist is closed early.</summary>
     public TimeSpan ScreeningBudget { get; init; } = TimeSpan.FromSeconds(25);
 
+    /// <summary>
+    /// How many candidates may fail in a way that does not look like filtering before the
+    /// sweep concludes the machine has no working connection and stops.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is the whole point. A reset mid-handshake, a swallowed ClientHello
+    /// or somebody else's certificate are a filter acting; a DNS failure or a connect that
+    /// never completes are what an unplugged cable looks like, and no bypass recipe fixes
+    /// one of those. Without this, a laptop that wakes up out of range spends a minute
+    /// installing a dozen recipes on an engine with nothing to send through it, and the
+    /// only thing the user sees is the app being busy for no reason.
+    /// </remarks>
+    public int OfflineEvidenceThreshold { get; init; } = 3;
+
     /// <summary>How long the measurement stage may take.</summary>
     public TimeSpan MeasurementBudget { get; init; } = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// The transfer probe, or null when no throughput is to be measured.
+    /// </summary>
+    /// <remarks>
+    /// Null is the default and the normal case. A sweep runs whenever a network changes,
+    /// and one that moved several megabytes every time would spend a mobile allowance on
+    /// somebody's behalf. The user turns this on, for a run or as a preference, and the
+    /// selection policy reports its absence rather than guessing around it.
+    /// </remarks>
+    public IThroughputProbe? Throughput { get; init; }
+
+    /// <summary>How much data each candidate's transfer may move.</summary>
+    public long ThroughputBytesPerCandidate { get; init; } = DefaultThroughputBytesPerCandidate;
+
+    /// <summary>What one candidate's transfer costs, so the interface can say so first.</summary>
+    public const long DefaultThroughputBytesPerCandidate = 6 * 1024 * 1024;
+
+    /// <summary>
+    /// The whole cost of a throughput-measuring sweep, for the sentence shown before one
+    /// is started. A user finding out what a button spent after pressing it is not a
+    /// choice they made.
+    /// </summary>
+    public static long DefaultThroughputCostBytes
+        => DefaultThroughputBytesPerCandidate * DefaultShortlistSize;
+
+    /// <summary>What a throughput run would cost in total, for the confirmation the user sees.</summary>
+    public long EstimatedThroughputBytes => Throughput is null ? 0 : ThroughputBytesPerCandidate * ShortlistSize;
 
     public event Action<string, int, int>? Progress;
 
@@ -186,6 +239,7 @@ public sealed class StrategyTuner
             // --- Stage one: screening. One probe each, cheapest question first.
             var shortlist = new List<BypassStrategy>();
             var index = 0;
+            var offlineEvidence = 0;
 
             foreach (var candidate in candidates)
             {
@@ -212,6 +266,26 @@ public sealed class StrategyTuner
                 {
                     shortlist.Add(candidate);
                     _log?.Invoke($"'{candidate.Id}' got through the screening probe.");
+                    offlineEvidence = 0;
+                    continue;
+                }
+
+                // A failure that does not look like filtering is evidence about the link,
+                // not about the recipe. Enough of them in a row and there is nothing here
+                // for a sweep to measure.
+                offlineEvidence = result.LooksBlocked ? 0 : offlineEvidence + 1;
+
+                if (offlineEvidence >= OfflineEvidenceThreshold)
+                {
+                    _log?.Invoke(
+                        $"{offlineEvidence} candidates failed without any sign of filtering "
+                        + $"({result.Outcome}); this machine does not appear to have a working connection.");
+
+                    return new TuningResult(null, trials, NetworkWasAlreadyOpen: false)
+                    {
+                        Measurements = Build(samples, names, EmptyThroughput),
+                        Ending = SweepEnding.NetworkUnavailable,
+                    };
                 }
             }
 
@@ -221,7 +295,7 @@ public sealed class StrategyTuner
 
                 return new TuningResult(null, trials, NetworkWasAlreadyOpen: false)
                 {
-                    Measurements = Build(samples, names),
+                    Measurements = Build(samples, names, EmptyThroughput),
                     Ending = SweepEnding.NothingWorked,
                 };
             }
@@ -262,7 +336,39 @@ public sealed class StrategyTuner
                 }
             }
 
-            var measurements = Build(samples, names);
+            // --- Stage three, only when the user asked for it: what each candidate does to
+            //     the link's throughput. Run after the latency rounds rather than
+            //     interleaved with them, because a transfer in progress is exactly the
+            //     load the latency rounds are trying not to measure through.
+            var throughput = new Dictionary<string, ThroughputResult>(StringComparer.Ordinal);
+
+            if (Throughput is not null)
+            {
+                foreach (var candidate in shortlist)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (!writer.TryWrite(candidate))
+                    {
+                        return Superseded(trials);
+                    }
+
+                    Progress?.Invoke($"{candidate.Name} · hız", 1, 1);
+
+                    var measured = await Throughput
+                        .MeasureAsync(ThroughputBytesPerCandidate, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    // A transfer that did not complete measured nothing. Leaving the entry
+                    // out is what makes the policy treat it as unknown rather than slow.
+                    if (measured is not null)
+                    {
+                        throughput[candidate.Id] = measured;
+                    }
+                }
+            }
+
+            var measurements = Build(samples, names, throughput);
 
             var selection = StrategySelectionPolicy.Choose(
                 measurements,
@@ -384,9 +490,13 @@ public sealed class StrategyTuner
             result.Handshake));
     }
 
+    private static readonly IReadOnlyDictionary<string, ThroughputResult> EmptyThroughput =
+        new Dictionary<string, ThroughputResult>(StringComparer.Ordinal);
+
     private static IReadOnlyList<StrategyMeasurement> Build(
         Dictionary<string, List<ProbeSample>> samples,
-        Dictionary<string, BypassStrategy> names)
+        Dictionary<string, BypassStrategy> names,
+        IReadOnlyDictionary<string, ThroughputResult> throughput)
         => samples
             .Select(entry => new StrategyMeasurement
             {
@@ -394,8 +504,18 @@ public sealed class StrategyTuner
                 StrategyName = names[entry.Key].Name,
                 Samples = entry.Value,
                 MeasuredAt = DateTimeOffset.UtcNow,
+                Throughput = throughput.GetValueOrDefault(entry.Key),
             })
             .ToArray();
+
+    /// <summary>Releases the transfer probe's connection pool, when there is one.</summary>
+    public void Dispose()
+    {
+        if (Throughput is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+    }
 
     private List<BypassStrategy> ResolveCandidates(IspProfile profile)
     {

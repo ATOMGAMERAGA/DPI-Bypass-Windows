@@ -374,6 +374,9 @@ public sealed partial class MainViewModel : ObservableObject
         ToggleCommand = ConnectCommand;
         TestCommand = new AsyncRelayCommand(TestAsync);
         RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !IsTuning);
+        RetuneWithSpeedCommand = new AsyncRelayCommand(
+            () => RetuneAsync(measureThroughput: true),
+            () => _isRunning && !IsTuning);
         TestAllCommand = new AsyncRelayCommand(TestAllAsync);
         // Every command that measures is gated on the target being valid as well as on the
         // card being free. Without the first half, a user who typed a bad address saw the
@@ -543,6 +546,36 @@ public sealed partial class MainViewModel : ObservableObject
     public AsyncRelayCommand TestCommand { get; }
 
     public AsyncRelayCommand RetuneCommand { get; }
+
+    /// <summary>
+    /// A sweep that also measures what each candidate does to the link's speed.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="RetuneCommand"/> and never the default, because it spends
+    /// the user's data. The button beside it says how much, before it is pressed.
+    /// </remarks>
+    public AsyncRelayCommand RetuneWithSpeedCommand { get; }
+
+    /// <summary>Whether every automatic sweep should measure speed too.</summary>
+    public bool MeasureThroughputDuringTuning
+    {
+        get => _service.Settings.MeasureThroughputDuringTuning;
+        set
+        {
+            if (_service.Settings.MeasureThroughputDuringTuning == value)
+            {
+                return;
+            }
+
+            _service.Settings.MeasureThroughputDuringTuning = value;
+            _service.SaveSettings();
+            Raise();
+        }
+    }
+
+    /// <summary>What a speed-measuring sweep costs, in the units a data plan is sold in.</summary>
+    public string ThroughputCostSummary
+        => $"Yaklaşık {_service.ThroughputCostBytes / 1024d / 1024d:F0} MB veri kullanır.";
 
     public AsyncRelayCommand TestAllCommand { get; }
 
@@ -2730,17 +2763,27 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private async Task RetuneAsync()
+    private Task RetuneAsync() => RetuneAsync(measureThroughput: false);
+
+    /// <summary>
+    /// Runs a sweep, optionally including the transfer that measures sustained speed.
+    /// </summary>
+    /// <param name="measureThroughput">
+    /// Only ever true because the user pressed the button that says what it will cost.
+    /// </param>
+    private async Task RetuneAsync(bool measureThroughput)
     {
         IsTuning = true;
-        TuningStatus = "Yöntemler ölçülüyor…";
+        TuningStatus = measureThroughput
+            ? "Yöntemler ölçülüyor · hız testi dahil…"
+            : "Yöntemler ölçülüyor…";
 
         try
         {
-            var result = await _service.RetuneAsync().ConfigureAwait(true);
+            var result = await _service.RetuneAsync(measureThroughput).ConfigureAwait(true);
             TuningStatus = result?.Winner is null
                 ? "Çalışan bir yöntem bulunamadı. Farklı bir DNS modu veya kapsam deneyin."
-                : $"Seçilen yöntem: {result.Winner.Name} ({result.Trials.Count} deneme)";
+                : result.Rationale;
         }
         catch (OperationCanceledException)
         {

@@ -461,4 +461,243 @@ public sealed class StrategySweepBehaviourTests
 
         Assert.Equal(30, measurement.MedianConnectMs!.Value, 1);
     }
+
+    private sealed class ScriptedThroughput : IThroughputProbe
+    {
+        private readonly Engine _engine;
+        private readonly Func<string, ThroughputResult?> _answer;
+        private readonly List<string> _calls = [];
+
+        public ScriptedThroughput(Engine engine, Func<string, ThroughputResult?> answer)
+        {
+            _engine = engine;
+            _answer = answer;
+        }
+
+        public IReadOnlyList<string> Calls => _calls;
+
+        public long LastBudget { get; private set; }
+
+        public Task<ThroughputResult?> MeasureAsync(long bytes, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LastBudget = bytes;
+            _calls.Add(_engine.Strategy.Id);
+            return Task.FromResult(_answer(_engine.Strategy.Id));
+        }
+    }
+
+    private static ThroughputResult Transfer(double mbps) =>
+        new(mbps, null, null, 6 * 1024 * 1024, TimeSpan.FromSeconds(5));
+
+    /// <summary>
+    /// A sweep with no transfer probe moves no bulk data at all. This is the default, and
+    /// it has to stay the default: a sweep runs whenever a network changes.
+    /// </summary>
+    [Fact]
+    public void ASweepMeasuresNoThroughputUnlessItIsGivenAProbe()
+    {
+        var tuner = new StrategyTuner(new Probe(new Engine(), (_, _, _) => Blocked));
+
+        Assert.Null(tuner.Throughput);
+        Assert.Equal(0, tuner.EstimatedThroughputBytes);
+    }
+
+    /// <summary>
+    /// With a probe, each shortlisted candidate gets exactly one transfer, and the cost is
+    /// knowable before the run rather than after it.
+    /// </summary>
+    [Fact]
+    public async Task TheTransferRunsOncePerShortlistedCandidateAndItsCostIsKnownInAdvance()
+    {
+        var engine = new Engine { Strategy = StrategyLibrary.Passthrough };
+        var writer = new Writer(engine);
+        var probe = new Probe(engine, (strategy, _, _) => IsControl(strategy) ? Blocked : Reachable(20));
+        var transfers = new ScriptedThroughput(engine, _ => Transfer(80));
+
+        var tuner = new StrategyTuner(probe)
+        {
+            ShortlistSize = 2,
+            Rounds = 1,
+            Throughput = transfers,
+            ThroughputBytesPerCandidate = 4 * 1024 * 1024,
+        };
+
+        Assert.Equal(8 * 1024 * 1024, tuner.EstimatedThroughputBytes);
+
+        var result = await tuner.FindBestAsync(writer, IspCatalog.Unknown);
+
+        Assert.Equal(2, transfers.Calls.Count);
+        Assert.Equal(2, transfers.Calls.Distinct().Count());
+        Assert.Equal(4 * 1024 * 1024, transfers.LastBudget);
+        Assert.Equal(SelectionConfidence.WithThroughput, result.Selection!.Confidence);
+        Assert.All(result.Measurements, measurement => Assert.NotNull(measurement.Throughput));
+    }
+
+    /// <summary>
+    /// A transfer that did not complete leaves the candidate's throughput unknown, not
+    /// slow. Recording the bytes that happened to arrive over the time they took would be
+    /// a number with no meaning, and eliminating the candidate on it would be worse.
+    /// </summary>
+    [Fact]
+    public async Task ATransferThatFailsLeavesThatCandidateUnmeasuredRatherThanSlow()
+    {
+        var engine = new Engine { Strategy = StrategyLibrary.Passthrough };
+        var writer = new Writer(engine);
+        var probe = new Probe(engine, (strategy, _, _) => IsControl(strategy) ? Blocked : Reachable(20));
+
+        var measured = new List<string>();
+        var transfers = new ScriptedThroughput(engine, strategy =>
+        {
+            measured.Add(strategy);
+
+            // The first candidate's transfer never completes.
+            return measured.Count == 1 ? null : Transfer(90);
+        });
+
+        var tuner = new StrategyTuner(probe)
+        {
+            ShortlistSize = 2,
+            Rounds = 1,
+            Throughput = transfers,
+        };
+
+        var result = await tuner.FindBestAsync(writer, IspCatalog.Unknown);
+
+        var unmeasured = result.Measurements.Single(m => m.StrategyId == measured[0]);
+        Assert.Null(unmeasured.Throughput);
+
+        // And it was not eliminated for a speed nobody measured.
+        Assert.DoesNotContain(
+            result.Selection!.Eliminated,
+            rejection => rejection.StrategyId == measured[0] && rejection.Reason.Contains("Hızı", StringComparison.Ordinal));
+    }
+
+    /// <summary>The transfer arm runs after the latency rounds, never during them.</summary>
+    /// <remarks>
+    /// A transfer in progress is exactly the load the latency rounds are trying not to
+    /// measure through: interleaving them would make every candidate measured after the
+    /// first look worse than it is.
+    /// </remarks>
+    [Fact]
+    public async Task TheTransferNeverRunsWhileTheLatencyRoundsAreStillGoing()
+    {
+        var engine = new Engine { Strategy = StrategyLibrary.Passthrough };
+        var writer = new Writer(engine);
+
+        var transferStarted = false;
+        var latencyAfterTransfer = 0;
+
+        var probe = new Probe(engine, (strategy, _, _) =>
+        {
+            if (transferStarted)
+            {
+                latencyAfterTransfer++;
+            }
+
+            return IsControl(strategy) ? Blocked : Reachable(20);
+        });
+
+        var transfers = new ScriptedThroughput(engine, _ =>
+        {
+            transferStarted = true;
+            return Transfer(80);
+        });
+
+        var tuner = new StrategyTuner(probe)
+        {
+            ShortlistSize = 2,
+            Rounds = 2,
+            Throughput = transfers,
+        };
+
+        await tuner.FindBestAsync(writer, IspCatalog.Unknown);
+
+        Assert.True(transferStarted);
+        Assert.Equal(0, latencyAfterTransfer);
+    }
+
+    /// <summary>
+    /// A machine with no working connection is not a machine that needs a dozen recipes
+    /// installed on it.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is between a failure that looks like filtering - a reset
+    /// mid-handshake, a swallowed ClientHello, somebody else's certificate - and one that
+    /// looks like an unplugged cable. No bypass recipe fixes the second, and a laptop that
+    /// wakes up out of range used to spend a minute finding that out one recipe at a time.
+    /// </remarks>
+    [Theory]
+    [InlineData(ProbeOutcome.DnsFailed)]
+    [InlineData(ProbeOutcome.ConnectTimedOut)]
+    [InlineData(ProbeOutcome.ConnectRefused)]
+    public async Task ASweepStopsEarlyWhenNothingLooksLikeFiltering(ProbeOutcome outcome)
+    {
+        var engine = new Engine { Strategy = StrategyLibrary.Disorder2 };
+        var writer = new Writer(engine);
+        var probe = new Probe(engine, (_, _, _) => new ProbeResult(outcome, TimeSpan.FromSeconds(1)));
+
+        var result = await new StrategyTuner(probe) { OfflineEvidenceThreshold = 3 }
+            .FindBestAsync(writer, IspCatalog.Unknown);
+
+        Assert.Equal(SweepEnding.NetworkUnavailable, result.Ending);
+        Assert.Null(result.Winner);
+        Assert.Contains("ağ bağlantısı görünmüyor", result.Rationale, StringComparison.Ordinal);
+
+        // It stopped rather than working through the library: the control arm plus its
+        // retry, then three screened candidates with a retry each.
+        Assert.True(probe.Calls.Count <= 8, $"kept sweeping an offline machine: {probe.Calls.Count} calls");
+
+        // And what the session was using is back.
+        Assert.Equal(StrategyLibrary.Disorder2, engine.Strategy);
+    }
+
+    /// <summary>
+    /// A network that really is filtering looks nothing like an offline one, and the sweep
+    /// must not confuse the two: every candidate gets its turn.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredNetworkIsNotMistakenForAnOfflineOne()
+    {
+        var engine = new Engine();
+        var writer = new Writer(engine);
+        var probe = new Probe(engine, (_, _, _) => Blocked);
+
+        var result = await new StrategyTuner(probe) { OfflineEvidenceThreshold = 3 }
+            .FindBestAsync(writer, IspCatalog.Unknown);
+
+        Assert.Equal(SweepEnding.NothingWorked, result.Ending);
+        Assert.True(probe.Calls.Count > 8, $"gave up on a filtered network after {probe.Calls.Count} calls");
+    }
+
+    /// <summary>
+    /// One recipe getting through resets the count, so a link that is merely unreliable
+    /// does not read as an unplugged one.
+    /// </summary>
+    [Fact]
+    public async Task ASuccessResetsTheOfflineEvidence()
+    {
+        var engine = new Engine { Strategy = StrategyLibrary.Passthrough };
+        var writer = new Writer(engine);
+        var screened = 0;
+
+        var probe = new Probe(engine, (strategy, _, _) =>
+        {
+            if (IsControl(strategy))
+            {
+                return Blocked;
+            }
+
+            // Two dead, one alive, two dead: never three in a row.
+            screened++;
+            return screened % 3 == 0
+                ? Reachable(25)
+                : new ProbeResult(ProbeOutcome.ConnectTimedOut, TimeSpan.FromSeconds(1));
+        });
+
+        var result = await new StrategyTuner(probe) { OfflineEvidenceThreshold = 3, ShortlistSize = 1, Rounds = 1 }
+            .FindBestAsync(writer, IspCatalog.Unknown);
+
+        Assert.NotEqual(SweepEnding.NetworkUnavailable, result.Ending);
+    }
 }

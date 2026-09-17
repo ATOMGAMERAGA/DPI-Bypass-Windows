@@ -190,6 +190,18 @@ public sealed record AppSettings : IHotspotLegacyState
     /// </remarks>
     public AppearanceMode Appearance { get; set; } = AppearanceMode.System;
 
+    /// <summary>
+    /// Whether the automatic sweep may also measure each candidate's sustained throughput.
+    /// </summary>
+    /// <remarks>
+    /// Off by default and it has to stay that way. A sweep runs whenever the machine
+    /// changes network, and one that moved several megabytes each time would spend a
+    /// mobile allowance on the user's behalf without them ever asking. With it off the
+    /// sweep still measures reach, stability and latency, and the interface says "hız
+    /// testi yapılmadı" rather than implying a speed it never measured.
+    /// </remarks>
+    public bool MeasureThroughputDuringTuning { get; set; }
+
     /// <summary>Whether the four-card introduction has ever been finished or skipped.</summary>
     /// <remarks>
     /// Written once, the first time somebody reaches the end of it or presses "Atla".
