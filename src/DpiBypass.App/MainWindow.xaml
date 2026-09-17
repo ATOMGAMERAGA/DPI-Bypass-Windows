@@ -24,6 +24,7 @@
         <infra:SeverityToBrushConverter x:Key="SeverityBrushConverter" />
         <infra:HotspotCheckStateToBrushConverter x:Key="CheckStateBrushConverter" />
         <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
+        <infra:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
     </Window.Resources>
 
     <!-- Two layers in the same window: the app, and the greeting that covers it.
@@ -629,7 +630,60 @@
                                 <TextBlock Text="Etkin yöntem" Style="{StaticResource FieldLabelStyle}" />
                                 <TextBlock Text="{Binding StrategySummary}"
                                            Style="{StaticResource InfoTileValueStyle}"
-                                           Margin="0,0,0,12" />
+                                           Margin="0,0,0,8" />
+
+                                <!-- Why this one, measured when, and how much was measured.
+                                     The third is the one most easily left out and the one
+                                     that keeps the other two honest: a choice made from
+                                     reachability and connect times is a real choice and is
+                                     not the same as one made after measuring throughput,
+                                     and the line says which. -->
+                                <Border Style="{StaticResource InfoTileStyle}" Margin="0,0,0,12">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding SelectionRationale, Mode=OneWay}"
+                                                   Style="{StaticResource BodyStyle}"
+                                                   TextWrapping="Wrap"
+                                                   AutomationProperties.Name="Seçim gerekçesi"
+                                                   AutomationProperties.LiveSetting="Polite" />
+                                        <TextBlock Text="{Binding SelectionConfidenceLabel, Mode=OneWay}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,6,0,0"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Style="{StaticResource HintStyle}" Margin="0,2,0,0">
+                                            <Run Text="Ölçüm zamanı:" />
+                                            <Run Text="{Binding SelectionMeasuredAt, Mode=OneWay}" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Which candidates were measured and dropped, and why.
+                                     "It picked the slow one" is a complaint that can only be
+                                     answered with the list of what else was tried. -->
+                                <Expander Style="{StaticResource AdvancedExpanderStyle}"
+                                          Margin="0,0,0,12"
+                                          Visibility="{Binding SelectionRejections.Count, Converter={StaticResource CountToVisibilityConverter}}">
+                                    <Expander.Header>
+                                        <TextBlock Text="Elenen adaylar" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+                                    </Expander.Header>
+                                    <ItemsControl ItemsSource="{Binding SelectionRejections}"
+                                                  AutomationProperties.Name="Elenen adaylar">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Style="{StaticResource InfoTileStyle}" Margin="0,0,0,6">
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding StrategyName}"
+                                                                   Style="{StaticResource BodyStyle}"
+                                                                   FontWeight="SemiBold" />
+                                                        <TextBlock Text="{Binding Reason}"
+                                                                   Style="{StaticResource HintStyle}"
+                                                                   Margin="0,3,0,0"
+                                                                   TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Expander>
 
                                 <ComboBox infra:NestedScrolling.IgnoreWheel="True"
                                           ItemsSource="{Binding StrategyOptions}"

@@ -1,4 +1,6 @@
+using System.Collections.ObjectModel;
 using DpiBypass.Core;
+using DpiBypass.Core.Diagnostics;
 using DpiBypass.Core.Network;
 using DpiBypass.Core.Network.Latency;
 
@@ -42,11 +44,78 @@ public sealed partial class MainViewModel
         : _service.Strategy.Name;
 
     /// <summary>How that profile came to be chosen, and when it was last checked.</summary>
-    public string ActiveProfileNote => _service.State == ProtectionState.Stopped
-        ? "Koruma kapalıyken profil seçilmez."
-        : _service.Settings.ManualStrategyId is { Length: > 0 }
-            ? "Elle seçildi."
-            : "Bu ağda ölçülerek seçildi.";
+    public string ActiveProfileNote
+    {
+        get
+        {
+            if (_service.State == ProtectionState.Stopped)
+            {
+                return "Koruma kapalıyken profil seçilmez.";
+            }
+
+            if (_service.Settings.ManualStrategyId is { Length: > 0 })
+            {
+                return "Elle seçildi.";
+            }
+
+            return _service.LastSelection is null
+                ? "Bu ağda kayıtlı profil doğrulanarak kullanıldı."
+                : $"Ölçülerek seçildi · {SelectionAge}";
+        }
+    }
+
+    /// <summary>
+    /// Everything about the automatic choice a user might want to check.
+    /// </summary>
+    /// <remarks>
+    /// The four things that make a claim checkable rather than reassuring: what was
+    /// chosen, why, when it was measured, and how much was measured. The last of these is
+    /// the one most easily left out, and it is the one that matters most - a choice made
+    /// from reachability and connect times is a real choice, and it is not the same thing
+    /// as a choice made after measuring the link's throughput. The interface says which.
+    /// </remarks>
+    public string SelectionRationale => _service.LastSelection?.Reason
+        ?? "Bu ağda henüz otomatik ölçüm yapılmadı.";
+
+    public string SelectionMeasuredAt => _service.LastSelection is null
+        ? "Ölçülmedi"
+        : SelectionAge;
+
+    /// <summary>What was measured, in the user's words. Never implies a test that did not run.</summary>
+    public string SelectionConfidenceLabel => _service.LastSelection?.Confidence switch
+    {
+        SelectionConfidence.WithThroughput =>
+            "Doğrulama düzeyi: erişim, kararlılık, gecikme ve sürdürülebilir hız ölçüldü.",
+        SelectionConfidence.LatencyOnly =>
+            "Doğrulama düzeyi: erişim, kararlılık ve gecikme ölçüldü · hız testi yapılmadı.",
+        SelectionConfidence.Insufficient =>
+            "Doğrulama düzeyi: yeterli ölçüm alınamadı; mevcut ayar korundu.",
+        _ => "Doğrulama düzeyi: ölçüm yapılmadı.",
+    };
+
+    /// <summary>The candidates that were measured and rejected, with the reason for each.</summary>
+    public ObservableCollection<StrategyRejection> SelectionRejections { get; } = [];
+
+    private string SelectionAge
+    {
+        get
+        {
+            if (_service.LastSelection is not { } selection)
+            {
+                return "Ölçülmedi";
+            }
+
+            var age = DateTimeOffset.UtcNow - selection.MeasuredAt;
+
+            return age switch
+            {
+                { TotalSeconds: < 60 } => "az önce ölçüldü",
+                { TotalMinutes: < 60 } => $"{age.TotalMinutes:F0} dk önce ölçüldü",
+                { TotalHours: < 24 } => $"{age.TotalHours:F0} sa önce ölçüldü",
+                _ => $"{age.TotalDays:F0} gün önce ölçüldü",
+            };
+        }
+    }
 
     /// <summary>The idle latency, with a unit, or the fact that nobody measured one.</summary>
     public string LatencyValue
@@ -208,5 +277,35 @@ public sealed partial class MainViewModel
         Raise(nameof(LatencyNote));
         Raise(nameof(StabilityValue));
         Raise(nameof(StabilityNote));
+        Raise(nameof(SelectionRationale));
+        Raise(nameof(SelectionMeasuredAt));
+        Raise(nameof(SelectionConfidenceLabel));
+
+        RefreshSelectionRejections();
+    }
+
+    /// <summary>
+    /// Mirrors the rejected candidates into the bound collection, in place.
+    /// </summary>
+    /// <remarks>
+    /// Rebuilt only when the list has actually changed. This runs on every service
+    /// notification, and clearing an ObservableCollection the interface is bound to
+    /// destroys and rebuilds every row - which on the settings page is a visible flicker
+    /// for a list that usually has not moved.
+    /// </remarks>
+    private void RefreshSelectionRejections()
+    {
+        var current = _service.LastSelection?.Eliminated ?? [];
+
+        if (SelectionRejections.SequenceEqual(current))
+        {
+            return;
+        }
+
+        SelectionRejections.Clear();
+        foreach (var rejection in current)
+        {
+            SelectionRejections.Add(rejection);
+        }
     }
 }

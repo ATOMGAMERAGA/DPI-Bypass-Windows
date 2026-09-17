@@ -202,6 +202,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private NetworkMonitor? _monitor;
     private ConnectivityTester? _tester;
     private StrategyTuner? _tuner;
+    private string? _lastChosenStrategyId;
     private BlockedSiteDiscovery? _discovery;
     private CancellationTokenSource? _lifetime;
     private Task? _networkWork;
@@ -332,6 +333,27 @@ public sealed class ProtectionService : IAsyncDisposable
     public IspDetection? Detection { get; private set; }
 
     public BypassStrategy Strategy => _engine?.Strategy ?? StrategyLibrary.Default;
+
+    /// <summary>
+    /// When the profile now running was chosen, or null when nothing has chosen one.
+    /// </summary>
+    /// <remarks>
+    /// Feeds the selection policy's dwell rule: a profile that is working is left alone
+    /// for a while rather than being replaced by every sweep that finds something a
+    /// millisecond better. Kept here rather than in the settings file because it is about
+    /// this session's engine, not about what was remembered for this network.
+    /// </remarks>
+    public DateTimeOffset? StrategyChosenAt { get; private set; }
+
+    /// <summary>
+    /// What the last automatic selection decided and why, or null when none has run.
+    /// </summary>
+    /// <remarks>
+    /// The interface shows this verbatim. It carries how much was measured as well as what
+    /// was chosen, so "hız testi yapılmadı" reaches the user instead of a speed the app
+    /// never measured.
+    /// </remarks>
+    public StrategySelection? LastSelection { get; private set; }
 
     /// <summary>
     /// True while the service is meant to be protecting but its packet filter is not open.
@@ -2000,8 +2022,10 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         var result = await _tuner
-            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken)
+            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken, StrategyChosenAt)
             .ConfigureAwait(false);
+
+        NoteSelection(result);
 
         if (result.Winner is not null && lease.TryWrite(result.Winner))
         {
@@ -2797,8 +2821,10 @@ public sealed class ProtectionService : IAsyncDisposable
         await ResolveIspAsync(cancellationToken).ConfigureAwait(false);
 
         var result = await _tuner
-            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken)
+            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken, StrategyChosenAt)
             .ConfigureAwait(false);
+
+        NoteSelection(result);
 
         if (result.Winner is not null && lease.TryWrite(result.Winner))
         {
@@ -3156,6 +3182,30 @@ public sealed class ProtectionService : IAsyncDisposable
     /// key of the network the machine had since moved to - the numbers were real, the
     /// heading was not, and the next launch started on a recipe measured somewhere else.
     /// </remarks>
+    /// <summary>
+    /// Keeps the selection and the moment it was made, for the interface and for the
+    /// policy's dwell rule.
+    /// </summary>
+    /// <remarks>
+    /// The timestamp moves only when the profile actually changes. A sweep that measured
+    /// four candidates and concluded that the one already installed is still the right
+    /// answer has confirmed it, not re-chosen it, and restarting its dwell would mean a
+    /// profile could be protected from replacement for ever by repeated confirmations.
+    /// </remarks>
+    private void NoteSelection(TuningResult result)
+    {
+        if (result.Selection is { } selection)
+        {
+            LastSelection = selection;
+        }
+
+        if (result.Winner is not null && result.Winner.Id != _lastChosenStrategyId)
+        {
+            _lastChosenStrategyId = result.Winner.Id;
+            StrategyChosenAt = DateTimeOffset.UtcNow;
+        }
+    }
+
     private void RecordNetworkResult(StrategyLease lease, BypassStrategy strategy, bool success, bool wasUnfiltered)
     {
         if (!lease.IsCurrent)
