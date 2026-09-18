@@ -124,7 +124,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Shield" />
-                        <AccessText Text="_Durum" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Durum" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
@@ -348,7 +348,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Target" />
-                        <AccessText Text="_Kapsam" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Kapsam" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -420,7 +420,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Globe" />
-                        <AccessText Text="_Siteler" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Siteler" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -577,7 +577,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="TopSpeed" />
-                        <AccessText Text="Ağ ve _yöntem" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="Ağ ve _yöntem" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -778,7 +778,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Options" />
-                        <AccessText Text="DNS ve _ayarlar" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="DNS ve _ayarlar" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -1835,7 +1835,7 @@
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
                         <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="TextBulletList" />
-                        <AccessText Text="_Günlük" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <AccessText Text="_Günlük" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <Grid>

@@ -410,4 +410,61 @@ public sealed class DesignSystemTests
             Assert.Contains(required, keys);
         }
     }
+
+    /// <summary>
+    /// Text set beside an icon carries the optical correction that centring does not.
+    /// </summary>
+    /// <remarks>
+    /// WPF centres a text run's line box, and that box reserves descender room whether or
+    /// not the word has a descender - so centring it against a glyph lands the letters
+    /// about a pixel low. Measured on a real frame it was +1.0 to +3.5 px across the
+    /// navigation rail and +2.5 px on the primary button. The correction is one token
+    /// applied in two places, and it is exactly the kind of thing that gets "tidied away"
+    /// by somebody who cannot see why the margin is asymmetric - hence this.
+    /// </remarks>
+    [Fact]
+    public void LabelsBesideAnIconCarryTheOpticalLift()
+    {
+        var keys = KeysIn(TokensXaml);
+        Assert.Contains("Text.OpticalLift", keys);
+        Assert.Contains("Nav.LabelOffset", keys);
+
+        var document = XDocument.Load(RepoFiles.MainWindowXaml);
+        var ns = document.Root!.Name.Namespace;
+
+        // Every rail label, and no rail label left on a plain symmetric margin.
+        var labels = document.Descendants(ns + "AccessText").ToArray();
+        Assert.Equal(6, labels.Length);
+        Assert.All(labels, label =>
+            Assert.Equal("{StaticResource Nav.LabelOffset}", (string?)label.Attribute("Margin")));
+
+        // And the one button template every button in the window is built from.
+        var theme = File.ReadAllText(RepoFiles.SharedThemeXaml);
+        Assert.Contains("Margin=\"{StaticResource Text.OpticalLift}\"", theme, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The top bar speaks one corner language.
+    /// </summary>
+    /// <remarks>
+    /// The status chip briefly carried Radius.Pill, which rounds its ends into
+    /// semicircles. Beside the primary action's 8 DIP corners that read as a stray oval
+    /// behind the words rather than as part of the same bar. Fully-round is right for a
+    /// dot and wrong for a chip sitting next to a button.
+    /// </remarks>
+    [Fact]
+    public void TheStatusChipSharesThePrimaryActionsCornerRadius()
+    {
+        var document = XDocument.Load(RepoFiles.SharedThemeXaml);
+        var ns = document.Root!.Name.Namespace;
+
+        var chip = document
+            .Descendants(ns + "Style")
+            .Single(style => (string?)style.Attribute(X + "Key") == "StatusPillBorderStyle");
+
+        var radius = chip.Elements(ns + "Setter")
+            .Single(setter => (string?)setter.Attribute("Property") == "CornerRadius");
+
+        Assert.Equal("{StaticResource Radius.Tile}", (string?)radius.Attribute("Value"));
+    }
 }

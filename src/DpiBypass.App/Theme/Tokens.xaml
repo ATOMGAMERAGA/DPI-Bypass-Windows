@@ -46,6 +46,20 @@
     <Thickness x:Key="Gap.InlineStart">8,0,0,0</Thickness>
     <Thickness x:Key="Gap.InlineEnd">0,0,8,0</Thickness>
 
+    <!--
+      Text beside an icon, lifted 1 DIP.
+
+      WPF centres a text run's line box, and a line box reserves room for descenders
+      below the baseline whether or not the word has any. Centring that box against a
+      glyph therefore puts the letters about a pixel low every time - measured at +1.0
+      to +3.5 px across the navigation rail and +2.5 px on the primary button. A
+      bottom margin shifts a centred element up by half its value, so 2 buys the 1 DIP
+      back. It belongs next to the spacing it corrects rather than being retyped as a
+      magic number at every icon-and-label pair.
+    -->
+    <Thickness x:Key="Text.OpticalLift">0,0,0,2</Thickness>
+    <Thickness x:Key="Nav.LabelOffset">10,0,0,2</Thickness>
+
     <!-- ======== Corner radius ======== -->
 
     <CornerRadius x:Key="Radius.Small">4</CornerRadius>
