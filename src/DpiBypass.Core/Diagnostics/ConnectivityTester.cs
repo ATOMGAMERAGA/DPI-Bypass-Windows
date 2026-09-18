@@ -28,11 +28,28 @@ public enum ProbeOutcome
     HttpFailed = 7,
 }
 
+/// <param name="Elapsed">Everything the probe did, end to end.</param>
+/// <param name="Dns">
+/// Name resolution on its own, or null when it was not measured separately.
+/// </param>
+/// <param name="Connect">
+/// The TCP connect: one round trip plus the server's accept, and the nearest thing this
+/// instrument has to a round trip time. It is not a game's ping and nothing may present
+/// it as one, but it is the part of the cost a bypass recipe actually moves.
+/// </param>
+/// <param name="Handshake">
+/// The TLS handshake after the connect: several more round trips and the certificate
+/// work. Kept apart from <paramref name="Connect"/> precisely so a comparison of recipes
+/// cannot quietly become a comparison of crypto.
+/// </param>
 public sealed record ProbeResult(
     ProbeOutcome Outcome,
     TimeSpan Elapsed,
     string? Detail = null,
-    int? HttpStatus = null)
+    int? HttpStatus = null,
+    TimeSpan? Dns = null,
+    TimeSpan? Connect = null,
+    TimeSpan? Handshake = null)
 {
     public bool Success => Outcome == ProbeOutcome.Reachable;
 
@@ -116,22 +133,26 @@ public sealed class ConnectivityTester : IConnectivityProbe
             return new ProbeResult(ProbeOutcome.DnsFailed, stopwatch.Elapsed, ex.Message);
         }
 
+        var dns = stopwatch.Elapsed;
+
         if (addresses.Count == 0)
         {
-            return new ProbeResult(ProbeOutcome.DnsFailed, stopwatch.Elapsed, "no A record");
+            return new ProbeResult(ProbeOutcome.DnsFailed, stopwatch.Elapsed, "no A record", Dns: dns);
         }
 
         ProbeResult? last = null;
         foreach (var address in addresses.Take(2))
         {
             last = await ProbeAddressAsync(host, address, fetchHttp, onLocalPort, cancellationToken).ConfigureAwait(false);
+            last = last with { Dns = dns };
+
             if (last.Success)
             {
                 return last;
             }
         }
 
-        return last ?? new ProbeResult(ProbeOutcome.DnsFailed, stopwatch.Elapsed, "no candidate address");
+        return last ?? new ProbeResult(ProbeOutcome.DnsFailed, stopwatch.Elapsed, "no candidate address", Dns: dns);
     }
 
     private async Task<ProbeResult> ProbeAddressAsync(
@@ -163,6 +184,10 @@ public sealed class ConnectivityTester : IConnectivityProbe
             return new ProbeResult(ProbeOutcome.ConnectRefused, stopwatch.Elapsed, ex.SocketErrorCode.ToString());
         }
 
+        // The connect on its own. Everything after this point is handshake, and the two
+        // are reported separately because they answer different questions.
+        var connect = stopwatch.Elapsed;
+
         if (onLocalPort is not null && socket.LocalEndPoint is IPEndPoint local)
         {
             try
@@ -193,20 +218,31 @@ public sealed class ConnectivityTester : IConnectivityProbe
         }
         catch (AuthenticationException ex)
         {
-            return new ProbeResult(ProbeOutcome.CertificateRejected, stopwatch.Elapsed, ex.Message);
+            return new ProbeResult(ProbeOutcome.CertificateRejected, stopwatch.Elapsed, ex.Message, Connect: connect);
         }
         catch (OperationCanceledException)
         {
-            return new ProbeResult(ProbeOutcome.HandshakeTimedOut, stopwatch.Elapsed, "no ServerHello");
+            return new ProbeResult(ProbeOutcome.HandshakeTimedOut, stopwatch.Elapsed, "no ServerHello", Connect: connect);
         }
         catch (IOException ex)
         {
-            return new ProbeResult(ProbeOutcome.HandshakeReset, stopwatch.Elapsed, ex.InnerException?.Message ?? ex.Message);
+            return new ProbeResult(
+                ProbeOutcome.HandshakeReset,
+                stopwatch.Elapsed,
+                ex.InnerException?.Message ?? ex.Message,
+                Connect: connect);
         }
+
+        var handshake = stopwatch.Elapsed - connect;
 
         if (!fetchHttp)
         {
-            return new ProbeResult(ProbeOutcome.Reachable, stopwatch.Elapsed, tls.SslProtocol.ToString());
+            return new ProbeResult(
+                ProbeOutcome.Reachable,
+                stopwatch.Elapsed,
+                tls.SslProtocol.ToString(),
+                Connect: connect,
+                Handshake: handshake);
         }
 
         try
@@ -224,7 +260,13 @@ public sealed class ConnectivityTester : IConnectivityProbe
 
             var statusLine = Encoding.ASCII.GetString(buffer, 0, read).Split('\r')[0];
             var status = ParseStatus(statusLine);
-            return new ProbeResult(ProbeOutcome.Reachable, stopwatch.Elapsed, statusLine, status);
+            return new ProbeResult(
+                ProbeOutcome.Reachable,
+                stopwatch.Elapsed,
+                statusLine,
+                status,
+                Connect: connect,
+                Handshake: handshake);
         }
         catch (OperationCanceledException)
         {

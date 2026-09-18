@@ -45,6 +45,22 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Setting ThemeMode puts WPF's Fluent theming in charge of the window, and its
+         ThemeManager.ApplyStyleOnWindow calls WindowBackdropManager.SetBackdrop(window,
+         MainWindow) from Window.CreateSourceWindow - so WPF asks for Mica on this window
+         by itself, before the first frame. Two managers on one window means whichever
+         ran last wins: a user who picked Acrylic would get Mica back on the next theme
+         change, and the app's own careful "only once the window is confirmed on screen"
+         ordering would be bypassed on every launch. This opts WPF's backdrop manager out
+         and leaves Infrastructure/WindowBackdrop.cs in sole charge. Fluent's control
+         chrome and palette are unaffected; only the backdrop moves. -->
+    <RuntimeHostConfigurationOption
+        Include="Switch.System.Windows.Appearance.DisableFluentThemeWindowBackdrop"
+        Value="true"
+        Trim="true" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- High resolution sources so the shell never has to upscale a small bitmap. -->
     <Resource Include="Assets\dpibypass-1024.png" />
     <Resource Include="Assets\dpibypass-256.png" />

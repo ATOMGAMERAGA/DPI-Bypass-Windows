@@ -9,6 +9,14 @@ internal static class RepoFiles
 
     public static string MainViewModel => Find("src", "DpiBypass.App", "ViewModels", "MainViewModel.cs");
 
+    /// <summary>
+    /// Every file the view model is declared across. It is a partial class split by
+    /// surface - appearance, the connection flow, the welcome - so a scan that reads only
+    /// MainViewModel.cs would report three quarters of its members as missing.
+    /// </summary>
+    public static IEnumerable<string> ViewModelFiles
+        => Directory.EnumerateFiles(Path.GetDirectoryName(MainViewModel)!, "*.cs", SearchOption.AllDirectories);
+
     public static string CoreProjectDirectory => Find("src", "DpiBypass.Core", "DpiBypass.Core.csproj") is { } project
         ? Path.GetDirectoryName(project)!
         : throw new Xunit.Sdk.XunitException("Could not locate the core project.");

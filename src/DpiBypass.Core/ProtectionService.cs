@@ -202,6 +202,7 @@ public sealed class ProtectionService : IAsyncDisposable
     private NetworkMonitor? _monitor;
     private ConnectivityTester? _tester;
     private StrategyTuner? _tuner;
+    private string? _lastChosenStrategyId;
     private BlockedSiteDiscovery? _discovery;
     private CancellationTokenSource? _lifetime;
     private Task? _networkWork;
@@ -332,6 +333,27 @@ public sealed class ProtectionService : IAsyncDisposable
     public IspDetection? Detection { get; private set; }
 
     public BypassStrategy Strategy => _engine?.Strategy ?? StrategyLibrary.Default;
+
+    /// <summary>
+    /// When the profile now running was chosen, or null when nothing has chosen one.
+    /// </summary>
+    /// <remarks>
+    /// Feeds the selection policy's dwell rule: a profile that is working is left alone
+    /// for a while rather than being replaced by every sweep that finds something a
+    /// millisecond better. Kept here rather than in the settings file because it is about
+    /// this session's engine, not about what was remembered for this network.
+    /// </remarks>
+    public DateTimeOffset? StrategyChosenAt { get; private set; }
+
+    /// <summary>
+    /// What the last automatic selection decided and why, or null when none has run.
+    /// </summary>
+    /// <remarks>
+    /// The interface shows this verbatim. It carries how much was measured as well as what
+    /// was chosen, so "hız testi yapılmadı" reaches the user instead of a speed the app
+    /// never measured.
+    /// </remarks>
+    public StrategySelection? LastSelection { get; private set; }
 
     /// <summary>
     /// True while the service is meant to be protecting but its packet filter is not open.
@@ -1314,8 +1336,7 @@ public sealed class ProtectionService : IAsyncDisposable
                 _dnsProxyRecovery.Reset();
                 _vodafoneRecovery.Reset();
 
-                _tuner = new StrategyTuner(_tester, AppLog.InfoSink);
-                _tuner.Progress += (name, index, total) => TuningProgress?.Invoke(name, index, total);
+                _tuner = CreateTuner(measureThroughput: Settings.MeasureThroughputDuringTuning);
 
                 _discovery = new BlockedSiteDiscovery(_tester, _engine, _learned, _matcher, AppLog.InfoSink)
                 {
@@ -1943,6 +1964,28 @@ public sealed class ProtectionService : IAsyncDisposable
     /// run started on. A pass that is still finishing after the machine has moved
     /// therefore reports its findings to the log and changes nothing.
     /// </remarks>
+    /// <summary>
+    /// Builds a sweep, with or without the arm that costs the user's data.
+    /// </summary>
+    /// <remarks>
+    /// Rebuilt per sweep rather than configured once, because whether the transfer runs is
+    /// the user's decision and they can change it - or ask for one run of it - between
+    /// sweeps. The probe is owned by the tuner's lifetime here; it holds one HttpClient and
+    /// is disposed with the sweep that made it.
+    /// </remarks>
+    private StrategyTuner CreateTuner(bool measureThroughput)
+    {
+        var tuner = new StrategyTuner(_tester!, AppLog.InfoSink)
+        {
+            Throughput = measureThroughput
+                ? new CloudflareThroughputProbe(_tester, log: AppLog.InfoSink)
+                : null,
+        };
+
+        tuner.Progress += (name, index, total) => TuningProgress?.Invoke(name, index, total);
+        return tuner;
+    }
+
     private async Task<TuningResult?> DetectAndTuneAsync(
         StrategyLease lease,
         string reason,
@@ -2000,8 +2043,10 @@ public sealed class ProtectionService : IAsyncDisposable
         }
 
         var result = await _tuner
-            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken)
+            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken, StrategyChosenAt)
             .ConfigureAwait(false);
+
+        NoteSelection(result);
 
         if (result.Winner is not null && lease.TryWrite(result.Winner))
         {
@@ -2762,7 +2807,12 @@ public sealed class ProtectionService : IAsyncDisposable
     /// the tray menu and the CLI cannot end up sweeping alongside the timer: this one
     /// supersedes whatever the app had started for itself.
     /// </remarks>
-    public Task<TuningResult?> RetuneAsync(CancellationToken cancellationToken = default)
+    /// <param name="measureThroughput">
+    /// Also measure what each shortlisted candidate does to the link's throughput. This
+    /// costs the user's data - see <see cref="ThroughputCostBytes"/> - so it is only ever
+    /// true because they asked, either for this run or as a stored preference.
+    /// </param>
+    public Task<TuningResult?> RetuneAsync(bool measureThroughput, CancellationToken cancellationToken = default)
     {
         if (_engine is null || _tuner is null)
         {
@@ -2771,13 +2821,25 @@ public sealed class ProtectionService : IAsyncDisposable
 
         return _strategies.RunAsync<TuningResult?>(
             StrategyWorkKind.Manual,
-            "elle yeniden ayarlama",
-            RetuneAsync,
+            measureThroughput ? "elle yeniden ayarlama (hız ölçümlü)" : "elle yeniden ayarlama",
+            (lease, token) => RetuneAsync(lease, measureThroughput, token),
             coalescedResult: null,
             cancellationToken);
     }
 
-    private async Task<TuningResult?> RetuneAsync(StrategyLease lease, CancellationToken cancellationToken)
+    public Task<TuningResult?> RetuneAsync(CancellationToken cancellationToken = default)
+        => RetuneAsync(Settings.MeasureThroughputDuringTuning, cancellationToken);
+
+    /// <summary>
+    /// Roughly how much data a throughput-measuring sweep would move, so the interface can
+    /// say so before the user starts one rather than after.
+    /// </summary>
+    public long ThroughputCostBytes => StrategyTuner.DefaultThroughputCostBytes;
+
+    private async Task<TuningResult?> RetuneAsync(
+        StrategyLease lease,
+        bool measureThroughput,
+        CancellationToken cancellationToken)
     {
         if (_tuner is null)
         {
@@ -2796,9 +2858,17 @@ public sealed class ProtectionService : IAsyncDisposable
         // detection left the sweep ordered by the profile the user had just deselected.
         await ResolveIspAsync(cancellationToken).ConfigureAwait(false);
 
-        var result = await _tuner
-            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken)
+        // A throughput-measuring sweep gets its own tuner and its own HTTP client, disposed
+        // with the run: the long-lived one must not keep a connection pool alive for a
+        // measurement the user asked for once.
+        using var sweep = measureThroughput ? CreateTuner(measureThroughput: true) : null;
+        var tuner = sweep ?? _tuner;
+
+        var result = await tuner
+            .FindBestAsync(lease, Isp, checkUnfilteredFirst: true, cancellationToken, StrategyChosenAt)
             .ConfigureAwait(false);
+
+        NoteSelection(result);
 
         if (result.Winner is not null && lease.TryWrite(result.Winner))
         {
@@ -3120,6 +3190,7 @@ public sealed class ProtectionService : IAsyncDisposable
             _tester = null;
         }
 
+        _tuner?.Dispose();
         _tuner = null;
         _dnsConfigurator = dnsRestoreFailure is null ? null : _dnsConfigurator;
         return new TeardownOutcome(dnsRestoreFailure);
@@ -3156,6 +3227,30 @@ public sealed class ProtectionService : IAsyncDisposable
     /// key of the network the machine had since moved to - the numbers were real, the
     /// heading was not, and the next launch started on a recipe measured somewhere else.
     /// </remarks>
+    /// <summary>
+    /// Keeps the selection and the moment it was made, for the interface and for the
+    /// policy's dwell rule.
+    /// </summary>
+    /// <remarks>
+    /// The timestamp moves only when the profile actually changes. A sweep that measured
+    /// four candidates and concluded that the one already installed is still the right
+    /// answer has confirmed it, not re-chosen it, and restarting its dwell would mean a
+    /// profile could be protected from replacement for ever by repeated confirmations.
+    /// </remarks>
+    private void NoteSelection(TuningResult result)
+    {
+        if (result.Selection is { } selection)
+        {
+            LastSelection = selection;
+        }
+
+        if (result.Winner is not null && result.Winner.Id != _lastChosenStrategyId)
+        {
+            _lastChosenStrategyId = result.Winner.Id;
+            StrategyChosenAt = DateTimeOffset.UtcNow;
+        }
+    }
+
     private void RecordNetworkResult(StrategyLease lease, BypassStrategy strategy, bool success, bool wasUnfiltered)
     {
         if (!lease.IsCurrent)

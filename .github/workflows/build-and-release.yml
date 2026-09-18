@@ -132,9 +132,12 @@ jobs:
                                    -WorkingDirectory $publish `
                                    -PassThru
 
-          if (-not $process.WaitForExit(60000)) {
+          # 90s rather than 60: the self-test now sweeps three window sizes instead of
+          # two and renders the status page, the settings page and the greeting at each
+          # size and palette, so the runner has about half as much layout work again.
+          if (-not $process.WaitForExit(90000)) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            throw 'The WPF window self-test did not finish within 60 seconds.'
+            throw 'The WPF window self-test did not finish within 90 seconds.'
           }
 
           if ($process.ExitCode -ne 0) {

@@ -95,10 +95,45 @@ Uygulama hangi yöntemin çalıştığını varsaymaz, **ölçer**:
 2. Operatör otomatik algılanır (ters DNS, Team Cymru üzerinden ASN ve ağ adı
    ipuçlarıyla) ve o operatöre uygun yöntem sıralaması seçilir.
 3. Önce hiç dokunmadan denenir — ağ zaten engellemiyorsa hiçbir şey yapılmaz.
-4. Aksi hâlde adaylar tek tek uygulanır ve her biri için **gerçek bir
-   discord.com TLS el sıkışması** yapılır. Sertifika da doğrulanır, böylece
-   araya giren bir kutu "başarılı" sayılmaz.
-5. Çalışanlar arasından **en hızlısı** seçilir ve o ağ için hatırlanır.
+4. Aksi hâlde adaylar tek tek uygulanır. Her aday için önce tek bir eleme
+   denemesi yapılır: **gerçek bir TLS el sıkışması**, sertifika doğrulamasıyla
+   birlikte, böylece araya giren bir kutu "başarılı" sayılmaz. Geçenler kısa
+   listeye alınır (en çok dört aday).
+5. Kısa listedeki adaylar **dönüşümlü** olarak ölçülür: her turda her aday bir
+   kez kurulur ve küçük bir hedef kümesinin (`discord.com`,
+   `gateway.discord.gg`, `cdn.discordapp.com`) tamamı denenir. Dönüşümlü
+   ölçüm, ağın tarama sırasında değişmesinin (Wi-Fi geçişi, başka bir indirme)
+   tek bir adayın hanesine yazılmasını engeller. Her ölçüm; DNS çözümleme,
+   TCP bağlanma ve TLS el sıkışma sürelerini **ayrı ayrı** kaydeder.
+6. Seçim sırası: **erişim → kararlılık → hız → gecikme**.
+   - Gerekli hedeflerin tamamına ulaşamayan aday elenir; bir hedefin açık
+     olması ağın açık olduğu anlamına gelmez.
+   - Denemelerinin beşte birinden fazlası başarısız olan aday elenir.
+   - Hız ölçüldüyse, en iyi hızın %95'inin altında kalan aday elenir. Bu eşik
+     değişmez bir kural değil, ölçümlerle ayarlanabilen bir başlangıç
+     değeridir.
+   - Kalanlar arasında en düşük bağlanma süresi, eşitlikte en düşük dalgalanma
+     kazanır.
+7. Mevcut profil çalışıyorsa, yeni aday **hem mutlak (3 ms) hem oransal (%8)**
+   olarak anlamlı biçimde daha iyi olmadıkça değiştirilmez; ayrıca çalışan bir
+   profil 10 dakika boyunca korunur. Sonuçları birbirine yakın iki profil
+   arasında sürekli geçiş yapmak her seferinde bir yeniden bağlanma demektir.
+
+**Hız ölçümü varsayılan olarak kapalıdır.** Tarama her ağ değişiminde
+çalıştığı için, her seferinde birkaç megabayt veri harcayan bir hız testi
+kullanıcının mobil kotasını onun adına harcamak olurdu. "Ağ ve yöntem"
+sayfasındaki **Hızı da ölçerek tara** düğmesi bunu bir kez çalıştırır ve ne
+kadar veri kullanacağını basılmadan önce söyler; aynı sayfadaki anahtar kalıcı
+tercih hâline getirir. Kapalıyken sonuç açıkça **"hız testi yapılmadı"** der.
+
+Uygulama, seçilen profilin yanında **gerekçeyi, ölçüm zamanını ve doğrulama
+düzeyini** gösterir; elenen adaylar ve eleme nedenleri de listelenir.
+
+**Bağlantı yokken tarama yapılmaz.** Bir el sıkışmanın ortada kesilmesi ya da
+başkasının sertifikası bir engelleme belirtisidir; DNS hatası veya hiç
+tamamlanmayan bir bağlantı ise kablonun takılı olmadığı anlamına gelir ve
+hiçbir aşma yöntemi bunu düzeltmez. Üst üste üç aday engelleme belirtisi
+olmadan başarısız olursa tarama durur ve bunu söyler.
 
 **Ağ değiştiğinde** (örneğin `atom` adlı ağdan `atoms hotspot` adlı ağa
 geçtiğinizde) bu arka planda kendiliğinden yeniden çalışır. O ağ daha önce
@@ -790,14 +825,60 @@ Ayrıntı ve doğrulama adımları için `docs/background-footprint.md`.
 
 ## Ekran arayüzü
 
-Windows 11'in Fluent görünümünü ve Mica malzemesini kullanır, sistem
-açık/koyu temasını canlı olarak izler. Logo 16 pikselden 1024 piksele kadar her
-boyutta ayrı ayrı gömülüdür ve arayüzde yüksek çözünürlüklü kaynaktan çizilir;
-böylece tepside, görev çubuğunda, kurulum sihirbazında ve %350 ölçeklemede
-bulanıklaşmaz.
+Windows 11'in Fluent görünümünü kullanır ve sistem açık/koyu temasını canlı
+olarak izler. Arayüzdeki simgeler **Microsoft Fluent System Icons** ailesinden
+alınmıştır; her simge çizildiği boyutta (16-20 DIP için 20 piksellik, 24 DIP ve
+üzeri için 24 piksellik çizim) kullanılır, seçili sekmenin simgesi dolu
+varyantına geçer. Logo 16 pikselden 1024 piksele kadar her boyutta ayrı ayrı
+gömülüdür ve arayüzde yüksek çözünürlüklü kaynaktan çizilir; böylece tepside,
+görev çubuğunda, kurulum sihirbazında ve %350 ölçeklemede bulanıklaşmaz.
 
-Sekmeler: **Durum** (durum, aç/kapat, discord.com testi, sayaçlar), **Kapsam**,
-**Siteler**, **Ağ ve yöntem**, **DNS ve ayarlar**, **Günlük**.
+Ana ekranın merkezinde tek bir **bağlantı denetimi** vardır: ortada bağlan/kes
+düğmesi, çevresinde durumu taşıyan bir halka, altında ne olduğunu yazan tek bir
+cümle. Gösterilen her aşama — *Ağ kontrol ediliyor → Profiller deneniyor →
+Bağlantı doğrulanıyor → Bağlı* — motorun gerçekten bildirdiği bir aşamadır;
+sahte yüzde yoktur ve animasyon için hiçbir şey bekletilmez. Altındaki dört
+kutucuk kararı kolaylaştıran bilgileri taşır: **etkin profil**, **gecikme**
+(hangi hedefe ve hangi yöntemle ölçüldüğü yazılı), **bağlantı kararlılığı**
+(dalgalanma ve ölçülebiliyorsa paket kaybı) ve **güncel trafik** — bu son
+değer o anda akan trafiktir, hattın azami hızı değildir. Ölçülmemiş her değer
+"Ölçülmedi" yazar.
+
+Sekmeler: **Durum** (bağlantı denetimi, karar bilgileri, discord.com testi,
+sayaçlar), **Kapsam**, **Siteler**, **Ağ ve yöntem**, **DNS ve ayarlar**,
+**Günlük**.
+
+### Görünüm: Sistem / Mica / Acrylic cam / Düz
+
+"DNS ve ayarlar" sayfasındaki **Görünüm** kartı pencere arka planını seçer:
+
+| Seçenek | Ne yapar |
+| --- | --- |
+| **Sistem** | Microsoft'un ana pencere için önerdiği varsayılan: destekleniyorsa Mica, desteklenmiyorsa düz yüzey. |
+| **Mica** | Masaüstü duvar kâğıdının renginden beslenen **opak** malzeme. Arkadaki pencereler görünmez. |
+| **Acrylic cam** | Gerçek saydamlık: arkadaki pencereler bulanık görünür. Büyük yüzeyde Microsoft'un varsayılan önerisi değildir, daha çok kaynak kullanır ve bilinçli bir görsel tercihtir. |
+| **Düz** | Tek renk yüzey. Her makinede aynı görünür, en az kaynağı kullanır. |
+
+Sistem arka planları Windows 11 22H2 (yapı 22621) ve sonrasını gerektirir.
+Saydamlık efektleri kapalıyken veya pil tasarrufu açıkken Acrylic çizilmez ve
+uygulama düz yüzeye değil **Mica'ya** düşer; yüksek karşıtlık teması, uzak
+masaüstü oturumu, yazılımsal işleme veya masaüstü birleştirmenin kapalı olması
+durumlarında düz yüzeye geçilir. Hangi durumun geçerli olduğu kartın altında
+bir cümleyle, "Teknik ayrıntılar" başlığı altında da tüm girdileriyle birlikte
+yazılıdır. Aynı kartta **uygulama içi hareketi azalt** anahtarı vardır;
+Windows'un kendi animasyon tercihi kapalıysa bu ayardan bağımsız olarak zaten
+uygulanır.
+
+### Karşılama
+
+Uygulamayı **elle** açtığınızda pencerenin içerik alanını kaplayan kısa bir
+karşılama gösterilir. Bu deneyim pencerenin içindedir: pencere boyutu, konumu
+ve sistem başlık çubuğu (kapat/küçült/büyüt) hiç değişmez. İlk açılışta dört
+kartlık bir tanıtım (Geri / İleri / Atla) gösterilir; sonraki elle açılışlarda
+tek satırlık bir karşılama görünür ve kendiliğinden uygulamaya geçer.
+"Açılışta göster" tercihi kapatılabilir, tanıtım "DNS ve ayarlar" sayfasından
+yeniden açılabilir. Windows ile sessiz başlangıçta ve tepsiden geri dönüşte
+karşılama gösterilmez.
 
 Pencereyi kapatmak korumayı durdurmaz; uygulama tepside çalışmaya devam eder.
 Kısayolu yeniden çalıştırmak ya da tepsi simgesine tıklamak pencereyi geri
@@ -906,7 +987,7 @@ kalır.
 
 | Dosya | İçerik |
 | --- | --- |
-| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping düşürme, Lunar Client reklam engeli, Vodafone ağ tercihleri ve hotspot tanılaması, başlangıç seçenekleri |
+| `settings.json` | Kapsam, DNS kipi, yöntem seçimi, Ping düşürme, Lunar Client reklam engeli, Vodafone ağ tercihleri ve hotspot tanılaması, başlangıç seçenekleri, pencere görünümü ve hareket tercihi, karşılama tercihi, tarama sırasında hız ölçümü |
 | `networks.json` | Ağ başına öğrenilen yöntem belleği |
 | `learned-domains.json` | Otomatik keşfin bulduğu engelli alan adları |
 | `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |

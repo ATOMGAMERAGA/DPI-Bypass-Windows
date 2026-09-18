@@ -146,7 +146,10 @@ public sealed class ScrollingTests
                 "PageSurface", StringComparison.Ordinal) == true)
             .ToArray();
 
-        Assert.Equal(2, surfaces.Length);
+        // Three now: the plain surface, the animated one, and the key the pages bind to -
+        // which App points at one of the other two and swaps live when the motion
+        // preference changes.
+        Assert.Equal(3, surfaces.Length);
 
         foreach (var setter in surfaces.SelectMany(style => style.Elements(ns + "Setter")))
         {
@@ -177,7 +180,15 @@ public sealed class ScrollingTests
 
         Assert.DoesNotContain("Triggers.Clear()", window, StringComparison.Ordinal);
         Assert.Contains("PageSurfaceStaticStyle", app, StringComparison.Ordinal);
+        Assert.Contains("PageSurfaceAnimatedStyle", app, StringComparison.Ordinal);
         Assert.Contains("ClientAreaAnimation", app, StringComparison.Ordinal);
+
+        // Windows' own preference is the ceiling: the app's switch can turn motion further
+        // down and never back on over the top of it.
+        Assert.Contains(
+            "SystemParameters.ClientAreaAnimation && _service?.Settings.ReduceMotion != true",
+            app,
+            StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -193,12 +204,18 @@ public sealed class ScrollingTests
     public void ThePrimaryButtonReflectsAStartThatIsStillInProgress()
     {
         var viewModel = File.ReadAllText(RepoFiles.MainViewModel);
+        var connection = string.Concat(RepoFiles.ViewModelFiles.Select(File.ReadAllText));
 
         Assert.Contains("ProtectionState.Starting => \"Başlatılıyor…\"", viewModel, StringComparison.Ordinal);
         Assert.Contains("ProtectionState.Stopping => \"Durduruluyor…\"", viewModel, StringComparison.Ordinal);
-        Assert.Contains(
-            "new AsyncRelayCommand(ToggleAsync, () => !_isBusy && !IsTransitioning)",
-            viewModel,
-            StringComparison.Ordinal);
+
+        // The button's own wording now comes from the connection flow's stage, and the
+        // guard that stops a second press is the flow's rather than a bool in the view
+        // model - which is what also makes a late result from an abandoned attempt
+        // unable to re-enable it. Both are pinned by ConnectionFlowTests; what matters
+        // here is that the button is still wired to them.
+        Assert.Contains("_ when _connectionSnapshot.IsWorking => \"Bağlanıyor…\"", connection, StringComparison.Ordinal);
+        Assert.Contains("() => !_connectionSnapshot.IsWorking", connection, StringComparison.Ordinal);
+        Assert.Contains("ToggleCommand = ConnectCommand;", viewModel, StringComparison.Ordinal);
     }
 }

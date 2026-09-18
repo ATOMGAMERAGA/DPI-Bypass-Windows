@@ -40,19 +40,44 @@ Write-Host "  $($defined.Count) key(s) defined across the app's dictionaries"
 
 $missing = New-Object System.Collections.Generic.List[string]
 $forwardReferences = New-Object System.Collections.Generic.List[string]
+$buriedExtensions = New-Object System.Collections.Generic.List[string]
 $references = 0
 
 foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
     $text = Get-Content -Path $file.FullName -Raw
+
+    # XAML only treats {...} as markup when it is the WHOLE attribute value. Written
+    # anywhere else - Margin="0,0,0,{StaticResource Space.8}" - it is a literal string
+    # handed to the property's type converter, which throws while the window is being
+    # built. Nothing catches it earlier: the compiler defers the conversion into BAML and
+    # the key name itself is perfectly valid. This shipped once, and it stopped
+    # Shared.xaml loading at that line, so every style after it was simply absent.
+    $line = 0
+    foreach ($row in $text -split "`n") {
+        $line++
+        foreach ($attribute in [regex]::Matches($row, '[\w.:]+="([^"]*)"')) {
+            $value = $attribute.Groups[1].Value
+            if ($value.Contains('{') -and -not $value.TrimStart().StartsWith('{')) {
+                $buriedExtensions.Add("$($file.Name):$line $($attribute.Value)")
+            }
+        }
+    }
 
     foreach ($match in [regex]::Matches($text, '\{(StaticResource|DynamicResource)\s+([^},]+)\}')) {
         $kind = $match.Groups[1].Value
         $key = $match.Groups[2].Value.Trim()
         $references++
 
-        # A key with a dot in it is a framework resource (SystemColors.*, the
-        # Fluent theme's own brushes); those are not ours to define.
-        if ($key.Contains('.')) { continue }
+        # An implicit style is keyed by a type rather than by a string:
+        # {StaticResource {x:Type infra:FluentIcon}}. There is no string key to
+        # look up, and the compiler has already resolved the type.
+        if ($key.StartsWith('{')) { continue }
+
+        # Resources the framework owns rather than us. Named by prefix rather
+        # than by "contains a dot", which used to be the rule and silently
+        # skipped every design token the moment Theme/Tokens.xaml started
+        # naming them Space.8 and Motion.Fast.
+        if ($key -match '^(SystemColors|SystemParameters|SystemFonts)\.') { continue }
 
         if (-not $defined.Contains($key)) {
             $missing.Add("$($file.Name): $kind $key")
@@ -73,6 +98,8 @@ foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
 
         foreach ($reference in [regex]::Matches($text, '\{StaticResource\s+([^},]+)\}')) {
             $key = $reference.Groups[1].Value.Trim()
+            if ($key.StartsWith('{')) { continue }
+
             if ($definitions.ContainsKey($key) -and $definitions[$key] -gt $reference.Index) {
                 $line = 1 + $text.Substring(0, $reference.Index).Split("`n").Count - 1
                 $forwardReferences.Add("$($file.Name):$line StaticResource $key is declared later")
@@ -83,7 +110,7 @@ foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
 
 Write-Host "  $references reference(s) checked"
 
-if ($missing.Count -gt 0 -or $forwardReferences.Count -gt 0) {
+if ($missing.Count -gt 0 -or $forwardReferences.Count -gt 0 -or $buriedExtensions.Count -gt 0) {
     Write-Host ''
     foreach ($entry in $missing) {
         Write-Host "  MISSING $entry" -ForegroundColor Red
@@ -91,9 +118,13 @@ if ($missing.Count -gt 0 -or $forwardReferences.Count -gt 0) {
     foreach ($entry in $forwardReferences) {
         Write-Host "  FORWARD $entry" -ForegroundColor Red
     }
+    foreach ($entry in $buriedExtensions) {
+        Write-Host "  BURIED  $entry" -ForegroundColor Red
+    }
 
     Write-Host ''
-    Write-Host "$($missing.Count) missing and $($forwardReferences.Count) forward resource reference(s)." -ForegroundColor Red
+    Write-Host ("$($missing.Count) missing, $($forwardReferences.Count) forward and " +
+        "$($buriedExtensions.Count) buried resource reference(s).") -ForegroundColor Red
     exit 1
 }
 

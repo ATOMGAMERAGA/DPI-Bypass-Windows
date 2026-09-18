@@ -5,8 +5,8 @@
         Title="DPI Bypass"
         Width="1080"
         Height="780"
-        MinWidth="820"
-        MinHeight="620"
+        MinWidth="760"
+        MinHeight="560"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource AppWindowBackgroundBrush}"
         TextOptions.TextFormattingMode="Ideal"
@@ -24,13 +24,24 @@
         <infra:SeverityToBrushConverter x:Key="SeverityBrushConverter" />
         <infra:HotspotCheckStateToBrushConverter x:Key="CheckStateBrushConverter" />
         <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
+        <infra:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
     </Window.Resources>
+
+    <!-- Two layers in the same window: the app, and the greeting that covers it.
+
+         The greeting fills the content area and nothing more. The window keeps its size,
+         its position and its system title bar - close, minimise and maximise stay exactly
+         where they were and keep working - because everything here is inside the client
+         area and nothing touches WindowState or WindowStyle. The shell is collapsed rather
+         than merely covered, so keyboard focus cannot reach a control behind the greeting.
+    -->
+    <Grid>
 
     <!-- Shell: a compact top bar (brand, live protection status, primary action),
          a navigation rail on the left and a footer with version and exit. The bar,
          the rail and the footer stay transparent so Mica shows through; hairlines
          separate them from the page content. -->
-    <Grid>
+    <Grid x:Name="AppShell" Style="{StaticResource AppShellStyle}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -79,7 +90,7 @@
                         ToolTip="{Binding StatusDetail}"
                         AutomationProperties.Name="Koruma durumu">
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource StatusPillIconStyle}" />
+                        <infra:FluentIcon Style="{StaticResource StatusPillIconStyle}" />
                         <TextBlock Text="{Binding StatusHeadline}"
                                    FontSize="12.5"
                                    MaxWidth="180" TextTrimming="CharacterEllipsis"
@@ -95,7 +106,7 @@
                         Style="{StaticResource PrimaryActionButtonStyle}"
                         Width="190"
                         VerticalAlignment="Center"
-                        infra:ActionButton.Icon="{StaticResource IconShieldGeometry}"
+                        infra:ActionButton.Symbol="Shield"
                         Command="{Binding ToggleCommand}"
                         Content="{Binding ToggleCaption}" />
             </Grid>
@@ -112,80 +123,140 @@
                      AutomationProperties.Name="Durum">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconShieldGeometry}" />
-                        <AccessText Text="_Durum" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Shield" />
+                        <AccessText Text="_Durum" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <ScrollViewer Style="{StaticResource PageSurfaceStyle}">
                     <StackPanel>
 
-                        <!-- Hero: answers "is protection on, what is it doing,
-                             and is there anything for me to do" at a glance. -->
-                        <Border Style="{StaticResource HeroCardStyle}" Margin="0,0,0,12">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
+                        <!-- ===== The connection control =====
+                             One ring, one button, one sentence. Everything it draws comes
+                             from ConnectionFlow's current stage, so what the ring is doing
+                             and what the engine is doing cannot disagree: there is no
+                             timer here, no percentage, and no state the screen can invent
+                             for itself. -->
+                        <Border Style="{StaticResource HeroCardStyle}" Margin="0,0,0,12" Padding="20,28">
+                            <StackPanel HorizontalAlignment="Center">
 
-                                <Border Grid.Column="0"
-                                        Style="{StaticResource StatusHeroDiscStyle}"
-                                        Margin="0,0,16,0"
-                                        VerticalAlignment="Top">
-                                    <Path Style="{StaticResource StatusHeroIconStyle}" />
-                                </Border>
+                                <Grid Width="196" Height="196" HorizontalAlignment="Center">
+                                    <Ellipse Style="{StaticResource ConnectionRingTrackStyle}"
+                                             Width="176" Height="176" />
 
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
-                                    <TextBlock Text="{Binding StatusHeadline}"
-                                               FontSize="19"
-                                               FontWeight="SemiBold"
-                                               TextWrapping="Wrap"
-                                               Foreground="{DynamicResource AppTextPrimaryBrush}" />
-                                    <TextBlock Text="{Binding StatusDetail}"
-                                               Style="{StaticResource CaptionStyle}"
-                                               Margin="0,3,0,0"
-                                               TextWrapping="Wrap" />
+                                    <!-- The RotateTransform is declared here rather than in
+                                         the style: a Freezable in a Style setter is frozen
+                                         and shared, and animating one throws. -->
+                                    <Ellipse Style="{StaticResource ConnectionRingArcStyle}"
+                                             Width="176" Height="176"
+                                             RenderTransformOrigin="0.5,0.5">
+                                        <Ellipse.RenderTransform>
+                                            <RotateTransform Angle="0" />
+                                        </Ellipse.RenderTransform>
+                                    </Ellipse>
 
-                                    <!-- Its own line, because "the engine is running" and
-                                         "the site actually answers" are two different
-                                         facts and one green headline for both is how a
-                                         reassuring window ends up in front of a
-                                         connection that is not working. The time of the
-                                         last check that really got through is part of it. -->
-                                    <TextBlock Text="{Binding VerificationSummary, Mode=OneWay}"
-                                               Tag="{Binding VerificationSeverity, Mode=OneWay}"
-                                               Style="{StaticResource SeverityStatusLineStyle}"
-                                               Margin="0,6,0,0"
-                                               TextWrapping="Wrap"
-                                               AutomationProperties.Name="Hedef site doğrulaması"
-                                               AutomationProperties.LiveSetting="Polite" />
+                                    <Ellipse Style="{StaticResource ConnectionRingCompleteStyle}"
+                                             Width="176" Height="176" />
 
-                                    <TextBlock Style="{StaticResource CaptionStyle}" Margin="0,10,0,0">
-                                        <Run Text="Kapsam:" />
-                                        <Run Text="{Binding SelectedScope.Title, Mode=OneWay}" FontWeight="SemiBold" />
-                                    </TextBlock>
-                                </StackPanel>
+                                    <Button x:Name="ConnectButton"
+                                            Style="{StaticResource ConnectButtonStyle}"
+                                            Command="{Binding ConnectCommand}"
+                                            AutomationProperties.Name="{Binding ConnectionAction}"
+                                            ToolTip="{Binding ConnectionAction}" />
+                                </Grid>
 
-                                <StackPanel Grid.Column="2" VerticalAlignment="Center">
-                                    <Button Style="{StaticResource PrimaryActionButtonStyle}"
-                                            MinWidth="190"
-                                            MinHeight="40"
-                                            HorizontalAlignment="Stretch"
-                                            infra:ActionButton.Icon="{StaticResource IconShieldGeometry}"
-                                            Command="{Binding ToggleCommand}"
-                                            Content="{Binding ToggleCaption}" />
-                                    <!-- Real busy state: visible only while the
-                                         engine is actually starting or stopping. -->
-                                    <ProgressBar Height="3"
-                                                 Margin="0,10,0,0"
-                                                 IsIndeterminate="{Binding IsBusy}"
-                                                 Visibility="{Binding IsBusy, Converter={StaticResource BoolToHiddenConverter}}"
-                                                 Background="{DynamicResource AppSubtleBackgroundBrush}"
-                                                 Foreground="{DynamicResource AppAccentBrush}" />
-                                </StackPanel>
-                            </Grid>
+                                <TextBlock Text="{Binding ConnectionTitle}"
+                                           Style="{StaticResource ConnectionTitleStyle}"
+                                           Margin="0,20,0,0"
+                                           AutomationProperties.LiveSetting="Polite"
+                                           AutomationProperties.Name="Bağlantı durumu" />
+
+                                <TextBlock Text="{Binding ConnectionDetail}"
+                                           Style="{StaticResource ConnectionDetailStyle}" />
+
+                                <!-- Its own line, because "the engine is running" and "the
+                                     site actually answers" are two different facts, and one
+                                     green headline for both is how a reassuring window ends
+                                     up in front of a connection that is not working. -->
+                                <TextBlock Text="{Binding VerificationSummary, Mode=OneWay}"
+                                           Tag="{Binding VerificationSeverity, Mode=OneWay}"
+                                           Style="{StaticResource SeverityStatusLineStyle}"
+                                           Margin="0,10,0,0"
+                                           HorizontalAlignment="Center"
+                                           TextAlignment="Center"
+                                           MaxWidth="420"
+                                           AutomationProperties.Name="Hedef site doğrulaması"
+                                           AutomationProperties.LiveSetting="Polite" />
+
+                                <!-- Cancel is only there while there is something to
+                                     cancel, but its space always is: Hidden rather than
+                                     Collapsed, so pressing connect does not push the rest
+                                     of the card down by 50 DIP at the exact moment the
+                                     user is watching it. -->
+                                <Button Content="İptal et"
+                                        Margin="0,14,0,0"
+                                        MinWidth="120"
+                                        HorizontalAlignment="Center"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"
+                                        infra:ActionButton.Symbol="Dismiss"
+                                        IsTabStop="{Binding CanCancelConnection}"
+                                        Command="{Binding CancelConnectionCommand}"
+                                        Visibility="{Binding CanCancelConnection, Converter={StaticResource BoolToHiddenConverter}}" />
+
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="0,14,0,0"
+                                           HorizontalAlignment="Center"
+                                           TextAlignment="Center">
+                                    <Run Text="Kapsam:" />
+                                    <Run Text="{Binding SelectedScope.Title, Mode=OneWay}" FontWeight="SemiBold" />
+                                </TextBlock>
+                            </StackPanel>
                         </Border>
+
+                        <!-- ===== The four facts a decision needs =====
+                             Active profile, latency, stability, traffic. Each says what
+                             kind of measurement it is underneath, and anything nobody
+                             measured says so rather than showing a zero. -->
+                        <Grid Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="8" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource InfoTileStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="Etkin profil" Style="{StaticResource InfoTileLabelStyle}" />
+                                    <TextBlock Text="{Binding ActiveProfileValue}" Style="{StaticResource InfoTileValueStyle}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding ActiveProfileNote}" Style="{StaticResource HintStyle}" Margin="0,3,0,0" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Row="0" Grid.Column="2" Style="{StaticResource InfoTileStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="Gecikme" Style="{StaticResource InfoTileLabelStyle}" />
+                                    <TextBlock Text="{Binding LatencyValue}" Style="{StaticResource InfoTileValueStyle}" />
+                                    <TextBlock Text="{Binding LatencyNote}" Style="{StaticResource HintStyle}" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource InfoTileStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="Bağlantı kararlılığı" Style="{StaticResource InfoTileLabelStyle}" />
+                                    <TextBlock Text="{Binding StabilityValue}" Style="{StaticResource InfoTileValueStyle}" />
+                                    <TextBlock Text="{Binding StabilityNote}" Style="{StaticResource HintStyle}" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Row="2" Grid.Column="2" Style="{StaticResource InfoTileStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="Güncel trafik" Style="{StaticResource InfoTileLabelStyle}" />
+                                    <TextBlock Text="{Binding TrafficValue}" Style="{StaticResource InfoTileValueStyle}" />
+                                    <TextBlock Text="{Binding TrafficNote}" Style="{StaticResource HintStyle}" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
 
                         <!-- Applied, but not written down. The setting is doing what the
                              user asked for this session; the file on disk is not, and the
@@ -201,15 +272,12 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <Path Grid.Column="0"
-                                      Style="{StaticResource StrokeIconStyle}"
-                                      Data="{StaticResource IconWarningGeometry}"
-                                      Width="18"
-                                      Height="18"
-                                      Stretch="Uniform"
-                                      Margin="0,0,12,0"
-                                      VerticalAlignment="Center"
-                                      Stroke="{DynamicResource AppWarningBrush}" />
+                                <infra:FluentIcon Grid.Column="0"
+                                                  Symbol="Warning"
+                                                  Filled="True"
+                                                  Size="{StaticResource IconSize.Body}"
+                                                  Margin="0,0,12,0"
+                                                  Foreground="{DynamicResource AppWarningBrush}" />
                                 <TextBlock Grid.Column="1"
                                            Style="{StaticResource NoticeTextStyle}"
                                            VerticalAlignment="Center"
@@ -225,46 +293,16 @@
                             </Grid>
                         </Border>
 
-                        <!-- What the engine is working with. Equal columns use the
-                             whole card width instead of leaving a dead strip on the
-                             right at the window's normal size. -->
-                        <Grid Margin="0,0,0,4">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="12" />
-                                <ColumnDefinition Width="*" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="8" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-
-                            <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource InfoTileStyle}">
-                                <StackPanel>
-                                    <TextBlock Text="Ağ" Style="{StaticResource InfoTileLabelStyle}" />
-                                    <TextBlock Text="{Binding NetworkName}" Style="{StaticResource InfoTileValueStyle}" />
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Row="0" Grid.Column="2" Style="{StaticResource InfoTileStyle}">
-                                <StackPanel>
-                                    <TextBlock Text="Operatör" Style="{StaticResource InfoTileLabelStyle}" />
-                                    <TextBlock Text="{Binding IspSummary}" Style="{StaticResource InfoTileValueStyle}" />
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource InfoTileStyle}">
-                                <StackPanel>
-                                    <TextBlock Text="Yöntem" Style="{StaticResource InfoTileLabelStyle}" />
-                                    <TextBlock Text="{Binding StrategySummary}" Style="{StaticResource InfoTileValueStyle}" />
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Row="2" Grid.Column="2" Style="{StaticResource InfoTileStyle}">
-                                <StackPanel>
-                                    <TextBlock Text="Kapsam" Style="{StaticResource InfoTileLabelStyle}" />
-                                    <TextBlock Text="{Binding SelectedScope.Title}" Style="{StaticResource InfoTileValueStyle}" />
-                                </StackPanel>
-                            </Border>
-                        </Grid>
+                        <!-- Which network this is and who runs it. One line rather than
+                             two tiles: it is context for the four facts above, not a fifth
+                             fact, and the page it belongs to is "Ağ ve yöntem". -->
+                        <TextBlock Style="{StaticResource CaptionStyle}" Margin="2,0,0,16">
+                            <Run Text="Ağ:" />
+                            <Run Text="{Binding NetworkName, Mode=OneWay}" FontWeight="SemiBold" />
+                            <Run Text=" · " />
+                            <Run Text="Operatör:" />
+                            <Run Text="{Binding IspSummary, Mode=OneWay}" FontWeight="SemiBold" />
+                        </TextBlock>
 
                         <Border Style="{StaticResource CardStyle}" Margin="0,8,0,12">
                             <StackPanel>
@@ -309,8 +347,8 @@
                      AutomationProperties.Name="Kapsam">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLayersGeometry}" />
-                        <AccessText Text="_Kapsam" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Target" />
+                        <AccessText Text="_Kapsam" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -381,8 +419,8 @@
                      AutomationProperties.Name="Siteler">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconGlobeGeometry}" />
-                        <AccessText Text="_Siteler" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Globe" />
+                        <AccessText Text="_Siteler" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -422,7 +460,7 @@
                                         MinWidth="100"
                                         Margin="8,0,0,0"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
-                                        infra:ActionButton.Icon="{StaticResource IconPlusGeometry}"
+                                        infra:ActionButton.Symbol="Add"
                                         Command="{Binding AddDomainCommand}" />
                                 <Button Grid.Column="2"
                                         Content="Seçileni çıkar"
@@ -464,17 +502,12 @@
                                              Padding="30,6,8,6"
                                              AutomationProperties.Name="Alan adı ara"
                                              Text="{Binding DomainFilter, UpdateSourceTrigger=PropertyChanged}" />
-                                    <Path Data="{StaticResource IconSearchGeometry}"
-                                          Width="14"
-                                          Height="14"
-                                          Stretch="Uniform"
-                                          HorizontalAlignment="Left"
-                                          Margin="10,0,0,0"
-                                          IsHitTestVisible="False"
-                                          Stroke="{DynamicResource AppTextSecondaryBrush}"
-                                          StrokeThickness="1.8"
-                                          StrokeStartLineCap="Round"
-                                          StrokeEndLineCap="Round" />
+                                    <infra:FluentIcon Symbol="Search"
+                                                      Size="{StaticResource IconSize.Small}"
+                                                      HorizontalAlignment="Left"
+                                                      Margin="10,0,0,0"
+                                                      IsHitTestVisible="False"
+                                                      Foreground="{DynamicResource AppTextSecondaryBrush}" />
                                 </Grid>
                                 <Button Grid.Column="1"
                                         Style="{StaticResource GhostIconButtonStyle}"
@@ -482,14 +515,9 @@
                                         Command="{Binding ClearDomainFilterCommand}"
                                         ToolTip="Aramayı temizle"
                                         AutomationProperties.Name="Aramayı temizle">
-                                    <Path Data="{StaticResource IconCloseGeometry}"
-                                          Width="12"
-                                          Height="12"
-                                          Stretch="Uniform"
-                                          Stroke="{DynamicResource AppTextSecondaryBrush}"
-                                          StrokeThickness="1.8"
-                                          StrokeStartLineCap="Round"
-                                          StrokeEndLineCap="Round" />
+                                    <infra:FluentIcon Symbol="Dismiss"
+                                                      Size="{StaticResource IconSize.Small}"
+                                                      Foreground="{DynamicResource AppTextSecondaryBrush}" />
                                 </Button>
                             </Grid>
 
@@ -548,8 +576,8 @@
                      AutomationProperties.Name="Ağ ve yöntem">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSignalGeometry}" />
-                        <AccessText Text="Ağ ve _yöntem" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="TopSpeed" />
+                        <AccessText Text="Ağ ve _yöntem" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -606,7 +634,60 @@
                                 <TextBlock Text="Etkin yöntem" Style="{StaticResource FieldLabelStyle}" />
                                 <TextBlock Text="{Binding StrategySummary}"
                                            Style="{StaticResource InfoTileValueStyle}"
-                                           Margin="0,0,0,12" />
+                                           Margin="0,0,0,8" />
+
+                                <!-- Why this one, measured when, and how much was measured.
+                                     The third is the one most easily left out and the one
+                                     that keeps the other two honest: a choice made from
+                                     reachability and connect times is a real choice and is
+                                     not the same as one made after measuring throughput,
+                                     and the line says which. -->
+                                <Border Style="{StaticResource InfoTileStyle}" Margin="0,0,0,12">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding SelectionRationale, Mode=OneWay}"
+                                                   Style="{StaticResource BodyStyle}"
+                                                   TextWrapping="Wrap"
+                                                   AutomationProperties.Name="Seçim gerekçesi"
+                                                   AutomationProperties.LiveSetting="Polite" />
+                                        <TextBlock Text="{Binding SelectionConfidenceLabel, Mode=OneWay}"
+                                                   Style="{StaticResource HintStyle}"
+                                                   Margin="0,6,0,0"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Style="{StaticResource HintStyle}" Margin="0,2,0,0">
+                                            <Run Text="Ölçüm zamanı:" />
+                                            <Run Text="{Binding SelectionMeasuredAt, Mode=OneWay}" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Which candidates were measured and dropped, and why.
+                                     "It picked the slow one" is a complaint that can only be
+                                     answered with the list of what else was tried. -->
+                                <Expander Style="{StaticResource AdvancedExpanderStyle}"
+                                          Margin="0,0,0,12"
+                                          Visibility="{Binding SelectionRejections.Count, Converter={StaticResource CountToVisibilityConverter}}">
+                                    <Expander.Header>
+                                        <TextBlock Text="Elenen adaylar" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+                                    </Expander.Header>
+                                    <ItemsControl ItemsSource="{Binding SelectionRejections}"
+                                                  AutomationProperties.Name="Elenen adaylar">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Style="{StaticResource InfoTileStyle}" Margin="0,0,0,6">
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding StrategyName}"
+                                                                   Style="{StaticResource BodyStyle}"
+                                                                   FontWeight="SemiBold" />
+                                                        <TextBlock Text="{Binding Reason}"
+                                                                   Style="{StaticResource HintStyle}"
+                                                                   Margin="0,3,0,0"
+                                                                   TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Expander>
 
                                 <ComboBox infra:NestedScrolling.IgnoreWheel="True"
                                           ItemsSource="{Binding StrategyOptions}"
@@ -619,16 +700,51 @@
                                            Style="{StaticResource CaptionStyle}"
                                            Margin="0,8,0,0" />
 
-                                <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <!-- Two buttons, because they cost different things. The
+                                     first measures reach, stability and latency and moves
+                                     almost nothing; the second adds a transfer per
+                                     candidate and says how much data that is before it is
+                                     pressed. A user finding out what a button spent after
+                                     pressing it is not a choice they made. -->
+                                <WrapPanel Margin="0,14,0,0">
                                     <Button Content="Yeniden tara"
                                             MinWidth="150"
+                                            Margin="0,0,8,8"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
-                                            infra:ActionButton.Icon="{StaticResource IconRefreshGeometry}"
+                                            infra:ActionButton.Symbol="ArrowClockwise"
                                             Command="{Binding RetuneCommand}" />
+                                    <Button Content="Hızı da ölçerek tara"
+                                            MinWidth="190"
+                                            Margin="0,0,8,8"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            infra:ActionButton.Symbol="TopSpeed"
+                                            ToolTip="{Binding ThroughputCostSummary}"
+                                            AutomationProperties.Name="Hızı da ölçerek yeniden tara"
+                                            Command="{Binding RetuneWithSpeedCommand}" />
+                                </WrapPanel>
+
+                                <TextBlock Style="{StaticResource HintStyle}"
+                                           Margin="0,0,0,10"
+                                           TextWrapping="Wrap">
+                                    <Run Text="Hız ölçümü her aday için gerçek bir aktarım yapar." />
+                                    <Run Text="{Binding ThroughputCostSummary, Mode=OneWay}" />
+                                </TextBlock>
+
+                                <CheckBox Content="Her otomatik taramada hızı da ölç"
+                                          Margin="0,0,0,10"
+                                          Style="{StaticResource SwitchStyle}"
+                                          AutomationProperties.Name="Her otomatik taramada hızı da ölç"
+                                          IsChecked="{Binding MeasureThroughputDuringTuning, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource HintStyle}"
+                                           Margin="26,0,0,10"
+                                           TextWrapping="Wrap"
+                                           Text="Kapalıyken tarama erişim, kararlılık ve gecikmeyi ölçer; hız ölçülmez ve sonuçta &quot;hız testi yapılmadı&quot; yazar. Ağ her değiştiğinde tarama çalıştığı için bu seçenek mobil veri kullanımını artırabilir." />
+
+                                <StackPanel Orientation="Horizontal">
                                     <!-- Real tuning progress: only while the sweep runs. -->
                                     <ProgressBar Width="90"
                                                  Height="3"
-                                                 Margin="12,0,0,0"
+                                                 Margin="0,0,0,0"
                                                  VerticalAlignment="Center"
                                                  IsIndeterminate="{Binding IsTuning}"
                                                  Visibility="{Binding IsTuning, Converter={StaticResource BoolToVisibilityConverter}}"
@@ -661,8 +777,8 @@
                      AutomationProperties.Name="DNS ve ayarlar">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconSlidersGeometry}" />
-                        <AccessText Text="DNS ve _ayarlar" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="Options" />
+                        <AccessText Text="DNS ve _ayarlar" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <infra:DeferredTabContent.Template>
@@ -787,6 +903,91 @@
                                           Margin="0,10,0,0"
                                           Style="{StaticResource SwitchStyle}"
                                           IsChecked="{Binding MinimiseToTrayOnClose, Mode=TwoWay}" />
+
+                                <CheckBox Content="Açılışta karşılamayı göster"
+                                          Margin="0,10,0,0"
+                                          Style="{StaticResource SwitchStyle}"
+                                          AutomationProperties.Name="Açılışta karşılamayı göster"
+                                          IsChecked="{Binding ShowWelcomeOnStartup, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="26,4,0,0"
+                                           Text="Uygulamayı elle açtığınızda kısa bir karşılama görürsünüz. Windows ile sessiz başlangıçta ve tepsiden geri dönüşte gösterilmez." />
+
+                                <Button Content="Tanıtımı yeniden göster"
+                                        MinWidth="200"
+                                        Margin="0,12,0,0"
+                                        HorizontalAlignment="Left"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"
+                                        infra:ActionButton.Symbol="BookOpen"
+                                        AutomationProperties.Name="Tanıtımı yeniden göster"
+                                        Command="{Binding ShowWelcomeTourCommand}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- ===== Görünüm =====
+                             Mica and Acrylic are not two intensities of the same thing and
+                             the descriptions say which is which: Mica takes its colour from
+                             the wallpaper and is opaque, Acrylic is real translucency and
+                             shows the windows behind. Acrylic across a whole window is a
+                             deliberate departure from Microsoft's guidance rather than an
+                             upgrade, so it is offered and explained rather than defaulted
+                             to. Whatever the machine could actually deliver is reported
+                             underneath, in words, with the evidence a step further down. -->
+                        <Border x:Name="AppearanceSection" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Text="Görünüm" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="0,0,0,10"
+                                           Text="Pencere arka planının nasıl çizileceğini seçin. Okunabilirlik her seçenekte aynıdır; değişen yalnızca arka plandır." />
+
+                                <ListBox Style="{StaticResource ChoiceListStyle}"
+                                         ItemsSource="{Binding AppearanceOptions}"
+                                         SelectedItem="{Binding SelectedAppearance, Mode=TwoWay}"
+                                         AutomationProperties.Name="Pencere görünümü">
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource ChoiceCardStyle}" />
+                                    </ListBox.ItemContainerStyle>
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Display}"
+                                                           Style="{StaticResource BodyStyle}"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding Description}"
+                                                           Style="{StaticResource CaptionStyle}"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+
+                                <TextBlock Text="{Binding AppearanceStatus, Mode=OneWay}"
+                                           Tag="{Binding AppearanceStatusSeverity, Mode=OneWay}"
+                                           Style="{StaticResource SeverityStatusLineStyle}"
+                                           Margin="0,4,0,0"
+                                           AutomationProperties.Name="Uygulanan pencere görünümü"
+                                           AutomationProperties.LiveSetting="Polite" />
+
+                                <CheckBox Content="Uygulama içi hareketi azalt"
+                                          Margin="0,14,0,0"
+                                          Style="{StaticResource SwitchStyle}"
+                                          AutomationProperties.Name="Uygulama içi hareketi azalt"
+                                          IsChecked="{Binding ReduceMotion, Mode=TwoWay}" />
+                                <TextBlock Style="{StaticResource CaptionStyle}"
+                                           Margin="26,4,0,0"
+                                           Text="Bağlantı halkası ve sayfa geçişleri gibi animasyonlar kapanır. Windows'un kendi animasyon tercihi kapalıysa bu ayardan bağımsız olarak zaten uygulanır." />
+
+                                <Expander Style="{StaticResource AdvancedExpanderStyle}" Margin="0,14,0,0">
+                                    <Expander.Header>
+                                        <TextBlock Text="Teknik ayrıntılar" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+                                    </Expander.Header>
+                                    <Border Style="{StaticResource MonoPanelStyle}">
+                                        <TextBlock Text="{Binding AppearanceEvidence, Mode=OneWay}"
+                                                   Style="{StaticResource MonospaceStyle}"
+                                                   TextWrapping="Wrap"
+                                                   AutomationProperties.Name="Pencere görünümü tanılama bilgisi" />
+                                    </Border>
+                                </Expander>
                             </StackPanel>
                         </Border>
 
@@ -900,7 +1101,7 @@
                                             MinWidth="90"
                                             Margin="8,0,0,0"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
-                                            infra:ActionButton.Icon="{StaticResource IconRefreshGeometry}"
+                                            infra:ActionButton.Symbol="ArrowClockwise"
                                             Command="{Binding RefreshLatencyProcessesCommand}" />
                                 </Grid>
 
@@ -938,7 +1139,7 @@
                                         Margin="0,16,0,0"
                                         HorizontalAlignment="Left"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
-                                        infra:ActionButton.Icon="{StaticResource IconSignalGeometry}"
+                                        infra:ActionButton.Symbol="TopSpeed"
                                         Command="{Binding LatencyPrimaryCommand}" />
 
                                 <!-- This slot stays in the layout while idle: starting a run
@@ -1402,7 +1603,7 @@
                                         Margin="0,14,0,0"
                                         HorizontalAlignment="Left"
                                         Style="{StaticResource PrimaryActionButtonStyle}"
-                                        infra:ActionButton.Icon="{StaticResource IconSearchGeometry}"
+                                        infra:ActionButton.Symbol="Search"
                                         Command="{Binding HotspotDiagnoseCommand}" />
 
                                 <ProgressBar Height="3"
@@ -1633,8 +1834,8 @@
                      AutomationProperties.Name="Günlük">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <Path Style="{StaticResource NavIconStyle}" Data="{StaticResource IconLogGeometry}" />
-                        <AccessText Text="_Günlük" Margin="10,0,0,0" VerticalAlignment="Center" />
+                        <infra:FluentIcon Style="{StaticResource NavIconStyle}" Symbol="TextBulletList" />
+                        <AccessText Text="_Günlük" Margin="{StaticResource Nav.LabelOffset}" VerticalAlignment="Center" />
                     </StackPanel>
                 </TabItem.Header>
                 <Grid>
@@ -1772,5 +1973,128 @@
                         Click="OnExitClicked" />
             </Grid>
         </Border>
+    </Grid>
+
+    <!-- ======================= Karşılama =======================
+         Brand, one card, and the way forward. The copy is four short sentences in
+         Turkish, and it promises only what the app does: it finds settings that work on
+         this network. No VPN, no anonymity, no encryption of the user's traffic. -->
+    <Grid x:Name="WelcomeOverlay"
+          Style="{StaticResource WelcomeOverlayStyle}"
+          AutomationProperties.Name="Karşılama">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- The card column is centred and capped, so the greeting reads the same in a
+             narrow window and a maximised one, and scrolls rather than clipping when the
+             window is short or the text scale is large. -->
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Padding="24,0">
+            <StackPanel MaxWidth="560"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Margin="0,40">
+
+                <!-- Brand. The existing identity, at a size that stays sharp at 200%. -->
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,32">
+                    <Border Width="52" Height="52"
+                            Background="{DynamicResource AppAccentSoftBrush}"
+                            CornerRadius="{StaticResource Radius.Tile}">
+                        <Image Width="40" Height="40"
+                               RenderOptions.BitmapScalingMode="HighQuality"
+                               Source="Assets/dpibypass-256.png" />
+                    </Border>
+                    <TextBlock Text="{Binding ProductTitle}"
+                               FontSize="{StaticResource Type.Subtitle}"
+                               FontWeight="SemiBold"
+                               Margin="14,0,0,0"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource AppTextPrimaryBrush}" />
+                </StackPanel>
+
+                <!-- The card itself. Bound to the index rather than to the text, so moving
+                     between cards re-instantiates the template and its Loaded trigger runs
+                     the cross-fade: one place, no per-card triggers, and nothing to keep in
+                     step when a card is added. -->
+                <ContentControl Content="{Binding WelcomeIndex}"
+                                ContentTemplate="{StaticResource WelcomeCardTemplate}"
+                                HorizontalAlignment="Stretch" />
+
+                <!-- Progress. Dots for the tour, nothing for the one-line greeting. -->
+                <ItemsControl ItemsSource="{Binding WelcomeSteps}"
+                              HorizontalAlignment="Center"
+                              Margin="0,32,0,0"
+                              Focusable="False"
+                              AutomationProperties.Name="{Binding WelcomeProgress}"
+                              Visibility="{Binding IsWelcomeTour, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Style="{StaticResource WelcomeDotStyle}" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Actions. Skip on the left because it is the quiet way out; Back and the
+             primary action on the right, where the eye finishes. -->
+        <Border Grid.Row="1"
+                Style="{StaticResource ChromeBorderStyle}"
+                BorderThickness="0,1,0,0"
+                Padding="24,16">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Button Grid.Column="0"
+                        Content="_Atla"
+                        MinWidth="110"
+                        Style="{StaticResource SecondaryActionButtonStyle}"
+                        AutomationProperties.Name="Tanıtımı atla"
+                        Command="{Binding WelcomeSkipCommand}"
+                        Visibility="{Binding IsWelcomeTour, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                <CheckBox Grid.Column="1"
+                          Content="Açılışta göster"
+                          Margin="20,0"
+                          HorizontalAlignment="Left"
+                          VerticalAlignment="Center"
+                          Style="{StaticResource SwitchStyle}"
+                          AutomationProperties.Name="Karşılamayı açılışta göster"
+                          IsChecked="{Binding ShowWelcomeOnStartup, Mode=TwoWay}" />
+
+                <Button Grid.Column="2"
+                        Content="_Geri"
+                        MinWidth="110"
+                        Margin="0,0,8,0"
+                        Style="{StaticResource SecondaryActionButtonStyle}"
+                        infra:ActionButton.Symbol="ArrowLeft"
+                        Command="{Binding WelcomeBackCommand}"
+                        Visibility="{Binding IsWelcomeTour, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                <Button Grid.Column="3"
+                        Content="{Binding WelcomePrimaryAction}"
+                        MinWidth="140"
+                        IsDefault="True"
+                        Style="{StaticResource PrimaryActionButtonStyle}"
+                        infra:ActionButton.Symbol="ArrowRight"
+                        Command="{Binding WelcomeNextCommand}" />
+            </Grid>
+        </Border>
+    </Grid>
+
     </Grid>
 </Window>

@@ -1,0 +1,146 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+
+    <!--
+      The design system's numbers, in one place.
+
+      Everything the window measures itself with - spacing, corner radius, type size,
+      stroke width, motion duration and easing - is a key in here, and no style or page
+      may write a literal for any of them. Colour is the one axis that is not here,
+      because it has to differ between Light.xaml and Dark.xaml; those two files carry
+      the same key set and nothing else.
+
+      Spacing is a 4/8 DIP rhythm: 4 and 8 for what is inside a control, 12/16/20 for
+      what separates controls, 24/32 for what separates regions. Nothing in between.
+    -->
+
+    <!-- ======== Spacing (4/8 DIP rhythm) ======== -->
+
+    <sys:Double x:Key="Space.2">2</sys:Double>
+    <sys:Double x:Key="Space.4">4</sys:Double>
+    <sys:Double x:Key="Space.6">6</sys:Double>
+    <sys:Double x:Key="Space.8">8</sys:Double>
+    <sys:Double x:Key="Space.12">12</sys:Double>
+    <sys:Double x:Key="Space.16">16</sys:Double>
+    <sys:Double x:Key="Space.20">20</sys:Double>
+    <sys:Double x:Key="Space.24">24</sys:Double>
+    <sys:Double x:Key="Space.32">32</sys:Double>
+    <sys:Double x:Key="Space.40">40</sys:Double>
+
+    <!-- The paddings and gaps that recur, pre-composed so a card and the card beside
+         it cannot drift apart by one DIP. -->
+    <Thickness x:Key="Pad.Card">20</Thickness>
+    <Thickness x:Key="Pad.CardCompact">14</Thickness>
+    <Thickness x:Key="Pad.Tile">14,10</Thickness>
+    <Thickness x:Key="Pad.Control">14,7</Thickness>
+    <Thickness x:Key="Pad.ControlPrimary">16,8</Thickness>
+    <Thickness x:Key="Pad.Pill">12,6</Thickness>
+    <Thickness x:Key="Pad.Page">18,14,20,14</Thickness>
+    <Thickness x:Key="Pad.TopBar">20,12</Thickness>
+
+    <Thickness x:Key="Gap.StackTight">0,0,0,8</Thickness>
+    <Thickness x:Key="Gap.Stack">0,0,0,12</Thickness>
+    <Thickness x:Key="Gap.StackWide">0,0,0,16</Thickness>
+    <Thickness x:Key="Gap.Section">0,0,0,24</Thickness>
+    <Thickness x:Key="Gap.InlineStart">8,0,0,0</Thickness>
+    <Thickness x:Key="Gap.InlineEnd">0,0,8,0</Thickness>
+
+    <!--
+      Text beside an icon, lifted 1 DIP.
+
+      WPF centres a text run's line box, and a line box reserves room for descenders
+      below the baseline whether or not the word has any. Centring that box against a
+      glyph therefore puts the letters about a pixel low every time - measured at +1.0
+      to +3.5 px across the navigation rail and +2.5 px on the primary button. A
+      bottom margin shifts a centred element up by half its value, so 2 buys the 1 DIP
+      back. It belongs next to the spacing it corrects rather than being retyped as a
+      magic number at every icon-and-label pair.
+    -->
+    <Thickness x:Key="Text.OpticalLift">0,0,0,2</Thickness>
+    <Thickness x:Key="Nav.LabelOffset">10,0,0,2</Thickness>
+
+    <!-- ======== Corner radius ======== -->
+
+    <CornerRadius x:Key="Radius.Small">4</CornerRadius>
+    <CornerRadius x:Key="Radius.Control">6</CornerRadius>
+    <CornerRadius x:Key="Radius.Tile">8</CornerRadius>
+    <CornerRadius x:Key="Radius.Card">12</CornerRadius>
+    <CornerRadius x:Key="Radius.Surface">16</CornerRadius>
+    <CornerRadius x:Key="Radius.Pill">999</CornerRadius>
+
+    <!-- ======== Stroke ======== -->
+
+    <sys:Double x:Key="Stroke.Hairline">1</sys:Double>
+    <sys:Double x:Key="Stroke.Focus">2</sys:Double>
+    <Thickness x:Key="Border.Hairline">1</Thickness>
+    <Thickness x:Key="Border.Focus">2</Thickness>
+
+    <!-- ======== Icon sizes ========
+         16 and 20 are drawn from Fluent's 20px asset, 24 and up from its 24px asset;
+         FluentIcon picks. Anything else is a size nobody drew an icon for. -->
+
+    <sys:Double x:Key="IconSize.Small">16</sys:Double>
+    <sys:Double x:Key="IconSize.Body">20</sys:Double>
+    <sys:Double x:Key="IconSize.Large">24</sys:Double>
+    <sys:Double x:Key="IconSize.Hero">32</sys:Double>
+
+    <!-- ======== Typography ========
+         The ramp this app actually uses. It is denser than the Windows 11 ramp on
+         purpose: this is a settings-shaped utility window with a lot of explanatory
+         text per card, and the wider ramp overflowed the cards at 200% text scaling.
+         Segoe UI Variable first, Segoe UI behind it for Windows 10. -->
+
+    <FontFamily x:Key="Type.Family">Segoe UI Variable Text, Segoe UI Variable, Segoe UI</FontFamily>
+    <FontFamily x:Key="Type.FamilyDisplay">Segoe UI Variable Display, Segoe UI Variable, Segoe UI</FontFamily>
+    <FontFamily x:Key="Type.FamilyMono">Cascadia Mono, Consolas, Courier New</FontFamily>
+
+    <sys:Double x:Key="Type.Hint">11.5</sys:Double>
+    <sys:Double x:Key="Type.Caption">12</sys:Double>
+    <sys:Double x:Key="Type.CaptionStrong">12.5</sys:Double>
+    <sys:Double x:Key="Type.Body">13</sys:Double>
+    <sys:Double x:Key="Type.BodyLarge">15</sys:Double>
+    <sys:Double x:Key="Type.Subtitle">19</sys:Double>
+    <sys:Double x:Key="Type.Title">21</sys:Double>
+    <sys:Double x:Key="Type.Display">30</sys:Double>
+    <sys:Double x:Key="Type.DisplayLarge">40</sys:Double>
+
+    <!-- ======== Motion ========
+         Starting points for this app, not universal constants: micro-interactions in
+         the 100-160 ms band, content transitions 180-240 ms, a significant state
+         change 250-350 ms. Everything animated reads its duration from here so the
+         whole window can be retimed in one place after watching it run.
+
+         Easing follows Fluent 2's intent rather than its exact curves: WPF's easing
+         functions are not cubic-beziers, so a decelerating move uses CubicEase/EaseOut
+         and something that both starts and stops uses EaseInOut. -->
+
+    <Duration x:Key="Motion.Instant">0:0:0.08</Duration>
+    <Duration x:Key="Motion.Fast">0:0:0.13</Duration>
+    <Duration x:Key="Motion.Micro">0:0:0.16</Duration>
+    <Duration x:Key="Motion.Content">0:0:0.2</Duration>
+    <Duration x:Key="Motion.ContentSlow">0:0:0.24</Duration>
+    <Duration x:Key="Motion.State">0:0:0.3</Duration>
+    <Duration x:Key="Motion.StateSlow">0:0:0.35</Duration>
+
+    <!-- One full turn of the progress ring. Long enough not to read as frantic on a
+         connection that takes a couple of seconds. -->
+    <Duration x:Key="Motion.RingSpin">0:0:1.4</Duration>
+
+    <CubicEase x:Key="Motion.EaseOut" EasingMode="EaseOut" />
+    <CubicEase x:Key="Motion.EaseIn" EasingMode="EaseIn" />
+    <CubicEase x:Key="Motion.EaseInOut" EasingMode="EaseInOut" />
+    <QuadraticEase x:Key="Motion.EaseOutSoft" EasingMode="EaseOut" />
+    <BackEase x:Key="Motion.Overshoot" EasingMode="EaseOut" Amplitude="0.35" />
+
+    <!-- ======== Elevation ========
+         Deliberately not DropShadowEffect. A blur is a per-frame GPU pass on every
+         surface that carries one, and this window is meant to stay smooth on a 2016
+         ultrabook with integrated graphics; depth is carried by the surface colour and
+         a hairline instead. These are the thicknesses that do it, kept here so the
+         decision is visible rather than scattered. -->
+
+    <Thickness x:Key="Elevation.Rest">0</Thickness>
+    <Thickness x:Key="Elevation.Raised">0,0,0,1</Thickness>
+
+</ResourceDictionary>

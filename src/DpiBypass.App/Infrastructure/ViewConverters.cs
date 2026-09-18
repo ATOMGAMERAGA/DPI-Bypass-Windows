@@ -102,3 +102,18 @@ public sealed class MeasuredToOpacityConverter : IValueConverter
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();
 }
+
+/// <summary>Shows an element only when a bound collection has something in it.</summary>
+/// <remarks>
+/// An empty list under a heading reads as a failure - "elenen adaylar" with nothing
+/// beneath it says the app measured nothing, when what happened is that nothing needed
+/// eliminating. The section is simply absent instead.
+/// </remarks>
+public sealed class CountToVisibilityConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is int count && count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}

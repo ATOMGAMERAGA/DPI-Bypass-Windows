@@ -6,8 +6,10 @@ using DpiBypass.App.ViewModels;
 using DpiBypass.Core;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Interop;
+using DpiBypass.Core.Config;
 using DpiBypass.Core.Ipc;
 using DpiBypass.Core.Logging;
+using DpiBypass.Core.Onboarding;
 using DpiBypass.Core.Startup;
 using Microsoft.Win32;
 
@@ -391,6 +393,11 @@ public partial class App : Application
 
         _windowWanted = _plan.ShowsWindow;
 
+        // Decided before the window is raised, so the greeting is part of the first frame
+        // rather than something that appears over an app the user has already started
+        // reading. A launch that goes to the notification area greets nobody.
+        BeginWelcomeIfThisLaunchDeservesOne(e.Args);
+
         if (_plan.ShowsWindow)
         {
             ShowMainWindow();
@@ -562,15 +569,18 @@ public partial class App : Application
     {
         try
         {
-            if (SystemParameters.ClientAreaAnimation)
-            {
-                return;
-            }
+            // Windows' own preference wins outright; the app's switch can only turn motion
+            // further down. Somebody who asked Windows for no animation does not then get
+            // some because an application's own default disagreed.
+            var wanted = SystemParameters.ClientAreaAnimation && _service?.Settings.ReduceMotion != true;
 
-            if (Resources["PageSurfaceStaticStyle"] is Style still)
+            var replacement = wanted ? "PageSurfaceAnimatedStyle" : "PageSurfaceStaticStyle";
+            if (Resources[replacement] is Style style && !ReferenceEquals(Resources["PageSurfaceStyle"], style))
             {
-                Resources["PageSurfaceStyle"] = still;
-                AppLog.Info("Sistem animasyonları kapalı; sayfa geçiş animasyonu kullanılmıyor.");
+                Resources["PageSurfaceStyle"] = style;
+                AppLog.Info(wanted
+                    ? "Sayfa geçiş animasyonu açık."
+                    : "Hareket azaltma etkin; sayfa geçiş animasyonu kullanılmıyor.");
             }
         }
         catch (Exception ex)
@@ -585,6 +595,10 @@ public partial class App : Application
         try
         {
             _window = new MainWindow(_viewModel!, _theme);
+            _viewModel!.AppearanceRequested -= OnAppearanceRequested;
+            _viewModel.AppearanceRequested += OnAppearanceRequested;
+            _viewModel.MotionPreferenceChanged -= OnMotionPreferenceChanged;
+            _viewModel.MotionPreferenceChanged += OnMotionPreferenceChanged;
             _window.PresentationChanged += OnPresentationChanged;
             _window.CloseToTrayRequested += OnCloseToTray;
             _window.ExitRequested += () => _ = ShutdownAsync();
@@ -1065,7 +1079,7 @@ public partial class App : Application
         return window is null ? description : $"{description} · {WindowInspector.Inspect(window)}";
     }
 
-    /// <summary>Turns on the compositor material, unless this machine has ruled it out.</summary>
+    /// <summary>Applies the appearance the settings ask for, as far as this machine goes.</summary>
     private void EnableWindowBackdrop()
     {
         if (_window is null)
@@ -1073,13 +1087,37 @@ public partial class App : Application
             return;
         }
 
-        if (_service?.Settings.DisableWindowBackdrop == true)
+        _window.ApplyAppearance(_service?.Settings.Appearance ?? AppearanceMode.System);
+    }
+
+    /// <summary>
+    /// Re-applies the window material after the user picked a different one in Settings.
+    /// </summary>
+    /// <remarks>
+    /// Marked as the user's own request, which is what lets it clear a suppression an
+    /// earlier watchdog put in place. Somebody opening Settings and choosing Mica has told
+    /// us more directly than any heuristic could that they can see their window.
+    /// </remarks>
+    /// <summary>
+    /// Re-picks the page surface style after the user changed the motion preference.
+    /// </summary>
+    /// <remarks>
+    /// The connection ring reacts immediately, because it reads the preference through a
+    /// binding. The page entrance cannot: it is an EventTrigger in a Style, and a Style is
+    /// sealed the first time it is applied, so an already-built page keeps the animation it
+    /// was created with. Swapping the resource covers every page not yet visited - the rail
+    /// builds them on first use - and the rest follow on the next launch.
+    /// </remarks>
+    private void OnMotionPreferenceChanged(bool _) => ApplyMotionPreference();
+
+    private void OnAppearanceRequested(AppearanceMode appearance)
+    {
+        if (_window is null)
         {
-            _window.DisableBackdrop("ayarlarda kapatılmış");
             return;
         }
 
-        _window.EnableBackdrop();
+        _window.ApplyAppearance(appearance, userInitiated: true);
     }
 
     /// <summary>
@@ -1451,6 +1489,41 @@ public partial class App : Application
     /// been drawn, because that is a different question with a different answer and
     /// conflating the two is the bug this whole path was rebuilt around.
     /// </remarks>
+    /// <summary>
+    /// Shows the greeting when this launch is one somebody made.
+    /// </summary>
+    /// <remarks>
+    /// The logon task's launch and a launch that goes straight to the notification area
+    /// are not arrivals, and neither is the window coming back from the tray later in the
+    /// session - that path never reaches here, which is the point of deciding it once, at
+    /// start-up, rather than every time the window is raised.
+    /// </remarks>
+    private void BeginWelcomeIfThisLaunchDeservesOne(string[] arguments)
+    {
+        if (_viewModel is null || _service is null || _selfTest)
+        {
+            return;
+        }
+
+        try
+        {
+            var kind = WelcomeFlow.Decide(new WelcomeContext(
+                LaunchedByUser: !StartupPlan.StartedByWindows(arguments),
+                StartingMinimised: !_plan.ShowsWindow,
+                RestoredFromTray: false,
+                HasSeenTour: _service.Settings.WelcomeCompleted,
+                ShowOnStartup: _service.Settings.ShowWelcomeOnStartup));
+
+            _viewModel.BeginWelcome(kind);
+            AppLog.Info($"Karşılama: {kind}.");
+        }
+        catch (Exception ex)
+        {
+            // A greeting is not worth a failed start.
+            AppLog.Error("Karşılama kararı verilemedi", ex);
+        }
+    }
+
     private void ShowMainWindow()
     {
         if (_window is null)

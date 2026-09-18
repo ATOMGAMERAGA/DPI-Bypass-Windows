@@ -122,7 +122,7 @@ public sealed record DnsOption(DnsMode Mode, string Display, string Description)
 }
 
 /// <summary>Everything the main window binds to.</summary>
-public sealed class MainViewModel : ObservableObject
+public sealed partial class MainViewModel : ObservableObject
 {
     /// <summary>How many lines the log page keeps. The file keeps everything.</summary>
     private const int LogCapacity = 500;
@@ -370,9 +370,13 @@ public sealed class MainViewModel : ObservableObject
         // and stops from the launch path, the tray menu and the control channel, and a
         // button that offers to start something already starting does nothing when it is
         // pressed.
-        ToggleCommand = new AsyncRelayCommand(ToggleAsync, () => !_isBusy && !IsTransitioning);
+        InitialiseConnection();
+        ToggleCommand = ConnectCommand;
         TestCommand = new AsyncRelayCommand(TestAsync);
         RetuneCommand = new AsyncRelayCommand(RetuneAsync, () => _isRunning && !IsTuning);
+        RetuneWithSpeedCommand = new AsyncRelayCommand(
+            () => RetuneAsync(measureThroughput: true),
+            () => _isRunning && !IsTuning);
         TestAllCommand = new AsyncRelayCommand(TestAllAsync);
         // Every command that measures is gated on the target being valid as well as on the
         // card being free. Without the first half, a user who typed a bad address saw the
@@ -408,6 +412,9 @@ public sealed class MainViewModel : ObservableObject
         SaveDiagnosticReportCommand = new AsyncRelayCommand(SaveDiagnosticReportAsync);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
+
+        InitialiseAppearance();
+        InitialiseWelcome();
 
         _service.SaveStatusChanged += OnSaveStatusChanged;
         _service.Changed += OnServiceChanged;
@@ -539,6 +546,36 @@ public sealed class MainViewModel : ObservableObject
     public AsyncRelayCommand TestCommand { get; }
 
     public AsyncRelayCommand RetuneCommand { get; }
+
+    /// <summary>
+    /// A sweep that also measures what each candidate does to the link's speed.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="RetuneCommand"/> and never the default, because it spends
+    /// the user's data. The button beside it says how much, before it is pressed.
+    /// </remarks>
+    public AsyncRelayCommand RetuneWithSpeedCommand { get; }
+
+    /// <summary>Whether every automatic sweep should measure speed too.</summary>
+    public bool MeasureThroughputDuringTuning
+    {
+        get => _service.Settings.MeasureThroughputDuringTuning;
+        set
+        {
+            if (_service.Settings.MeasureThroughputDuringTuning == value)
+            {
+                return;
+            }
+
+            _service.Settings.MeasureThroughputDuringTuning = value;
+            _service.SaveSettings();
+            Raise();
+        }
+    }
+
+    /// <summary>What a speed-measuring sweep costs, in the units a data plan is sold in.</summary>
+    public string ThroughputCostSummary
+        => $"Yaklaşık {_service.ThroughputCostBytes / 1024d / 1024d:F0} MB veri kullanır.";
 
     public AsyncRelayCommand TestAllCommand { get; }
 
@@ -2664,37 +2701,6 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public async Task ToggleAsync()
-    {
-        IsBusy = true;
-        var wasRunning = _isRunning;
-
-        try
-        {
-            if (wasRunning)
-            {
-                await _service.StopAsync().ConfigureAwait(true);
-            }
-            else
-            {
-                await _service.StartAsync().ConfigureAwait(true);
-            }
-        }
-        catch (Exception ex)
-        {
-            // Which of the two was attempted matters: a stop that could not put the
-            // machine's DNS back reported as "could not start" sends the user looking for
-            // the wrong problem.
-            AppLog.Error(wasRunning ? "Koruma durdurulamadı" : "Koruma başlatılamadı", ex);
-            StatusHeadline = wasRunning ? "Tam olarak durdurulamadı" : "Başlatılamadı";
-            StatusDetail = ex.Message;
-        }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
-
     private async Task RestartAsync()
     {
         IsBusy = true;
@@ -2757,17 +2763,27 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private async Task RetuneAsync()
+    private Task RetuneAsync() => RetuneAsync(measureThroughput: false);
+
+    /// <summary>
+    /// Runs a sweep, optionally including the transfer that measures sustained speed.
+    /// </summary>
+    /// <param name="measureThroughput">
+    /// Only ever true because the user pressed the button that says what it will cost.
+    /// </param>
+    private async Task RetuneAsync(bool measureThroughput)
     {
         IsTuning = true;
-        TuningStatus = "Yöntemler ölçülüyor…";
+        TuningStatus = measureThroughput
+            ? "Yöntemler ölçülüyor · hız testi dahil…"
+            : "Yöntemler ölçülüyor…";
 
         try
         {
-            var result = await _service.RetuneAsync().ConfigureAwait(true);
+            var result = await _service.RetuneAsync(measureThroughput).ConfigureAwait(true);
             TuningStatus = result?.Winner is null
                 ? "Çalışan bir yöntem bulunamadı. Farklı bir DNS modu veya kapsam deneyin."
-                : $"Seçilen yöntem: {result.Winner.Name} ({result.Trials.Count} deneme)";
+                : result.Rationale;
         }
         catch (OperationCanceledException)
         {
@@ -2801,6 +2817,7 @@ public sealed class MainViewModel : ObservableObject
 
         IsRunning = _service.State is ProtectionState.Running or ProtectionState.Degraded;
         ProtectionState = _service.State;
+        SyncConnectionWithService();
 
         // A released filter is reported as what it is. The watchdog is reopening it, and
         // saying "Koruma etkin" over traffic that is going out untouched would be the one
@@ -2855,6 +2872,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         RefreshCounters();
+        RefreshOverview();
         Raise(nameof(VodafoneModeEnabled));
         Raise(nameof(VodafoneDropIPv6));
         Raise(nameof(HotspotDiagnostics));
@@ -3193,6 +3211,7 @@ public sealed class MainViewModel : ObservableObject
     private void RefreshPresentation()
     {
         RefreshCounters();
+        RefreshTraffic();
         UpdateLatencyElapsed();
 
         // The wording is relative ("3 dk önce"), so it goes stale on its own even when
@@ -3312,6 +3331,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         TuningStatus = $"Deneniyor ({index}/{total}): {name}";
+        ReportProfileTrial(name, index, total);
     }
 
     /// <summary>
@@ -3642,5 +3662,6 @@ public sealed class MainViewModel : ObservableObject
         _service.TuningProgress -= OnTuningProgress;
         _service.DomainLearned -= OnDomainLearned;
         AppLog.Written -= OnLogWritten;
+        DisposeConnection();
     }
 }

@@ -203,12 +203,19 @@ public sealed partial class ViewModelBindingTests
     /// <summary>The element type of an <c>ObservableCollection&lt;T&gt;</c> the view model exposes.</summary>
     private static string? ItemTypeOf(string collectionName)
     {
-        var text = File.ReadAllText(RepoFiles.MainViewModel);
-        var match = Regex.Match(
-            text,
-            @"public\s+(?:ObservableCollection|IReadOnlyList|List)<([\w\.]+)>\s+" + Regex.Escape(collectionName) + @"\b");
+        foreach (var file in RepoFiles.ViewModelFiles)
+        {
+            var match = Regex.Match(
+                File.ReadAllText(file),
+                @"public\s+(?:ObservableCollection|IReadOnlyList|List)<([\w\.]+)>\s+" + Regex.Escape(collectionName) + @"\b");
 
-        return match.Success ? match.Groups[1].Value.Split('.')[^1] : null;
+            if (match.Success)
+            {
+                return match.Groups[1].Value.Split('.')[^1];
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -279,7 +286,10 @@ public sealed partial class ViewModelBindingTests
 
     private static IEnumerable<string> SourceFiles()
     {
-        yield return RepoFiles.MainViewModel;
+        foreach (var file in RepoFiles.ViewModelFiles)
+        {
+            yield return file;
+        }
 
         foreach (var file in Directory.EnumerateFiles(RepoFiles.CoreProjectDirectory, "*.cs", SearchOption.AllDirectories))
         {
@@ -297,23 +307,27 @@ public sealed partial class ViewModelBindingTests
     /// </summary>
     private static HashSet<string> DeclaredMembers()
     {
-        var text = File.ReadAllText(RepoFiles.Find("src", "DpiBypass.App", "ViewModels", "MainViewModel.cs"));
         var members = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (Match match in PublicMember().Matches(text))
+        foreach (var file in RepoFiles.ViewModelFiles)
         {
-            members.Add(match.Groups[1].Value);
-        }
+            var text = File.ReadAllText(file);
 
-        // Positional record parameters are public properties too.
-        foreach (Match match in PositionalRecord().Matches(text))
-        {
-            foreach (var parameter in match.Groups[1].Value.Split(','))
+            foreach (Match match in PublicMember().Matches(text))
             {
-                var name = parameter.Trim().Split([' ', '='], StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1);
-                if (name is { Length: > 0 })
+                members.Add(match.Groups[1].Value);
+            }
+
+            // Positional record parameters are public properties too.
+            foreach (Match match in PositionalRecord().Matches(text))
+            {
+                foreach (var parameter in match.Groups[1].Value.Split(','))
                 {
-                    members.Add(name);
+                    var name = parameter.Trim().Split([' ', '='], StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1);
+                    if (name is { Length: > 0 })
+                    {
+                        members.Add(name);
+                    }
                 }
             }
         }

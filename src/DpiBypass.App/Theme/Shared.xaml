@@ -2,65 +2,63 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:infra="clr-namespace:DpiBypass.App.Infrastructure">
 
+    <ResourceDictionary.MergedDictionaries>
+        <!-- Tokens first: every style below reads its numbers from there with
+             StaticResource, and a StaticResource can only see what was merged before
+             it. Icons.xaml is generated from the official Fluent assets and is only
+             ever read through FluentIcon. -->
+        <ResourceDictionary Source="Tokens.xaml" />
+        <ResourceDictionary Source="Icons.xaml" />
+    </ResourceDictionary.MergedDictionaries>
+
     <!--
-      Design system for the main window. Everything visual key belongs here or to
-      the palettes; controls never embed a colour or metric of their own. Brushes
-      are reached through DynamicResource so a live palette swap repaints the whole
-      window without rebuilding it.
+      Design system for the main window. No style here writes a colour, a size, a
+      radius or a duration of its own: colour comes from the palette (Light.xaml /
+      Dark.xaml, swapped live by ThemeManager through DynamicResource) and every other
+      number comes from Tokens.xaml. That is the whole rule, and it is what lets the
+      window be re-spaced or re-timed without reading 1800 lines of markup.
     -->
 
-    <!-- ======== Geometry: small stroke icons, drawn on a 24x24 grid. ========
-         Kept as vector resources rather than a font dependency, so they render
-         identically on Windows 10 (no Segoe Fluent Icons) and Windows 11. -->
-    <Geometry x:Key="IconShieldGeometry">M 12,3 L 19,5.5 L 19,11 C 19,15.8 16,19.6 12,21 C 8,19.6 5,15.8 5,11 L 5,5.5 Z</Geometry>
-    <Geometry x:Key="IconLayersGeometry">M 12,3 L 21,8 L 12,13 L 3,8 Z M 3,12 L 12,17 L 21,12 M 3,16 L 12,21 L 21,16</Geometry>
-    <Geometry x:Key="IconGlobeGeometry">M 12,3 A 9,9 0 1 0 12,21 A 9,9 0 1 0 12,3 M 3,12 L 21,12 M 12,3 C 8.5,6.5 8.5,17.5 12,21 C 15.5,17.5 15.5,6.5 12,3</Geometry>
-    <Geometry x:Key="IconSignalGeometry">M 4,9.5 A 12,12 0 0 1 20,9.5 M 7,13 A 8,8 0 0 1 17,13 M 10,16.5 A 4,4 0 0 1 14,16.5 M 11.2,19.5 A 0.8,0.8 0 1 0 12.8,19.5 A 0.8,0.8 0 1 0 11.2,19.5</Geometry>
-    <Geometry x:Key="IconSlidersGeometry">M 4,7 L 12,7 M 16,7 L 20,7 M 16,4.5 L 16,9.5 M 4,17 L 8,17 M 12,17 L 20,17 M 12,14.5 L 12,19.5</Geometry>
-    <Geometry x:Key="IconLogGeometry">M 6,3 L 14,3 L 18,7 L 18,21 L 6,21 Z M 14,3 L 14,7 L 18,7 M 9,12 L 15,12 M 9,16 L 15,16</Geometry>
-    <Geometry x:Key="IconChevronDownGeometry">M 6,9 L 12,15 L 18,9</Geometry>
-    <Geometry x:Key="IconCheckGeometry">M 5,12.5 L 10,17.5 L 19,7</Geometry>
-    <Geometry x:Key="IconWarningGeometry">M 12,4 L 21,19 L 3,19 Z M 12,10 L 12,14.5 M 11.3,17 A 0.7,0.7 0 1 0 12.7,17 A 0.7,0.7 0 1 0 11.3,17</Geometry>
-    <Geometry x:Key="IconSearchGeometry">M 10.5,4 A 6.5,6.5 0 1 0 10.5,17 A 6.5,6.5 0 1 0 10.5,4 M 15.3,15.3 L 20,20</Geometry>
-    <Geometry x:Key="IconCloseGeometry">M 6,6 L 18,18 M 18,6 L 6,18</Geometry>
+    <!-- ======== Icons ========
+         Microsoft Fluent System Icons, filled paths from the official assets rather
+         than strokes drawn here by hand. FluentIcon resolves symbol + size to the
+         right drawing; see Infrastructure/FluentIcon.cs and Theme/Icons.xaml. -->
 
-    <Geometry x:Key="IconPlusGeometry">M 12,5 L 12,19 M 5,12 L 19,12</Geometry>
-    <Geometry x:Key="IconRefreshGeometry">M 19,8 A 8,8 0 1 0 20,15 M 19,3 L 19,8 L 14,8</Geometry>
-
-    <!-- Stroke icon defaults: uniform scale, round joins, theme-driven colour. -->
-    <Style x:Key="StrokeIconStyle" TargetType="Path">
-        <Setter Property="Width" Value="18" />
-        <Setter Property="Height" Value="18" />
-        <Setter Property="Stretch" Value="Uniform" />
-        <Setter Property="Stroke" Value="{DynamicResource AppTextSecondaryBrush}" />
-        <Setter Property="StrokeThickness" Value="1.6" />
-        <Setter Property="StrokeStartLineCap" Value="Round" />
-        <Setter Property="StrokeEndLineCap" Value="Round" />
-        <Setter Property="StrokeLineJoin" Value="Round" />
+    <!-- No template: FluentIcon draws itself. A templated Path with Stretch="None" reports
+         its geometry's bounds as its desired size, and WPF layout-clips anything arranged
+         into less than it asked for - so every 16 DIP icon would lose its right and bottom
+         fifth before the transform that would have made it fit ever ran. -->
+    <Style TargetType="{x:Type infra:FluentIcon}">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+        <Setter Property="Size" Value="{StaticResource IconSize.Body}" />
         <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="UseLayoutRounding" Value="True" />
     </Style>
 
-    <!-- Navigation rail icon; lights up in the accent colour for the selected page. -->
-    <Style x:Key="NavIconStyle" TargetType="Path" BasedOn="{StaticResource StrokeIconStyle}">
+    <!-- Navigation rail icon: secondary while resting, accent and filled once its page
+         is the one on screen - which is exactly the Regular/Filled pairing Fluent's
+         family is drawn for. -->
+    <Style x:Key="NavIconStyle" TargetType="{x:Type infra:FluentIcon}" BasedOn="{StaticResource {x:Type infra:FluentIcon}}">
+        <Setter Property="Size" Value="{StaticResource IconSize.Body}" />
         <Style.Triggers>
             <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=TabItem}}" Value="True">
-                <Setter Property="Stroke" Value="{DynamicResource AppAccentBrush}" />
+                <Setter Property="Foreground" Value="{DynamicResource AppAccentBrush}" />
+                <Setter Property="Filled" Value="True" />
             </DataTrigger>
         </Style.Triggers>
     </Style>
 
-    <CornerRadius x:Key="CardCornerRadius">12</CornerRadius>
-    <CornerRadius x:Key="TileCornerRadius">8</CornerRadius>
-    <CornerRadius x:Key="PillCornerRadius">14</CornerRadius>
 
     <!-- ======== Cards and panels ======== -->
 
     <Style x:Key="CardStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppCardBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="{StaticResource CardCornerRadius}" />
-        <Setter Property="Padding" Value="20" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Card}" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Card}" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
         <Style.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
@@ -78,8 +76,8 @@
     <!-- A quiet stat tile: one label and one value, used in rows of the status page. -->
     <Style x:Key="InfoTileStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
-        <Setter Property="CornerRadius" Value="{StaticResource TileCornerRadius}" />
-        <Setter Property="Padding" Value="14,10" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Tile}" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Tile}" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
     </Style>
 
@@ -87,8 +85,8 @@
     <Style x:Key="MonoPanelStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppCodeBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="{StaticResource TileCornerRadius}" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Tile}" />
         <Setter Property="Padding" Value="14,11" />
     </Style>
 
@@ -102,12 +100,18 @@
 
     <!-- Severity-reactive status pill for the top bar. Severity is "ok", "warn" or
          "off"; the shape and the colour both change so state is never colour-only. -->
+    <!--
+      A chip, not a lozenge. This used to carry Radius.Pill, which rounds the ends into
+      semicircles - beside the 8-radius primary action two chips along, that read as a
+      stray oval floating behind the words rather than as part of the same bar. It takes
+      the action's own radius so the top bar has one corner language.
+    -->
     <Style x:Key="StatusPillBorderStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppDividerBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="{StaticResource PillCornerRadius}" />
-        <Setter Property="Padding" Value="12,6" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Tile}" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Pill}" />
         <Style.Triggers>
             <DataTrigger Binding="{Binding StatusSeverity}" Value="ok">
                 <Setter Property="Background" Value="{DynamicResource AppSuccessSoftBrush}" />
@@ -120,20 +124,23 @@
         </Style.Triggers>
     </Style>
 
-    <!-- The pill's marker glyph: shield while off, check when ok, warning when warn. -->
-    <Style x:Key="StatusPillIconStyle" TargetType="Path" BasedOn="{StaticResource StrokeIconStyle}">
-        <Setter Property="Width" Value="14" />
-        <Setter Property="Height" Value="14" />
-        <Setter Property="Data" Value="{StaticResource IconShieldGeometry}" />
-        <Setter Property="Stroke" Value="{DynamicResource AppNeutralBrush}" />
+    <!-- The pill's marker glyph: shield while off, a checked shield when ok, warning
+         when warn. The glyph changes with the state as well as the colour, so the
+         status is never carried by hue alone. -->
+    <Style x:Key="StatusPillIconStyle" TargetType="{x:Type infra:FluentIcon}" BasedOn="{StaticResource {x:Type infra:FluentIcon}}">
+        <Setter Property="Size" Value="{StaticResource IconSize.Small}" />
+        <Setter Property="Symbol" Value="Shield" />
+        <Setter Property="Foreground" Value="{DynamicResource AppNeutralBrush}" />
         <Style.Triggers>
             <DataTrigger Binding="{Binding StatusSeverity}" Value="ok">
-                <Setter Property="Data" Value="{StaticResource IconCheckGeometry}" />
-                <Setter Property="Stroke" Value="{DynamicResource AppSuccessBrush}" />
+                <Setter Property="Symbol" Value="ShieldCheckmark" />
+                <Setter Property="Filled" Value="True" />
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
             </DataTrigger>
             <DataTrigger Binding="{Binding StatusSeverity}" Value="warn">
-                <Setter Property="Data" Value="{StaticResource IconWarningGeometry}" />
-                <Setter Property="Stroke" Value="{DynamicResource AppWarningBrush}" />
+                <Setter Property="Symbol" Value="Warning" />
+                <Setter Property="Filled" Value="True" />
+                <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
             </DataTrigger>
         </Style.Triggers>
     </Style>
@@ -154,15 +161,14 @@
         </Style.Triggers>
     </Style>
 
-    <Style x:Key="StatusHeroIconStyle" TargetType="Path" BasedOn="{StaticResource StatusPillIconStyle}">
-        <Setter Property="Width" Value="22" />
-        <Setter Property="Height" Value="22" />
+    <Style x:Key="StatusHeroIconStyle" TargetType="{x:Type infra:FluentIcon}" BasedOn="{StaticResource StatusPillIconStyle}">
+        <Setter Property="Size" Value="{StaticResource IconSize.Large}" />
     </Style>
 
     <!-- ======== Typography ======== -->
 
     <Style x:Key="PageTitleStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="21" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Title}" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
         <Setter Property="Margin" Value="0,0,0,4" />
@@ -170,32 +176,32 @@
     </Style>
 
     <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="15" />
+        <Setter Property="FontSize" Value="{StaticResource Type.BodyLarge}" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
-        <Setter Property="Margin" Value="0,0,0,8" />
+        <Setter Property="Margin" Value="{StaticResource Gap.StackTight}" />
         <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
 
     <Style x:Key="BodyStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Body}" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
         <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
 
     <Style x:Key="CaptionStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyStyle}">
-        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Caption}" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
     </Style>
 
     <Style x:Key="HintStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
-        <Setter Property="FontSize" Value="11.5" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Hint}" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextTertiaryBrush}" />
     </Style>
 
     <Style x:Key="MonospaceStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyStyle}">
-        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New" />
-        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontFamily" Value="{StaticResource Type.FamilyMono}" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Caption}" />
     </Style>
 
     <Style x:Key="FieldLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
@@ -219,7 +225,7 @@
     <Style x:Key="NoticeCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
         <Setter Property="Background" Value="{DynamicResource AppWarningSoftBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppWarningBrush}" />
-        <Setter Property="Padding" Value="14" />
+        <Setter Property="Padding" Value="{StaticResource Pad.CardCompact}" />
     </Style>
 
     <Style x:Key="NoticeTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
@@ -294,7 +300,7 @@
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
         <!-- Padding becomes the content area's margin around the pages. -->
-        <Setter Property="Padding" Value="18,14,20,14" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Page}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabControl">
@@ -357,7 +363,7 @@
 
     <Style x:Key="NavTabItemStyle" TargetType="TabItem">
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Body}" />
         <!--
           The 2px gap between rail items is deliberately NOT a margin on the TabItem.
           A margin here is layout the parent panel has to honour, and any panel that
@@ -384,7 +390,7 @@
                             Background="Transparent"
                             BorderBrush="Transparent"
                             BorderThickness="1"
-                            CornerRadius="6"
+                            CornerRadius="{StaticResource Radius.Control}"
                             MinHeight="38"
                             Margin="0,0,0,2"
                             Padding="10,8"
@@ -409,7 +415,7 @@
                                               VerticalAlignment="Center"
                                               ContentSource="Header"
                                               RecognizesAccessKey="True"
-                                              TextBlock.FontSize="13" />
+                                              TextBlock.FontSize="{StaticResource Type.Body}" />
                         </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
@@ -441,10 +447,10 @@
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
         <Setter Property="Background" Value="{DynamicResource AppCardBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Body}" />
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Padding" Value="14,7" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Control}" />
         <Setter Property="MinHeight" Value="36" />
         <Setter Property="HorizontalAlignment" Value="Left" />
         <Setter Property="VerticalAlignment" Value="Center" />
@@ -460,7 +466,7 @@
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="8"
+                                CornerRadius="{StaticResource Radius.Tile}"
                                 Padding="{TemplateBinding Padding}"
                                 SnapsToDevicePixels="True">
                             <Grid HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
@@ -469,22 +475,23 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
-                                <Path x:Name="ActionIcon"
-                                      Style="{StaticResource StrokeIconStyle}"
-                                      Width="16" Height="16" Margin="0,0,8,0"
-                                      Data="{TemplateBinding infra:ActionButton.Icon}"
-                                      Stroke="{TemplateBinding Foreground}" />
+                                <infra:FluentIcon x:Name="ActionIcon"
+                                                  Size="{StaticResource IconSize.Small}"
+                                                  Margin="{StaticResource Gap.InlineEnd}"
+                                                  Symbol="{TemplateBinding infra:ActionButton.Symbol}"
+                                                  Foreground="{TemplateBinding Foreground}" />
                                 <ContentPresenter Grid.Column="1" RecognizesAccessKey="True"
-                                                  VerticalAlignment="Center" />
+                                                  VerticalAlignment="Center"
+                                                  Margin="{StaticResource Text.OpticalLift}" />
                             </Grid>
                         </Border>
-                        <Border x:Name="FocusRing" Margin="-3" CornerRadius="10"
+                        <Border x:Name="FocusRing" Margin="-3" CornerRadius="{StaticResource Radius.Tile}"
                                 BorderThickness="2" IsHitTestVisible="False"
                                 BorderBrush="{DynamicResource AppFocusStrokeBrush}"
                                 Visibility="Collapsed" />
                     </Grid>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="infra:ActionButton.Icon" Value="{x:Null}">
+                        <Trigger Property="infra:ActionButton.Symbol" Value="{x:Null}">
                             <Setter TargetName="ActionIcon" Property="Visibility" Value="Collapsed" />
                         </Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True">
@@ -515,7 +522,7 @@
         <Setter Property="Foreground" Value="{DynamicResource AppOnAccentTextBrush}" />
         <Setter Property="Background" Value="{DynamicResource AppAccentBrush}" />
         <Setter Property="BorderBrush" Value="Transparent" />
-        <Setter Property="Padding" Value="16,8" />
+        <Setter Property="Padding" Value="{StaticResource Pad.ControlPrimary}" />
         <Setter Property="MinHeight" Value="38" />
         <Style.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
@@ -557,8 +564,8 @@
     </Style>
 
     <Style x:Key="MonospaceListStyle" TargetType="ListBox" BasedOn="{StaticResource PlainListStyle}">
-        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New" />
-        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontFamily" Value="{StaticResource Type.FamilyMono}" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Caption}" />
     </Style>
 
     <!-- A list whose items are selectable cards, which is how Windows 11 settings
@@ -576,7 +583,7 @@
     </Style>
 
     <Style x:Key="ChoiceCardStyle" TargetType="ListBoxItem">
-        <Setter Property="Margin" Value="0,0,0,8" />
+        <Setter Property="Margin" Value="{StaticResource Gap.StackTight}" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
@@ -587,7 +594,7 @@
                             Background="{DynamicResource AppCardBackgroundBrush}"
                             BorderBrush="{DynamicResource AppCardBorderBrush}"
                             BorderThickness="1"
-                            CornerRadius="{StaticResource TileCornerRadius}"
+                            CornerRadius="{StaticResource Radius.Tile}"
                             Padding="14,12"
                             SnapsToDevicePixels="True">
                         <Grid>
@@ -642,7 +649,7 @@
                             Background="Transparent"
                             BorderBrush="Transparent"
                             BorderThickness="1"
-                            CornerRadius="5"
+                            CornerRadius="{StaticResource Radius.Small}"
                             Padding="{TemplateBinding Padding}"
                             SnapsToDevicePixels="True">
                         <ContentPresenter VerticalAlignment="Center" />
@@ -665,13 +672,13 @@
 
     <Style x:Key="TagStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
-        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Small}" />
         <Setter Property="Padding" Value="7,2" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
     <Style x:Key="TagTextStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Hint}" />
         <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
     </Style>
 
@@ -680,14 +687,14 @@
     <Style x:Key="RecommendedTagBorderStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="9" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
         <Setter Property="Padding" Value="8,2" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
     <Style x:Key="RecommendedTagTextStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Hint}" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{DynamicResource AppAccentBrush}" />
     </Style>
@@ -695,23 +702,23 @@
     <Style x:Key="BetaBadgeStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
         <Setter Property="Padding" Value="8,2" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
     <Style x:Key="BetaBadgeTextStyle" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{DynamicResource AppAccentBrush}" />
-        <Setter Property="FontSize" Value="10" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Hint}" />
         <Setter Property="FontWeight" Value="Bold" />
     </Style>
 
     <Style x:Key="StatusPanelStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppCodeBackgroundBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="{StaticResource TileCornerRadius}" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Tile}" />
         <Setter Property="Padding" Value="14,11" />
     </Style>
 
@@ -720,7 +727,7 @@
     <!-- A Windows 11-style switch with a full clickable label and keyboard focus. -->
     <Style x:Key="SwitchStyle" TargetType="CheckBox">
         <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
-        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Body}" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
@@ -800,7 +807,7 @@
                                             Background="Transparent"
                                             BorderBrush="Transparent"
                                             BorderThickness="1"
-                                            CornerRadius="6"
+                                            CornerRadius="{StaticResource Radius.Control}"
                                             Padding="2,4"
                                             SnapsToDevicePixels="True">
                                         <Grid>
@@ -809,33 +816,49 @@
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <ContentPresenter Grid.Column="0" VerticalAlignment="Center" ContentSource="Content" RecognizesAccessKey="True" />
-                                            <Path x:Name="Chevron"
-                                                  Grid.Column="1"
-                                                  Data="{StaticResource IconChevronDownGeometry}"
-                                                  Width="14"
-                                                  Height="14"
-                                                  Stretch="Uniform"
-                                                  Stroke="{DynamicResource AppTextSecondaryBrush}"
-                                                  StrokeThickness="1.8"
-                                                  StrokeStartLineCap="Round"
-                                                  StrokeEndLineCap="Round"
-                                                  StrokeLineJoin="Round"
-                                                  Margin="10,0,2,0"
-                                                  VerticalAlignment="Center"
-                                                  RenderTransformOrigin="0.5,0.5">
-                                                <Path.RenderTransform>
+                                            <infra:FluentIcon x:Name="Chevron"
+                                                              Grid.Column="1"
+                                                              Symbol="ChevronDown"
+                                                              Size="{StaticResource IconSize.Small}"
+                                                              Foreground="{DynamicResource AppTextSecondaryBrush}"
+                                                              Margin="10,0,2,0"
+                                                              RenderTransformOrigin="0.5,0.5">
+                                                <infra:FluentIcon.RenderTransform>
+                                                    <!-- Its own instance, never a shared
+                                                         resource: a Freezable in a style
+                                                         setter is frozen and animating it
+                                                         throws. -->
                                                     <RotateTransform Angle="0" />
-                                                </Path.RenderTransform>
-                                            </Path>
+                                                </infra:FluentIcon.RenderTransform>
+                                            </infra:FluentIcon>
                                         </Grid>
                                     </Border>
                                     <ControlTemplate.Triggers>
                                         <Trigger Property="IsChecked" Value="True">
-                                            <Setter TargetName="Chevron" Property="RenderTransform">
-                                                <Setter.Value>
-                                                    <RotateTransform Angle="180" />
-                                                </Setter.Value>
-                                            </Setter>
+                                            <Trigger.EnterActions>
+                                                <BeginStoryboard>
+                                                    <Storyboard>
+                                                        <DoubleAnimation
+                                                            Storyboard.TargetName="Chevron"
+                                                            Storyboard.TargetProperty="RenderTransform.(RotateTransform.Angle)"
+                                                            To="180"
+                                                            Duration="{StaticResource Motion.Fast}"
+                                                            EasingFunction="{StaticResource Motion.EaseOut}" />
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </Trigger.EnterActions>
+                                            <Trigger.ExitActions>
+                                                <BeginStoryboard>
+                                                    <Storyboard>
+                                                        <DoubleAnimation
+                                                            Storyboard.TargetName="Chevron"
+                                                            Storyboard.TargetProperty="RenderTransform.(RotateTransform.Angle)"
+                                                            To="0"
+                                                            Duration="{StaticResource Motion.Fast}"
+                                                            EasingFunction="{StaticResource Motion.EaseOut}" />
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </Trigger.ExitActions>
                                         </Trigger>
                                         <Trigger Property="IsMouseOver" Value="True">
                                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
@@ -861,6 +884,392 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- ======== The connection control ========
+         The one thing the main screen is for. A ring around a round button: the ring
+         carries the state, the button carries the action, and the label under them says
+         in words what both of them are showing.
+
+         Every animation here is opacity or a RenderTransform, which are the two things
+         WPF composites without re-laying anything out. Nothing blurs, nothing resizes a
+         layout slot, and nothing runs at all while the window is off screen - the whole
+         control's motion is gated on MotionEnabled, which is Windows' own animation
+         preference AND the app's own switch. -->
+
+    <!-- The unlit ring. Always drawn, so the control has the same silhouette in every
+         state and the lit arc has something to travel along. -->
+    <Style x:Key="ConnectionRingTrackStyle" TargetType="Ellipse">
+        <Setter Property="Stroke" Value="{DynamicResource AppDividerBrush}" />
+        <Setter Property="StrokeThickness" Value="3" />
+        <Setter Property="Fill" Value="Transparent" />
+    </Style>
+
+    <!--
+      The travelling arc.
+
+      StrokeDashArray is in multiples of StrokeThickness, so at thickness 3 the ring's
+      553 DIP circumference is 184 units: a 46/139 pattern draws one quarter of the
+      circle and leaves the rest open. It turns by rotating the whole ellipse, which is
+      a composited transform rather than a per-frame geometry rebuild.
+
+      The RotateTransform itself is declared on the element in MainWindow.xaml, never
+      here. A Freezable in a Style setter is frozen and shared by every element the
+      style touches, and animating it throws "cannot animate on an immutable object
+      instance" - which is how this window once shipped a page transition that never
+      ran for the life of the process.
+    -->
+    <Style x:Key="ConnectionRingArcStyle" TargetType="Ellipse">
+        <Setter Property="Stroke" Value="{DynamicResource AppAccentBrush}" />
+        <Setter Property="StrokeThickness" Value="3" />
+        <Setter Property="StrokeDashArray" Value="46 139" />
+        <Setter Property="StrokeDashCap" Value="Round" />
+        <Setter Property="Fill" Value="Transparent" />
+        <Setter Property="Opacity" Value="0" />
+        <Setter Property="IsHitTestVisible" Value="False" />
+        <Style.Triggers>
+            <!-- Turning: something is actually happening and motion is allowed. -->
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsConnectionWorking}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard x:Name="SpinStoryboard">
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="1"
+                                             Duration="{StaticResource Motion.Fast}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(RotateTransform.Angle)"
+                                             From="0" To="360"
+                                             Duration="{StaticResource Motion.RingSpin}"
+                                             RepeatBehavior="Forever" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+                <MultiDataTrigger.ExitActions>
+                    <StopStoryboard BeginStoryboardName="SpinStoryboard" />
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="0"
+                                             Duration="{StaticResource Motion.Fast}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.ExitActions>
+            </MultiDataTrigger>
+
+            <!-- Working with motion switched off: the arc is shown standing still, so the
+                 state is still visible without anything moving. -->
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsConnectionWorking}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="False" />
+                </MultiDataTrigger.Conditions>
+                <Setter Property="Opacity" Value="1" />
+            </MultiDataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- The finished ring: a complete circle that arrives once, on success. -->
+    <Style x:Key="ConnectionRingCompleteStyle" TargetType="Ellipse">
+        <Setter Property="Stroke" Value="{DynamicResource AppSuccessBrush}" />
+        <Setter Property="StrokeThickness" Value="3" />
+        <Setter Property="Fill" Value="Transparent" />
+        <Setter Property="Opacity" Value="0" />
+        <Setter Property="IsHitTestVisible" Value="False" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Connected">
+                <DataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.EnterActions>
+                <DataTrigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="0"
+                                             Duration="{StaticResource Motion.Content}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.ExitActions>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Failed">
+                <Setter Property="Stroke" Value="{DynamicResource AppDangerBrush}" />
+                <Setter Property="Opacity" Value="1" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
+      The button in the middle. Its template is the only place the disc, the glyph and
+      the press response are described, so every state of the control is one file.
+    -->
+    <Style x:Key="ConnectButtonStyle" TargetType="Button">
+        <Setter Property="Background" Value="{DynamicResource AppAccentBrush}" />
+        <Setter Property="Foreground" Value="{DynamicResource AppOnAccentTextBrush}" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Width" Value="132" />
+        <Setter Property="Height" Value="132" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid x:Name="Root" RenderTransformOrigin="0.5,0.5" Background="Transparent">
+                        <Grid.RenderTransform>
+                            <ScaleTransform ScaleX="1" ScaleY="1" />
+                        </Grid.RenderTransform>
+
+                        <Ellipse x:Name="FocusRing"
+                                 Stroke="{DynamicResource AppFocusStrokeBrush}"
+                                 StrokeThickness="{StaticResource Stroke.Focus}"
+                                 Margin="-6"
+                                 Opacity="0"
+                                 IsHitTestVisible="False" />
+
+                        <Ellipse x:Name="Disc" Fill="{TemplateBinding Background}" />
+
+                        <infra:FluentIcon x:Name="Glyph"
+                                          Symbol="{Binding ConnectionSymbol}"
+                                          Size="{StaticResource IconSize.Hero}"
+                                          Foreground="{TemplateBinding Foreground}"
+                                          RenderTransformOrigin="0.5,0.5">
+                            <infra:FluentIcon.RenderTransform>
+                                <ScaleTransform ScaleX="1" ScaleY="1" />
+                            </infra:FluentIcon.RenderTransform>
+                        </infra:FluentIcon>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppAccentHoverBrush}" />
+                        </Trigger>
+
+                        <!-- The press response: a small, quick squeeze. Scale rather than
+                             a colour change, because the disc already changes colour with
+                             the connection state and two meanings on one channel is how a
+                             control stops reading. -->
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppAccentPressedBrush}" />
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)"
+                                                         To="0.96" Duration="{StaticResource Motion.Instant}" />
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)"
+                                                         To="0.96" Duration="{StaticResource Motion.Instant}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)"
+                                                         To="1" Duration="{StaticResource Motion.Fast}"
+                                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                                        <DoubleAnimation Storyboard.TargetName="Root"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)"
+                                                         To="1" Duration="{StaticResource Motion.Fast}"
+                                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="FocusRing" Property="Opacity" Value="1" />
+                        </Trigger>
+
+                        <!-- Connected: the disc goes green and the tick arrives with a
+                             single settling step rather than appearing. -->
+                        <DataTrigger Binding="{Binding ConnectionPhase}" Value="Connected">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppSuccessBrush}" />
+                            <DataTrigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Glyph"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)"
+                                                         From="0.6" To="1"
+                                                         Duration="{StaticResource Motion.State}"
+                                                         EasingFunction="{StaticResource Motion.Overshoot}" />
+                                        <DoubleAnimation Storyboard.TargetName="Glyph"
+                                                         Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)"
+                                                         From="0.6" To="1"
+                                                         Duration="{StaticResource Motion.State}"
+                                                         EasingFunction="{StaticResource Motion.Overshoot}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </DataTrigger.EnterActions>
+                        </DataTrigger>
+
+                        <DataTrigger Binding="{Binding ConnectionPhase}" Value="Failed">
+                            <Setter TargetName="Disc" Property="Fill" Value="{DynamicResource AppDangerBrush}" />
+                        </DataTrigger>
+
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.6" />
+                            <Setter Property="Cursor" Value="Arrow" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- The headline under the ring. It changes often, so it changes with a short
+         cross-fade rather than snapping - which at this size reads as a jump. -->
+    <Style x:Key="ConnectionTitleStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource Type.Subtitle}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Connected">
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding ConnectionPhase}" Value="Failed">
+                <Setter Property="Foreground" Value="{DynamicResource AppDangerBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="ConnectionDetailStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="MaxWidth" Value="360" />
+        <Setter Property="Margin" Value="0,6,0,0" />
+        <Style.Triggers>
+            <Trigger Property="Text" Value="">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- ======== The welcome layer ========
+         Two styles and a template. The shell and the greeting swap by Visibility rather
+         than by opacity, so focus and hit-testing follow the switch and a control behind
+         the greeting cannot be reached with Tab. -->
+
+    <Style x:Key="AppShellStyle" TargetType="Grid">
+        <Setter Property="Visibility" Value="Visible" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsWelcomeVisible}" Value="True">
+                <Setter Property="Visibility" Value="Collapsed" />
+
+                <!-- ExitActions, not EnterActions: they run when the greeting ends, and
+                     they do not run at all on a launch that never showed one. A fade-in on
+                     every start would delay the first frame for no reason. -->
+                <DataTrigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.ContentSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.ExitActions>
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="WelcomeOverlayStyle" TargetType="Grid">
+        <Setter Property="Visibility" Value="Collapsed" />
+        <Setter Property="Background" Value="Transparent" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsWelcomeVisible}" Value="True">
+                <Setter Property="Visibility" Value="Visible" />
+                <DataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.ContentSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.EnterActions>
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
+      One card of the greeting.
+
+      Bound to the card index rather than to its text: changing the index re-instantiates
+      the template, whose Loaded trigger cross-fades the new card in. That is one
+      animation for any number of cards, and nothing to keep in step when one is added.
+
+      The fade is opacity only - no slide, no scale. Reduced-motion guidance is about
+      movement rather than about change, so this stays on whatever the motion preference
+      says, and the animations that do move (the connection ring, the tick) are the ones
+      gated on it.
+    -->
+    <DataTemplate x:Key="WelcomeCardTemplate">
+        <StackPanel HorizontalAlignment="Center">
+            <StackPanel.Triggers>
+                <EventTrigger RoutedEvent="Loaded">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.Micro}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </StackPanel.Triggers>
+
+            <Border Width="72" Height="72"
+                    HorizontalAlignment="Center"
+                    CornerRadius="{StaticResource Radius.Surface}"
+                    Background="{DynamicResource AppAccentSoftBrush}">
+                <infra:FluentIcon Symbol="{Binding DataContext.WelcomeSymbol, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  Filled="True"
+                                  Size="{StaticResource IconSize.Hero}"
+                                  Foreground="{DynamicResource AppAccentBrush}" />
+            </Border>
+
+            <TextBlock Text="{Binding DataContext.WelcomeTitle, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.Display}"
+                       FontWeight="SemiBold"
+                       Margin="0,24,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource AppTextPrimaryBrush}" />
+
+            <TextBlock Text="{Binding DataContext.WelcomeBody, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.BodyLarge}"
+                       Margin="0,12,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       LineHeight="24"
+                       Foreground="{DynamicResource AppTextSecondaryBrush}" />
+        </StackPanel>
+    </DataTemplate>
+
+    <Style x:Key="WelcomeDotStyle" TargetType="Border">
+        <Setter Property="Width" Value="8" />
+        <Setter Property="Height" Value="8" />
+        <Setter Property="Margin" Value="4,0" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
+        <Setter Property="Background" Value="{DynamicResource AppDividerBrush}" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                <Setter Property="Background" Value="{DynamicResource AppAccentBrush}" />
+                <Setter Property="Width" Value="22" />
+            </DataTrigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ======== Page transitions ======== -->
@@ -893,7 +1302,7 @@
       the dispatcher's handler, and left an error in the log for a 180ms flourish that
       never once ran.
     -->
-    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer" BasedOn="{StaticResource PageSurfaceStaticStyle}">
+    <Style x:Key="PageSurfaceAnimatedStyle" TargetType="ScrollViewer" BasedOn="{StaticResource PageSurfaceStaticStyle}">
         <Style.Triggers>
             <EventTrigger RoutedEvent="Loaded">
                 <BeginStoryboard>
@@ -909,5 +1318,11 @@
             </EventTrigger>
         </Style.Triggers>
     </Style>
+
+    <!-- What the pages actually use. App.ApplyMotionPreference points this key at one of
+         the two above, before the window is built and again when the preference changes:
+         a Style is sealed the first time it is applied, so the choice has to be made by
+         swapping the resource rather than by editing a trigger collection at runtime. -->
+    <Style x:Key="PageSurfaceStyle" TargetType="ScrollViewer" BasedOn="{StaticResource PageSurfaceAnimatedStyle}" />
 
 </ResourceDictionary>
