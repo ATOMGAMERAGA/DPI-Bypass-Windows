@@ -398,6 +398,38 @@ Test-Case 'the update does not wait on the uninstall process tree' {
     if ($poll -lt 0) { throw 'the registry key no longer decides when the uninstall is finished' }
 }
 
+Test-Case 'an uninstall that will not finish is ended rather than raced' {
+    <#
+        The update removes the old version and then installs over the same folder, so
+        the two must never overlap. An uninstall that outlives its budget is not busy,
+        it is blocked - builds before this one answered --restore-hosts with the main
+        window instead of the job, hidden, so the uninstaller sat waiting for a window
+        nobody could see to be closed.
+
+        Going ahead anyway is the worst of the options: Setup clears that same process
+        as it starts, which releases the half-finished uninstall to carry on deleting
+        the folder the installation is at that moment writing into.
+    #>
+    $script = Get-Content -Path $scriptPath -Raw
+
+    $poll = $script.IndexOf('while ((Test-Path $installed.RegistryPath)', [StringComparison]::Ordinal)
+    if ($poll -lt 0) { throw 'the uninstall is no longer waited for' }
+
+    $stop = $script.IndexOf("Get-Process -Name 'DpiBypass'", $poll, [StringComparison]::Ordinal)
+    if ($stop -lt 0) { throw 'a stuck uninstall is left running while the install starts' }
+
+    $setup = $script.IndexOf('$process = Start-Process @setupStart', [StringComparison]::Ordinal)
+    if ($setup -lt 0) { throw 'Setup is no longer started here' }
+    if ($stop -gt $setup) { throw 'the stuck copy is ended after Setup has already begun' }
+
+    # And then the uninstall gets a further chance to finish, or ending the copy
+    # blocking it has only moved the race a few lines down.
+    $second = $script.IndexOf('while ((Test-Path $installed.RegistryPath)', $stop, [StringComparison]::Ordinal)
+    if ($second -lt 0 -or $second -gt $setup) {
+        throw 'nothing waits for the uninstall to finish once it has been unblocked'
+    }
+}
+
 Test-Case 'the install waits only for Setup and not for the application it launches' {
     # Start-Process -Wait follows the child process tree on Windows. Inno Setup's
     # final [Run] entry starts the long-lived application, so using -Wait here leaves

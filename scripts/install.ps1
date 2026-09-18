@@ -397,6 +397,29 @@ try {
                 }
 
                 if (Test-Path $installed.RegistryPath) {
+                    # An uninstaller still running after three minutes is not working,
+                    # it is waiting - and the only thing it waits for is a copy of the
+                    # application it started to do its restore work. Builds before this
+                    # one answered --restore-hosts with the main window rather than the
+                    # job, hidden, so the wait was for a window nobody could close.
+                    #
+                    # Ending that copy is what lets the uninstall finish, and it has to
+                    # happen here rather than being left to Setup: Setup clears the same
+                    # process on its way in, which would release a half-finished
+                    # uninstall to carry on deleting the folder the installation is at
+                    # that moment writing into. DNS is already back by this point - the
+                    # uninstaller restores it before it reaches the step it is stuck on.
+                    Write-Note 'Kaldırma beklemede; takılan kopya kapatılıyor.'
+                    Get-Process -Name 'DpiBypass' -ErrorAction SilentlyContinue |
+                        Stop-Process -Force -ErrorAction SilentlyContinue
+
+                    $deadline = (Get-Date).AddMinutes(1)
+                    while ((Test-Path $installed.RegistryPath) -and (Get-Date) -lt $deadline) {
+                        Start-Sleep -Milliseconds 500
+                    }
+                }
+
+                if (Test-Path $installed.RegistryPath) {
                     Write-Warn 'Eski sürüm kaldırılamadı; kurulum yine de üzerine yazacak.'
                 }
                 else {

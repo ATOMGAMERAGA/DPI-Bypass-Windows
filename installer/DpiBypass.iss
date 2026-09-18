@@ -64,6 +64,12 @@ turkish.AutoStartTask=Windows açılışında otomatik başlat (önerilen)
 english.LaunchAfterInstall=Launch {#AppName} after installation
 english.CreateDesktopIcon=Create a desktop shortcut
 english.AutoStartTask=Start automatically with Windows (recommended)
+; The Installing page is shown before the first file is written, and the housekeeping
+; that runs there closes the copy already on the machine. Without a line of text it is
+; a progress bar at nought per cent that appears to be doing nothing at all, which is
+; the screenshot every "the installer is stuck" report arrives with.
+turkish.ClosingPrevious=Çalışan sürüm kapatılıyor...
+english.ClosingPrevious=Closing the running version...
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -135,12 +141,156 @@ Type: filesandordirs; Name: "{commonappdata}\{#AppName}\logs"
 Type: filesandordirs; Name: "{commonappdata}\Atom DPI Bypass"
 
 [Code]
+const
+  { How long Setup is willing to wait for each maintenance command, in seconds.
+
+    Every one of these numbers is longer than the honest worst case of the command it
+    covers, because giving up early is not free: abandoning a DNS restore half way
+    through leaves the machine resolving against a proxy that is being uninstalled.
+    Restoring DNS writes every adapter in one PowerShell call, and that call's own
+    budget grows with the number of adapters up to two minutes. }
+  RestoreDnsDeadline = 150;
+  RestoreLatencyDeadline = 120;
+  { taskkill and schtasks answer in well under a second or not at all. }
+  QuickDeadline = 30;
+
 var
   { The folder the sweep has already covered. The sweep is asked for twice on purpose
     - once before the wizard, once when the directory is finally known - and repeating
     it for the same folder would only make the install slower. }
   SweptDir: String;
   SweptDirKnown: Boolean;
+
+  { Makes each command's marker file its own. A command that overran its deadline is
+    abandoned rather than killed on the spot, so it may still write a marker while the
+    next command is waiting for one. }
+  MaintenanceStep: Integer;
+
+{ Says what Setup is doing, when there is a form to say it in.
+
+  The sweep runs at the top of the Installing page - before the first file is written,
+  so the progress bar is still at nought and nothing above it has been filled in yet.
+  Every second spent there looks, from the outside, exactly like an installation that
+  has died. The name is a [CustomMessages] entry; the whole thing is guarded because
+  there is no wizard form during InitializeSetup and none at all during uninstall.
+
+  Nothing repaints it by hand: the wait below keeps Setup's message loop pumping, so
+  the caption reaches the screen within the second. }
+procedure SayStep(const MessageName: String);
+begin
+  try
+    if WizardForm <> nil then
+    begin
+      WizardForm.StatusLabel.Caption := ExpandConstant('{cm:' + MessageName + '}');
+    end;
+  except
+    { A status line is never worth an installation. }
+  end;
+end;
+
+{ Waits about a second without letting go of the message loop.
+
+  Sleep() blocks the thread that draws Setup's window, so a minute of it is a minute
+  during which Windows itself paints the installer as not responding. Waiting on a
+  process keeps the loop pumping, which is what Exec's own wait does. }
+procedure PumpedPause();
+var
+  ResultCode: Integer;
+begin
+  if not Exec(ExpandConstant('{sys}\ping.exe'), '-n 2 127.0.0.1', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) then
+  begin
+    Sleep(1000);
+  end;
+end;
+
+{ Runs one maintenance command and stops waiting for it once Deadline seconds are up.
+
+  This is the whole reason the installer no longer stops dead on its Installing page.
+  Exec's ewWaitUntilTerminated has no time limit, and what it was being pointed at is
+  the copy already on the machine - a build this installer cannot fix, started hidden,
+  by a Setup which in silent mode is itself only a progress bar. Anything that copy
+  puts on screen is therefore a dialog nobody can see and nobody can click:
+
+    - a .NET host whose payload has been half removed by an uninstall running
+      alongside this one reports the missing runtime in a message box;
+    - a verb an older build does not recognise as headless is answered with the
+      application's own main window;
+    - a failure during its startup ends in the crash dialog.
+
+  Each of those is a wait that never ends, at nought per cent, with no way out but
+  Task Manager. So the command is started through cmd, which writes a marker file the
+  moment the command returns, and this waits for the marker rather than for a process.
+  When the deadline passes the command is left to its own devices and the taskkill
+  further down the sweep is what finally clears it away.
+
+  Returns True when the command finished inside its deadline. }
+function RunBounded(const Filename, Params, WorkingDir: String; const Deadline: Integer): Boolean;
+var
+  Marker: String;
+  ResultCode, Waited: Integer;
+begin
+  Result := False;
+  MaintenanceStep := MaintenanceStep + 1;
+
+  { Setup's own scratch folder, which exists from the first line of the script. The
+    environment's is a fallback and not an academic one: this routine is the only thing
+    standing between a locked file and an installation that cannot replace it, so it
+    must not be skipped over a constant that would not expand. }
+  try
+    Marker := ExpandConstant('{tmp}');
+  except
+    Marker := ExpandConstant('{%TEMP}');
+  end;
+
+  Marker := Marker + '\dpibypass-step-' + IntToStr(MaintenanceStep) + '.done';
+  DeleteFile(Marker);
+
+  { /S puts cmd's quote handling beyond doubt: it strips the outermost pair and passes
+    everything between them through untouched, so an install folder with spaces in it
+    survives. "&" rather than "&&" - the marker says the wait is over, not that the
+    command agreed with us. }
+  if not Exec(
+    ExpandConstant('{cmd}'),
+    '/S /C ""' + Filename + '" ' + Params + ' & echo done>"' + Marker + '""',
+    WorkingDir,
+    SW_HIDE,
+    ewNoWait,
+    ResultCode) then
+  begin
+    Log('Could not start: ' + Filename + ' ' + Params);
+    Exit;
+  end;
+
+  Waited := 0;
+  while Waited < Deadline * 1000 do
+  begin
+    if FileExists(Marker) then
+    begin
+      DeleteFile(Marker);
+      Result := True;
+      Exit;
+    end;
+
+    { Short steps for the first second, so a command that takes a moment costs a
+      moment - most of these are a taskkill that is done before Setup has finished
+      asking. After that it is a real wait, and a real wait has to keep the message
+      loop turning or Windows paints the installer as a program that has stopped
+      answering, which is the very thing this routine exists to prevent. }
+    if Waited < 1000 then
+    begin
+      Sleep(200);
+      Waited := Waited + 200;
+    end
+    else
+    begin
+      PumpedPause();
+      Waited := Waited + 1000;
+    end;
+  end;
+
+  Log('Gave up after ' + IntToStr(Deadline) + 's waiting for: ' + Filename + ' ' + Params);
+end;
 
 { The uninstall key Windows writes for this AppId. It is the one place Setup can read
   where an existing installation put its files without knowing anything about where
@@ -216,40 +366,41 @@ end;
   AppDir may be empty: the steps that need the installed executable are skipped then,
   and the process sweep still runs. }
 procedure StopRunningInstance(const AppDir: String);
-var
-  ResultCode: Integer;
 begin
+  SayStep('ClosingPrevious');
+
   { Never kill the owner while Windows still points at its process-local DNS proxy.
     A forced termination cannot run the application's normal finally/Dispose path;
     restoring first is what keeps an upgrade or uninstall from taking the machine's
     internet connection down if the replacement then fails to launch. Both commands
-    are separate helper instances and therefore still run when the UI copy is hung. }
+    are separate helper instances and therefore still run when the UI copy is hung.
+
+    Every one of them goes through RunBounded, because every one of them is a build
+    that shipped before this installer did and none of them can be trusted to exit. }
   if (AppDir <> '') and FileExists(AppDir + '\{#AppExeName}') then
   begin
-    Exec(AppDir + '\{#AppExeName}', '--restore-dns', AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(AppDir + '\{#AppExeName}', 'latency restore', AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    RunBounded(AppDir + '\{#AppExeName}', '--restore-dns', AppDir, RestoreDnsDeadline);
+    RunBounded(AppDir + '\{#AppExeName}', 'latency restore', AppDir, RestoreLatencyDeadline);
   end;
 
-  { The app holds the driver handle open, so it has to go before files are replaced. }
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#AppExeName} /F', '', SW_HIDE,
-    ewWaitUntilTerminated, ResultCode);
+  { The app holds the driver handle open, so it has to go before files are replaced.
+    This is also what clears away anything above that outstayed its deadline. }
+  RunBounded(ExpandConstant('{sys}\taskkill.exe'), '/IM {#AppExeName} /F', '', QuickDeadline);
 
   { A separately named watchdog normally exits as soon as its owner does. Run the
     recovery command once more after that hand-off, then remove any orphan before
     Setup replaces the shared runtime files. }
   if (AppDir <> '') and FileExists(AppDir + '\{#RecoveryExeName}') then
   begin
-    Exec(AppDir + '\{#RecoveryExeName}', '--restore-dns', AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#RecoveryExeName} /F', '', SW_HIDE,
-      ewWaitUntilTerminated, ResultCode);
+    RunBounded(AppDir + '\{#RecoveryExeName}', '--restore-dns', AppDir, RestoreDnsDeadline);
+    RunBounded(ExpandConstant('{sys}\taskkill.exe'), '/IM {#RecoveryExeName} /F', '', QuickDeadline);
   end;
 
   { And the pre-rename build, which holds the same driver handle under its old name. }
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM AtomDpiBypass.exe /F', '', SW_HIDE,
-    ewWaitUntilTerminated, ResultCode);
+  RunBounded(ExpandConstant('{sys}\taskkill.exe'), '/IM AtomDpiBypass.exe /F', '', QuickDeadline);
   { The old logon task would keep starting a binary this installer just deleted. }
-  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN AtomDpiBypass-Autostart /F',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunBounded(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN AtomDpiBypass-Autostart /F',
+    '', QuickDeadline);
 end;
 
 procedure SweepRunningInstance(const AppDir: String);
