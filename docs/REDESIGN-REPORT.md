@@ -180,6 +180,21 @@ donanım hızlandırma (WPF işleme katmanı), saydamlık efektleri anahtarı, y
 karşıtlık, uzak oturum, pil tasarrufu ve DWM'nin döndürdüğü HRESULT. Aynı satır
 günlüğe de yazılır.
 
+**Çalışma zamanı kanıtı (Windows CI, yapı 26100).** Windows koşucusunda
+yayımlanan uygulama artık pencereyi kuruyor ve ilk kareyi çiziyor; tanılama
+satırı da tam olarak tasarlandığı gibi çalışıyor:
+
+```
+Pencere görünümü · istenen=Sistem · uygulanan=Mica · neden=Sistem: Mica uygulandı.
+ · yapı=26100 · birleştirme=açık · hızlandırma=açık · saydamlık=açık
+ · yüksek karşıtlık=kapalı · uzak oturum=hayır · pil tasarrufu=kapalı
+```
+
+Yani bu ortamda DWM malzeme isteğini **kabul etti**, çerçeve genişletildi ve
+istemci alanı birleştiriciye devredildi. Bu, "Mica uygulandı" iddiasının
+doğrulanmış hâlidir. Bir sonraki bölümdeki uyarı hâlâ geçerli: DWM'nin bunu
+gerçekten **çizdiği** ekrana bakılmadan bilinemez.
+
 **Doğrulanamayan.** Bu düzeltmelerin **hangisinin** kullanıcının makinesinde
 belirleyici olduğu. Dördü de gerçek yapısal hatadır ve dördü de düzeltildi;
 hangisinin görünürlüğü geri getirdiği ancak Windows 11 22H2+ bir makinede
@@ -424,8 +439,11 @@ ve `docs/background-footprint.md` var; bu geçiş onlara sayı eklemedi.
 
 **Yapılamadı.**
 
-- **Uygulama hiç çalıştırılmadı.** Windows yok, ekran yok, WinDivert sürücüsü
-  yok. Ekran görüntüsü alınmadı.
+- **Uygulama bu ortamda hiç çalıştırılmadı.** Windows yok, ekran yok, WinDivert
+  sürücüsü yok, ekran görüntüsü alınmadı. Windows CI koşucusu uygulamayı
+  çalıştırdı: pencere kuruluyor, ilk kare çiziliyor ve Mica uygulanıyor (yukarı
+  bakınız) — ama koşucu da bir ekrana bakmıyor, yalnız yerleşimi ve çizimi
+  doğruluyor.
 - Açık/koyu tema, Mica/Acrylic/düz, karşılama, bağlantı/iptal/hata ve yüksek
   DPI durumları **gözle** denetlenmedi.
 - %100/%125/%150/%200 ölçeklerde taşma/kırpılma denetlenmedi.

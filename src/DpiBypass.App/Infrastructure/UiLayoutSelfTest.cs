@@ -61,7 +61,12 @@ internal static class UiLayoutSelfTest
                                 is System.Windows.Data.BindingExpression))
                             Require(shortcut.Tag is FrameworkElement, "Section shortcut lost its target.");
 
-                        foreach (var button in Descendants<Button>(window).Where(b => b.IsVisible))
+                        // No button is accidentally stretched by a layout bug. The one
+                        // control that is deliberately large - the connection ring's
+                        // button - is exempt by name rather than by raising the bound for
+                        // everything, which would retire the check for the other forty.
+                        foreach (var button in Descendants<Button>(window)
+                            .Where(b => b.IsVisible && b.Name != "ConnectButton"))
                         {
                             Require(button.ActualHeight is > 0 and <= 64,
                                 $"Unexpected button height: {button.Content} ({button.ActualHeight})");
