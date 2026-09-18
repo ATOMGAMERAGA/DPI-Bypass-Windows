@@ -55,6 +55,17 @@ public sealed record LatencyOptimizerOptions
     /// </remarks>
     public TimeSpan RollbackSettleDelay { get; init; } = TimeSpan.FromSeconds(3);
 
+    /// <summary>
+    /// Ceiling on the settle wait plus the reading that follows it.
+    /// </summary>
+    /// <remarks>
+    /// The re-measurement runs while the run still holds the latency gate, so a probe that
+    /// does not come back holds up everything queued behind it - including the user turning
+    /// the mode off. Saying what the connection reads now is worth a few seconds and is not
+    /// worth blocking on.
+    /// </remarks>
+    public TimeSpan RemeasureBudget { get; init; } = TimeSpan.FromSeconds(45);
+
     /// <summary>Sample size an inconclusive experiment grows to before giving up.</summary>
     public int AdaptiveProbeCount { get; init; } = LatencyProbeRequest.Deep.ProbeCount;
 
@@ -938,7 +949,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     });
                 }
 
-                var recovered = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint)
+                var recovered = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint, token)
                     .ConfigureAwait(false);
 
                 return Publish(NoGain(
@@ -1019,7 +1030,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             // applied. That candidate has just been taken back off, so it describes a
             // machine that no longer exists; measuring again is the only way to say what
             // this one reads.
-            var settled = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint)
+            var settled = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint, token)
                 .ConfigureAwait(false);
 
             return Publish(NoGain(
@@ -1075,7 +1086,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
             // Same again for the bundle: "final" was measured with the whole accepted set
             // applied, and the set is no longer applied.
-            var afterUndo = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint)
+            var afterUndo = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint, token)
                 .ConfigureAwait(false);
 
             return Publish(NoGain(
@@ -1963,28 +1974,41 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     /// copied forward.
     /// </para>
     /// <para>
-    /// Deliberately on <see cref="CancellationToken.None"/> for the settle wait and the
-    /// measurement. This runs on paths where the user has already cancelled or switched
-    /// the mode off, and the machine is back to how it was found either way - the only
-    /// thing a cancellation here would achieve is leaving the card with no idea what the
-    /// connection now reads. The measurement itself is bounded by the probe's own budget.
+    /// It honours cancellation and carries its own budget, and both matter. This runs while
+    /// the run still holds the latency gate, so anything it waits on is also waiting for
+    /// the user's next instruction - and the instruction that gets here first is usually
+    /// "off". An uncancellable benchmark on this path made turning the mode off take as
+    /// long as the run it was meant to stop, which is the very thing the switch was fixed
+    /// to avoid. A cancelled run therefore does not re-measure at all: it says it could
+    /// not, which is true, and gets out of the way.
     /// </para>
     /// </remarks>
     private async Task<(LatencyMeasurement? Measurement, LatencyRemeasureState State)> RemeasureAfterRollbackAsync(
         NetworkFingerprint network,
         AdapterLatencyCapability adapter,
         LatencyProbeRequest benchmark,
-        LatencyEndpoint endpoint)
+        LatencyEndpoint endpoint,
+        CancellationToken cancellationToken)
     {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            _log?.Invoke("latency.remeasure.skipped: çalışma iptal edildi; yeniden ölçüm yapılmadı.");
+            return (null, LatencyRemeasureState.Failed);
+        }
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(_options.RemeasureBudget);
+        var token = budget.Token;
+
         try
         {
             if (_options.RollbackSettleDelay > TimeSpan.Zero)
             {
-                await _delay(_options.RollbackSettleDelay, CancellationToken.None).ConfigureAwait(false);
+                await _delay(_options.RollbackSettleDelay, token).ConfigureAwait(false);
             }
 
             var connectivity = await _probe
-                .CheckConnectivityAsync(network, endpoint.Address.ToString(), CancellationToken.None)
+                .CheckConnectivityAsync(network, endpoint.Address.ToString(), token)
                 .ConfigureAwait(false);
 
             if (!connectivity.IsUsable)
@@ -1994,7 +2018,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             }
 
             var measurement = await _probe
-                .MeasureAsync(network, benchmark, CancellationToken.None)
+                .MeasureAsync(network, benchmark, token)
                 .ConfigureAwait(false);
 
             if (measurement is null || !measurement.HasRemoteConnectivity)
@@ -2007,6 +2031,13 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             return (
                 Stamp(measurement, LatencyMeasurementRole.PostRollback, network, adapter, "özgün ayarlar"),
                 LatencyRemeasureState.Completed);
+        }
+        catch (OperationCanceledException)
+        {
+            // Either the user stopped the run or the budget ran out. Both mean the same
+            // thing to the card: there is no fresh reading, and it must not invent one.
+            _log?.Invoke("latency.remeasure.failed: yeniden ölçüm tamamlanamadı.");
+            return (null, LatencyRemeasureState.Failed);
         }
         catch (Exception ex)
         {

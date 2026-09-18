@@ -19,6 +19,16 @@ namespace DpiBypass.Tests;
 /// </remarks>
 public sealed class LatencyToggleTests
 {
+    /// <summary>
+    /// How long a step is allowed to take before it counts as not coming back.
+    /// </summary>
+    /// <remarks>
+    /// Generous because the failure these guard against is a block that never ends, not a
+    /// slow one: every step here is instant when the code is right, so a large number costs
+    /// nothing and stops a loaded CI runner from failing the build for being busy.
+    /// </remarks>
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(60);
+
     [Fact]
     public async Task TurningItOffStopsTheRunInsteadOfQueueingBehindIt()
     {
@@ -26,6 +36,14 @@ public sealed class LatencyToggleTests
         // all of them before putting anything back, which reads as the switch doing
         // nothing. The gate is held by the run in flight, so if off did not cancel first,
         // this test would deadlock on the probe that never returns.
+        //
+        // It also covers the other half of the rule, which is what actually broke first:
+        // the run has to unwind without measuring again. The post-rollback re-measurement
+        // originally ran on CancellationToken.None, so a cancelled run went straight into
+        // another benchmark while still holding the gate - turning the mode off took as
+        // long as the run it was meant to stop. That version passed here and timed out on
+        // the Windows runner, because which rollback path the cancellation lands on is a
+        // race.
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var controller = new FakeController();
         var probe = new BlockingProbe(controller, started);
@@ -34,18 +52,18 @@ public sealed class LatencyToggleTests
         await using var service = NewService(directory, controller, probe);
 
         var turningOn = service.SetLowLatencyModeAsync(enabled: true);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await started.Task.WaitAsync(Patience);
 
         // Off, while the benchmark is still measuring.
         var turningOff = await service
             .SetLowLatencyModeAsync(enabled: false)
-            .WaitAsync(TimeSpan.FromSeconds(10));
+            .WaitAsync(Patience);
 
         Assert.False(service.Settings.LowLatencyMode);
         Assert.Empty(turningOff.AppliedChanges);
 
         // The abandoned run also put back everything it had applied.
-        await turningOn.WaitAsync(TimeSpan.FromSeconds(10));
+        await turningOn.WaitAsync(Patience);
         Assert.Empty(controller.Live);
     }
 
@@ -60,13 +78,13 @@ public sealed class LatencyToggleTests
         await using var service = NewService(directory, controller, probe);
 
         var turningOn = service.SetLowLatencyModeAsync(enabled: true);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await started.Task.WaitAsync(Patience);
 
-        await service.SetLowLatencyModeAsync(enabled: false).WaitAsync(TimeSpan.FromSeconds(10));
+        await service.SetLowLatencyModeAsync(enabled: false).WaitAsync(Patience);
         var afterOff = service.LatencyResult;
 
         // Let the cancelled run finish unwinding, then check it did not publish.
-        await turningOn.WaitAsync(TimeSpan.FromSeconds(10));
+        await turningOn.WaitAsync(Patience);
 
         Assert.Same(afterOff, service.LatencyResult);
         Assert.False(service.Settings.LowLatencyMode);
