@@ -44,6 +44,17 @@ public sealed record LatencyOptimizerOptions
     /// </remarks>
     public TimeSpan TotalBudget { get; init; } = TimeSpan.FromMinutes(30);
 
+    /// <summary>
+    /// How long to let the adapter settle after a rollback before measuring again.
+    /// </summary>
+    /// <remarks>
+    /// Restoring a driver property is not instant and the first seconds after one are not
+    /// representative - a link that has just renegotiated is measuring the renegotiation.
+    /// A run that rolled back has to say what the connection reads now, so it waits and
+    /// then measures rather than reusing the reading that caused the rollback.
+    /// </remarks>
+    public TimeSpan RollbackSettleDelay { get; init; } = TimeSpan.FromSeconds(3);
+
     /// <summary>Sample size an inconclusive experiment grows to before giving up.</summary>
     public int AdaptiveProbeCount { get; init; } = LatencyProbeRequest.Deep.ProbeCount;
 
@@ -101,6 +112,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
     private readonly LatencyOptimizerOptions _options;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<IPAddress, IPAddress?, NetworkFingerprint> _captureRoute;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly bool _routeLookupAvailable;
     private readonly Action<string>? _log;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
@@ -149,6 +161,7 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         _profiles = profiles ?? new LatencyProfileStore(log: _log);
         _targets = targets ?? new LatencyTargetResolver(log: _log);
         _environmentSampler = environmentSampler ?? new WindowsLatencyEnvironmentSampler(_log);
+        _delay = delay ?? Task.Delay;
         _runner = runner ?? new PairedLatencyExperimentRunner(_probe, _environmentSampler, delay, _log);
         _restorer = new LatencySnapshotRestorer(
             _snapshots,
@@ -873,7 +886,11 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                 AdapterName = adapter.AdapterName,
                 NetworkKey = network.Key,
                 Before = baseline,
-                After = reference,
+
+                // Not "After": mid-run, the last optimised reading belongs to a candidate
+                // that may yet be rejected and taken back off. Publishing it as the after
+                // value is how a rejected number reached the card in the first place.
+                After = null,
                 AppliedChanges = [.. accepted.Select(entry => entry.Description)],
                 Path = path,
                 Verdicts = [.. verdicts],
@@ -921,16 +938,20 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     });
                 }
 
+                var recovered = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint)
+                    .ConfigureAwait(false);
+
                 return Publish(NoGain(
                     adapter,
                     network,
                     baseline,
-                    null,
+                    recovered.Measurement,
                     path,
                     verdicts,
                     "Bağlantı denetimi başarısız oldu; özgün NIC ayarları geri yüklendi.",
                     endpoint,
-                    notices));
+                    notices,
+                    recovered.State));
             }
 
             verdicts.Add(outcome.Verdict);
@@ -979,7 +1000,14 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     AdapterName = adapter.AdapterName,
                     NetworkKey = network.Key,
                     Before = baseline,
-                    After = reference,
+
+                    // A restore that did not finish leaves the adapter part-way between two
+                    // states, so no reading taken before it describes the machine now -
+                    // neither the candidate's nor the baseline's. The card shows the
+                    // recovery it needs to show instead of a number nobody can stand behind.
+                    After = null,
+                    Current = null,
+                    Remeasure = LatencyRemeasureState.Failed,
                     Path = path,
                     Verdicts = verdicts,
                 });
@@ -987,16 +1015,24 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
             await SaveProfileAsync(network, adapter, baseline, null, verdicts, path, context, token).ConfigureAwait(false);
 
+            // "reference" here is whatever the last candidate measured while it was still
+            // applied. That candidate has just been taken back off, so it describes a
+            // machine that no longer exists; measuring again is the only way to say what
+            // this one reads.
+            var settled = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint)
+                .ConfigureAwait(false);
+
             return Publish(NoGain(
                 adapter,
                 network,
                 baseline,
-                reference,
+                settled.Measurement,
                 path,
                 verdicts,
                 "Bu ağda doğrulanmış bir gecikme iyileşmesi bulunamadı. Özgün ayarlar geri yüklendi.",
                 endpoint,
-                notices));
+                notices,
+                settled.State));
         }
 
         // Everything accepted is on the adapter now. The whole set is re-measured the
@@ -1027,7 +1063,9 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     AdapterName = adapter.AdapterName,
                     NetworkKey = network.Key,
                     Before = baseline,
-                    After = final,
+                    After = null,
+                    Current = null,
+                    Remeasure = LatencyRemeasureState.Failed,
                     Path = path,
                     Verdicts = verdicts,
                 });
@@ -1035,11 +1073,16 @@ public sealed class LatencyOptimizer : IAsyncDisposable
 
             await SaveProfileAsync(network, adapter, baseline, null, verdicts, path, context, token).ConfigureAwait(false);
 
+            // Same again for the bundle: "final" was measured with the whole accepted set
+            // applied, and the set is no longer applied.
+            var afterUndo = await RemeasureAfterRollbackAsync(network, adapter, benchmark, endpoint)
+                .ConfigureAwait(false);
+
             return Publish(NoGain(
                 adapter,
                 network,
                 baseline,
-                final,
+                afterUndo.Measurement,
                 path,
                 verdicts,
                 final is null
@@ -1047,7 +1090,8 @@ public sealed class LatencyOptimizer : IAsyncDisposable
                     : "Tüm paket birlikte ölçüldüğünde anlamlı bir uçtan uca iyileşme kanıtlanamadı; "
                         + "özgün NIC ayarları geri yüklendi.",
                 endpoint,
-                notices));
+                notices,
+                afterUndo.State));
         }
 
         _log?.Invoke($"latency.verification.completed: {LatencyReport.Compact(final!)}");
@@ -1067,6 +1111,12 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         var improvement = confirmation.Verdict.Delta;
         var drift = LatencyDelta.Between(baseline, final!);
         var applied = accepted.Select(candidate => candidate.Description).ToArray();
+        var verified = Stamp(
+            final,
+            LatencyMeasurementRole.Verification,
+            network,
+            adapter,
+            $"uygulanan: {string.Join(" · ", applied)}");
 
         _log?.Invoke($"latency.committed: {applied.Length} ayar · median {improvement.MedianMs:F1} ms · p95 {improvement.P95Ms:F1} ms");
 
@@ -1076,14 +1126,23 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             StatusLine = LatencyReport.Verified(adapter.AdapterName, baseline, final!, improvement, applied, path, endpoint),
             AdapterName = adapter.AdapterName,
             NetworkKey = network.Key,
-            Before = baseline,
-            After = final,
+            Before = Stamp(baseline, LatencyMeasurementRole.Baseline, network, adapter, "özgün ayarlar"),
+
+            // Kept, so this one does describe the machine as it is now, and it is both the
+            // "after" of the comparison and the current reading.
+            After = verified,
+            Current = verified,
             AppliedChanges = applied,
             Path = path,
             Verdicts = verdicts,
             VerifiedImprovement = improvement,
             BaselineComparison = drift,
             ImprovedMetric = confirmation.Verdict.WinningMetric,
+
+            // Which kind of win, so the card can tell "your ping dropped" from "your
+            // connection got steadier" instead of printing both as milliseconds off the
+            // ping. The confirmation's own winning metric decides it.
+            GainKind = LatencyComparison.KindOfMetric(confirmation.Verdict.WinningMetric),
             Lanes =
             [
                 Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Completed,
@@ -1885,19 +1944,123 @@ public sealed class LatencyOptimizer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Measures the connection again once a rollback has put the settings back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the fix for the card that reported a rejected candidate's number as the
+    /// user's current ping. The old code handed the pre-rollback reading to
+    /// <see cref="LatencyOptimizationResult.After"/>, and the status view rendered that as
+    /// the idle ping - so a candidate that measured five percent worse, was correctly
+    /// rejected and was correctly taken back off still left "+5%" on screen as the state
+    /// the user had been left in.
+    /// </para>
+    /// <para>
+    /// A rolled-back run is a run whose answer is "nothing changed", and the only honest
+    /// way to say what the connection reads is to read it. Failure is reported as failure:
+    /// <see cref="LatencyRemeasureState.Failed"/> and no number, never the previous one
+    /// copied forward.
+    /// </para>
+    /// <para>
+    /// Deliberately on <see cref="CancellationToken.None"/> for the settle wait and the
+    /// measurement. This runs on paths where the user has already cancelled or switched
+    /// the mode off, and the machine is back to how it was found either way - the only
+    /// thing a cancellation here would achieve is leaving the card with no idea what the
+    /// connection now reads. The measurement itself is bounded by the probe's own budget.
+    /// </para>
+    /// </remarks>
+    private async Task<(LatencyMeasurement? Measurement, LatencyRemeasureState State)> RemeasureAfterRollbackAsync(
+        NetworkFingerprint network,
+        AdapterLatencyCapability adapter,
+        LatencyProbeRequest benchmark,
+        LatencyEndpoint endpoint)
+    {
+        try
+        {
+            if (_options.RollbackSettleDelay > TimeSpan.Zero)
+            {
+                await _delay(_options.RollbackSettleDelay, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            var connectivity = await _probe
+                .CheckConnectivityAsync(network, endpoint.Address.ToString(), CancellationToken.None)
+                .ConfigureAwait(false);
+
+            if (!connectivity.IsUsable)
+            {
+                _log?.Invoke("latency.remeasure.failed: geri almadan sonra hedefe ulaşılamadı.");
+                return (null, LatencyRemeasureState.Failed);
+            }
+
+            var measurement = await _probe
+                .MeasureAsync(network, benchmark, CancellationToken.None)
+                .ConfigureAwait(false);
+
+            if (measurement is null || !measurement.HasRemoteConnectivity)
+            {
+                _log?.Invoke("latency.remeasure.failed: geri almadan sonra ölçüm alınamadı.");
+                return (null, LatencyRemeasureState.Failed);
+            }
+
+            _log?.Invoke($"latency.remeasure.completed: {LatencyReport.Compact(measurement)}");
+            return (
+                Stamp(measurement, LatencyMeasurementRole.PostRollback, network, adapter, "özgün ayarlar"),
+                LatencyRemeasureState.Completed);
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"latency.remeasure.failed: {ex.Message}");
+            return (null, LatencyRemeasureState.Failed);
+        }
+    }
+
+    /// <summary>Records what a reading is for, and the conditions it was taken under.</summary>
+    /// <remarks>
+    /// Stamped here rather than in the probe: the probe measures a link and has no idea
+    /// whether the settings in force are a candidate under test, an accepted set or the
+    /// user's own. That is the run's knowledge, and it is exactly the knowledge the card
+    /// needed and did not have.
+    /// </remarks>
+    private static LatencyMeasurement? Stamp(
+        LatencyMeasurement? measurement,
+        LatencyMeasurementRole role,
+        NetworkFingerprint network,
+        AdapterLatencyCapability? adapter = null,
+        string settingsState = "") => measurement is null
+        ? null
+        : measurement with
+        {
+            Role = role,
+            NetworkKey = network.Key,
+            AdapterName = adapter?.AdapterName ?? measurement.AdapterName,
+            SettingsState = settingsState.Length > 0 ? settingsState : measurement.SettingsState,
+        };
+
+    /// <summary>
+    /// A run that finished with nothing applied.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="current"/> is what the connection reads now, with the original
+    /// settings back - never the candidate reading that caused the rollback. It is null
+    /// when no fresh reading could be taken, and <paramref name="remeasure"/> says which
+    /// of those it is. <see cref="LatencyOptimizationResult.After"/> stays null throughout:
+    /// there is no "after" when nothing was kept.
+    /// </remarks>
     private static LatencyOptimizationResult NoGain(
         AdapterLatencyCapability adapter,
         NetworkFingerprint network,
         LatencyMeasurement before,
-        LatencyMeasurement? after,
+        LatencyMeasurement? current,
         LatencyPathAnalysis path,
         IReadOnlyList<LatencyVerdict> verdicts,
         string headline,
         LatencyEndpoint? endpoint = null,
-        IReadOnlyList<string>? notices = null) => new()
+        IReadOnlyList<string>? notices = null,
+        LatencyRemeasureState remeasure = LatencyRemeasureState.NotNeeded) => new()
         {
             Status = LatencyOptimizationStatus.NoGain,
-            StatusLine = LatencyReport.NoGain(headline, after ?? before, verdicts, path),
+            StatusLine = LatencyReport.NoGain(headline, current ?? before, verdicts, path),
             Lanes =
             [
                 Lane(LatencyLane.TargetMeasurement, LatencyLaneState.Completed,
@@ -1916,7 +2079,12 @@ public sealed class LatencyOptimizer : IAsyncDisposable
             AdapterName = adapter.AdapterName,
             NetworkKey = network.Key,
             Before = before,
-            After = after,
+
+            // Nothing was kept, so there is no "after". What the connection reads now is a
+            // separate question with a separate answer, and possibly no answer at all.
+            After = null,
+            Current = current,
+            Remeasure = remeasure,
             Path = path,
             Verdicts = verdicts,
             TargetLabel = endpoint?.Label ?? string.Empty,

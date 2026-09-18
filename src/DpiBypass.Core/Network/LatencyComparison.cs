@@ -398,6 +398,28 @@ public sealed record LatencyEvaluationOptions
 /// doubles has lost the thing the feature exists to protect.
 /// </para>
 /// </remarks>
+
+/// <summary>
+/// What kind of win a comparison found, because the two are not the same claim.
+/// </summary>
+/// <remarks>
+/// <see cref="Median"/> means the typical round trip got shorter, which is the only thing
+/// that may be shown as "ping dropped by N ms". <see cref="Stability"/> means the typical
+/// round trip did not move but the worst ones got better - a real result with its own
+/// sentence, and never a millisecond figure on the ping itself.
+/// </remarks>
+public enum LatencyGainKind
+{
+    /// <summary>No effect above the operational floors.</summary>
+    None = 0,
+
+    /// <summary>The median round trip improved.</summary>
+    Median = 1,
+
+    /// <summary>Only the tail or the variation improved; the median did not.</summary>
+    Stability = 2,
+}
+
 public static class LatencyComparison
 {
     /// <summary>Median may not get worse by more than this.</summary>
@@ -823,17 +845,40 @@ public static class LatencyComparison
         LatencyMeasurement before,
         LatencyMeasurement after,
         bool cpuSensitive = false)
+        => ConfirmGain(before, after, cpuSensitive) != LatencyGainKind.None;
+
+    /// <summary>
+    /// The same gate, but saying which kind of win it found.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The two are not interchangeable and the card must not print them the same way. A
+    /// median win is what a person means by "my ping went down": the typical round trip
+    /// is shorter. A tail or jitter win leaves the typical round trip exactly where it
+    /// was and makes the worst ones less bad - worth having, worth saying, and not a
+    /// number of milliseconds anybody's ping dropped by.
+    /// </para>
+    /// <para>
+    /// Both still have to clear the same floors and the same no-regression check, so this
+    /// is not a looser gate. It only stops a jitter result being reported as though the
+    /// median had moved.
+    /// </para>
+    /// </remarks>
+    public static LatencyGainKind ConfirmGain(
+        LatencyMeasurement before,
+        LatencyMeasurement after,
+        bool cpuSensitive = false)
     {
         if (!HasNoMaterialRegression(before, after))
         {
-            return false;
+            return LatencyGainKind.None;
         }
 
         var unknownLoad = before.Load.State == LatencyLoadState.Unknown
             && after.Load.State == LatencyLoadState.Unknown;
         if (!before.Load.ComparableWith(after.Load) && !unknownLoad)
         {
-            return false;
+            return LatencyGainKind.None;
         }
 
         var scale = (cpuSensitive ? CpuSensitiveMultiplier : 1.0)
@@ -841,14 +886,34 @@ public static class LatencyComparison
         var delta = LatencyDelta.Between(before, after);
         var replies = Math.Min(before.RemoteReplies, after.RemoteReplies);
 
-        return delta.MedianMs >= Limit(before.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale
-            || (replies >= 20
+        if (delta.MedianMs >= Limit(before.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale)
+        {
+            return LatencyGainKind.Median;
+        }
+
+        var stability =
+            (replies >= 20
                 && delta.P95Ms >= Limit(before.P95RttMs, P95GainFloorMs, P95GainShare) * scale)
             || (replies >= 100
                 && delta.P99Ms >= Limit(before.P99RttMs, P99GainFloorMs, P99GainShare) * scale)
             || (replies >= 12
                 && delta.JitterMs >= Limit(before.JitterMs, JitterGainFloorMs, JitterGainShare) * scale);
+
+        return stability ? LatencyGainKind.Stability : LatencyGainKind.None;
     }
+
+    /// <summary>Whether a named winning metric is a median win or a steadiness win.</summary>
+    /// <remarks>
+    /// The paired A/B verdicts name their winner as a string, which is what the report
+    /// prints. This maps that name onto the same distinction so a verdict and a
+    /// confirmation cannot disagree about what kind of result they found.
+    /// </remarks>
+    public static LatencyGainKind KindOfMetric(string? metric) => metric switch
+    {
+        "median" => LatencyGainKind.Median,
+        "p95" or "p99" or "jitter" => LatencyGainKind.Stability,
+        _ => LatencyGainKind.None,
+    };
 
     /// <summary>Raises a threshold to whatever the instrument can actually resolve.</summary>
     private static double Floor(double threshold, double resolutionMs)

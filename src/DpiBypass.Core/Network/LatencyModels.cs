@@ -137,6 +137,37 @@ public enum LatencySampleSource
     GameDisplay = 2,
 }
 
+/// <summary>
+/// What a measurement was taken for, and therefore what it may be shown as.
+/// </summary>
+/// <remarks>
+/// The card used to have one "after" and had to guess. It guessed wrong in the case that
+/// matters: a candidate measured while a bad setting was applied, rejected, and put back -
+/// and then printed as the connection's current ping, complete with the increase the
+/// rejection was about. A measurement now says which of these it is, and the view refuses
+/// to read one as another.
+/// </remarks>
+public enum LatencyMeasurementRole
+{
+    /// <summary>Not stated. Treated as unusable for any before/after claim.</summary>
+    Unspecified = 0,
+
+    /// <summary>The starting point, with nothing this app did applied.</summary>
+    Baseline = 1,
+
+    /// <summary>Taken with a candidate applied, inside a paired cycle. Never "your ping".</summary>
+    Candidate = 2,
+
+    /// <summary>Taken with the accepted set applied, to confirm it. Valid while it stays applied.</summary>
+    Verification = 3,
+
+    /// <summary>Taken after everything was put back, so it describes the machine as it is now.</summary>
+    PostRollback = 4,
+
+    /// <summary>A plain reading nobody changed anything for.</summary>
+    Reference = 5,
+}
+
 /// <summary>A statistically useful latency sample; every number comes from real I/O.</summary>
 public sealed record LatencyMeasurement
 {
@@ -145,6 +176,61 @@ public sealed record LatencyMeasurement
     public required string RemoteEndpoint { get; init; }
 
     public required string Protocol { get; init; }
+
+    /// <summary>What this reading was taken for.</summary>
+    public LatencyMeasurementRole Role { get; init; } = LatencyMeasurementRole.Unspecified;
+
+    /// <summary>
+    /// The run that produced it, so two readings can be told apart when they should not be
+    /// compared.
+    /// </summary>
+    public Guid RunId { get; init; }
+
+    /// <summary>
+    /// The network it was taken on. A comparison across a change of network is not a
+    /// comparison, and this is what lets one be refused rather than averaged.
+    /// </summary>
+    public string NetworkKey { get; init; } = string.Empty;
+
+    /// <summary>The adapter it was taken through.</summary>
+    public string AdapterName { get; init; } = string.Empty;
+
+    /// <summary>Which settings were in force while it was taken, in words.</summary>
+    /// <remarks>
+    /// Not a key and not parsed by anything: it exists so a detail view can say what the
+    /// machine was doing when a number was produced, which is the question every argument
+    /// about these numbers turns into.
+    /// </remarks>
+    public string SettingsState { get; init; } = string.Empty;
+
+    /// <summary>Whether this reading describes the machine as it is now.</summary>
+    /// <remarks>
+    /// True for a baseline before anything was applied, for a verification whose changes
+    /// are still in force, and for a reading taken after a rollback finished. False for a
+    /// candidate, and false for a verification whose changes were then taken back off.
+    /// </remarks>
+    public bool DescribesCurrentState => Role
+        is LatencyMeasurementRole.Baseline
+        or LatencyMeasurementRole.Verification
+        or LatencyMeasurementRole.PostRollback
+        or LatencyMeasurementRole.Reference;
+
+    /// <summary>Whether this and another reading may be put side by side as before/after.</summary>
+    /// <remarks>
+    /// Same target, same protocol and same network. Anything else is two different
+    /// questions, and subtracting one from the other produces a number about neither.
+    /// </remarks>
+    public bool ComparableWith(LatencyMeasurement other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+
+        return string.Equals(RemoteEndpoint, other.RemoteEndpoint, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(Protocol, other.Protocol, StringComparison.OrdinalIgnoreCase)
+            && Source == other.Source
+            && (NetworkKey.Length == 0
+                || other.NetworkKey.Length == 0
+                || string.Equals(NetworkKey, other.NetworkKey, StringComparison.Ordinal));
+    }
 
     /// <summary>
     /// Requests sent for the remote series, or zero for a passive observation.
@@ -808,6 +894,27 @@ public sealed record LatencyLaneReport
     };
 }
 
+/// <summary>Where a post-rollback re-measurement got to.</summary>
+/// <remarks>
+/// A rolled-back run has to say what the connection reads now, and the honest answers
+/// include "I am still finding out" and "I could not". Copying the previous number forward
+/// is not one of them.
+/// </remarks>
+public enum LatencyRemeasureState
+{
+    /// <summary>Nothing was rolled back, so nothing needed re-measuring.</summary>
+    NotNeeded = 0,
+
+    /// <summary>The settings are back; the connection is being measured again.</summary>
+    InProgress = 1,
+
+    /// <summary>A fresh reading was taken and is in <c>Current</c>.</summary>
+    Completed = 2,
+
+    /// <summary>The settings are back but a fresh reading could not be taken.</summary>
+    Failed = 3,
+}
+
 public sealed record LatencyOptimizationResult
 {
     public required LatencyOptimizationStatus Status { get; init; }
@@ -828,15 +935,45 @@ public sealed record LatencyOptimizationResult
     public LatencyMeasurement? Before { get; init; }
 
     /// <summary>
-    /// The idle measurement taken with the final settings in place, when one exists.
+    /// The idle measurement taken with the final settings in place and still in place.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Null when the run changed nothing, and null on the loaded lane, which measures no
     /// idle "after" at all. An earlier build put the loaded window here, which the status
     /// view then rendered as the idle ping - so a card could report the 140 ms measured
     /// mid-upload as the user's idle round trip.
+    /// </para>
+    /// <para>
+    /// It is also null after a rollback, and that is the fix for the reported "+5%,
+    /// disabled" card. The rejected-candidate reading used to be carried here and shown as
+    /// the current ping, so the card reported the increase that caused the rejection as
+    /// the state the user had been left in - while the same card said the change had been
+    /// taken back off. What the connection reads now goes in <see cref="Current"/>.
+    /// </para>
     /// </remarks>
     public LatencyMeasurement? After { get; init; }
+
+    /// <summary>
+    /// The connection as it stands now, whatever the run concluded.
+    /// </summary>
+    /// <remarks>
+    /// After a rollback this is a fresh reading taken once the adapter settled, not the
+    /// candidate's. When one could not be taken, this is null and
+    /// <see cref="Remeasure"/> says why - the card then shows a state rather than
+    /// reusing an older number as though it were current.
+    /// </remarks>
+    public LatencyMeasurement? Current { get; init; }
+
+    /// <summary>Where the post-rollback re-measurement got to.</summary>
+    public LatencyRemeasureState Remeasure { get; init; } = LatencyRemeasureState.NotNeeded;
+
+    /// <summary>What kind of win the confirmation found, if it found one.</summary>
+    /// <remarks>
+    /// Kept apart from the milliseconds so a steadier connection is never rendered as a
+    /// median that dropped. See <see cref="LatencyGainKind"/>.
+    /// </remarks>
+    public LatencyGainKind GainKind { get; init; } = LatencyGainKind.None;
 
     /// <summary>What was measured, exactly, so "improvement" can never be ambiguous.</summary>
     public string TargetLabel { get; init; } = string.Empty;
