@@ -246,19 +246,27 @@ public sealed class DesignSystemTests
     [Fact]
     public void EveryStaticResourceReferenceNamesAKeyThatExists()
     {
-        var declared = new HashSet<string>(StringComparer.Ordinal);
+        // Scope matters, and pooling every key from every file hides the mistake this is
+        // for. A StaticResource sees the dictionary it is written in and whatever that
+        // dictionary merged before it - nothing else. The theme cannot see the window's
+        // own Window.Resources, so a converter declared there and used by a style here
+        // compiles cleanly and throws the first time WPF builds a template that uses the
+        // style. That is what happened to GainBrushConverter, and only the Windows render
+        // caught it.
+        var tokens = KeysIn(TokensXaml).Concat(KeysIn(IconsXaml)).ToHashSet(StringComparer.Ordinal);
 
-        foreach (var file in new[] { TokensXaml, IconsXaml, LightXaml, DarkXaml, RepoFiles.SharedThemeXaml, RepoFiles.MainWindowXaml })
-        {
-            foreach (var key in KeysIn(file))
-            {
-                declared.Add(key);
-            }
-        }
+        // The palette is merged by ThemeManager at application level and swapped live, so
+        // the theme reaches it with DynamicResource. Its keys are deliberately not here.
+        var themeScope = tokens.Concat(KeysIn(RepoFiles.SharedThemeXaml)).ToHashSet(StringComparer.Ordinal);
+        var windowScope = themeScope.Concat(KeysIn(RepoFiles.MainWindowXaml)).ToHashSet(StringComparer.Ordinal);
 
         var unresolved = new List<string>();
 
-        foreach (var file in new[] { RepoFiles.SharedThemeXaml, RepoFiles.MainWindowXaml })
+        foreach (var (file, visible) in new[]
+        {
+            (RepoFiles.SharedThemeXaml, themeScope),
+            (RepoFiles.MainWindowXaml, windowScope),
+        })
         {
             var markup = File.ReadAllText(file);
 
@@ -273,7 +281,7 @@ public sealed class DesignSystemTests
                     continue;
                 }
 
-                if (!declared.Contains(key))
+                if (!visible.Contains(key))
                 {
                     unresolved.Add($"{Path.GetFileName(file)}: {key}");
                 }

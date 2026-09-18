@@ -16,17 +16,8 @@
         Icon="Assets/dpibypass.ico"
         FontFamily="Segoe UI Variable Display, Segoe UI Variable, Segoe UI">
 
-    <Window.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
-        <infra:BooleanToHiddenConverter x:Key="BoolToHiddenConverter" />
-        <infra:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibilityConverter" />
-        <infra:EmptyStringToCollapsedConverter x:Key="EmptyToCollapsedConverter" />
-        <infra:SeverityToBrushConverter x:Key="SeverityBrushConverter" />
-        <infra:HotspotCheckStateToBrushConverter x:Key="CheckStateBrushConverter" />
-        <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
-        <infra:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
-        <infra:GainToBrushConverter x:Key="GainBrushConverter" />
-    </Window.Resources>
+    <!-- The converters live in Theme/Shared.xaml, not here: styles in that file use them,
+         and a StaticResource in a merged dictionary cannot see a window's own resources. -->
 
     <!-- Two layers in the same window: the app, and the greeting that covers it.
 

@@ -19,6 +19,27 @@
       window be re-spaced or re-timed without reading 1800 lines of markup.
     -->
 
+    <!--
+      Value converters.
+
+      Here rather than in the window, because styles in this file use them and a
+      StaticResource resolves against the dictionaries it can see - a window's own
+      Window.Resources is not one of them. Putting them in the window compiled fine and
+      threw "Cannot find resource named 'GainBrushConverter'" the first time WPF built a
+      template that used the style, which is the same ordering rule the merged dictionaries
+      above are commented with. Converters are stateless, so one instance serves the whole
+      application.
+    -->
+    <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+    <infra:BooleanToHiddenConverter x:Key="BoolToHiddenConverter" />
+    <infra:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibilityConverter" />
+    <infra:EmptyStringToCollapsedConverter x:Key="EmptyToCollapsedConverter" />
+    <infra:SeverityToBrushConverter x:Key="SeverityBrushConverter" />
+    <infra:HotspotCheckStateToBrushConverter x:Key="CheckStateBrushConverter" />
+    <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
+    <infra:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
+    <infra:GainToBrushConverter x:Key="GainBrushConverter" />
+
     <!-- ======== Icons ========
          Microsoft Fluent System Icons, filled paths from the official assets rather
          than strokes drawn here by hand. FluentIcon resolves symbol + size to the
