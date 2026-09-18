@@ -398,6 +398,26 @@ Test-Case 'the update does not wait on the uninstall process tree' {
     if ($poll -lt 0) { throw 'the registry key no longer decides when the uninstall is finished' }
 }
 
+Test-Case 'the wait for the uninstall says it is still waiting' {
+    # The uninstall runs the application's own restore steps - adapter properties, DNS,
+    # the hosts block, the driver service - before the registry key goes away, and on a
+    # machine where those are slow this is a console that has printed nothing for a
+    # minute or more. A wait nobody can tell from a hang gets reported as a hang and
+    # ended by hand, which is how an update that was about to succeed is lost.
+    $script = Get-Content -Path $scriptPath -Raw
+    $poll = $script.IndexOf('while ((Test-Path $installed.RegistryPath)', [StringComparison]::Ordinal)
+    if ($poll -lt 0) { throw 'the wait for the uninstall was not found' }
+
+    $body = $script.Substring($poll, [Math]::Min(900, $script.Length - $poll))
+    if ($body -notmatch 'Write-Note') { throw 'the wait prints nothing while it waits' }
+
+    # And when the budget does run out, the log is what says which step it stopped in.
+    if ($script -notmatch '/LOG=\$uninstallLog') { throw 'the uninstaller is run without a log file' }
+    if ($script -notmatch '\$uninstallLog[\s\S]{0,600}Get-Content[^\r\n]*-Tail') {
+        throw 'the uninstall log is never quoted back when the uninstall does not finish'
+    }
+}
+
 Test-Case 'the install waits only for Setup and not for the application it launches' {
     # Start-Process -Wait follows the child process tree on Windows. Inno Setup's
     # final [Run] entry starts the long-lived application, so using -Wait here leaves
