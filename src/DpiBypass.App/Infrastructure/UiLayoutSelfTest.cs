@@ -220,6 +220,26 @@ internal static class UiLayoutSelfTest
             statusWord.SetCurrentValue(TextBlock.TextProperty, "İyileştirme uygulanıyor");
             window.UpdateLayout();
 
+            // Every figure paints with the palette that is loaded now.
+            //
+            // The gain used to take its colour from a converter, and a converter runs when
+            // its binding changes - which a theme swap is not. It therefore kept whichever
+            // palette had been loaded when it first ran, and the dark theme got a dash
+            // drawn in the light theme's near-black on a near-black tile. Nothing but a
+            // rendered frame showed it, so this looks at the brush the element actually
+            // holds rather than at the markup that asked for one.
+            foreach (var figure in Descendants<TextBlock>(figures).Where(text => text.IsVisible))
+            {
+                var live = new[] { "AppTextPrimaryBrush", "AppTextSecondaryBrush", "AppSuccessBrush" }
+                    .Select(key => Application.Current.TryFindResource(key))
+                    .OfType<Brush>()
+                    .ToArray();
+
+                Require(
+                    live.Any(brush => ReferenceEquals(brush, figure.Foreground)),
+                    $"A ping figure at {scenario} paints with a brush that is not in the loaded palette.");
+            }
+
             var after = figures.TranslatePoint(new Point(), section);
             Require(Math.Abs(before.Y - after.Y) < 1, "Starting a run moved the three figures.");
             Require(figures.RenderSize == figuresSize, "The figures row changed size while busy.");

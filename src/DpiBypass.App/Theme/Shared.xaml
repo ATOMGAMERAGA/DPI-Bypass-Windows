@@ -27,8 +27,9 @@
       Window.Resources is not one of them. Putting them in the window compiled fine and
       threw "Cannot find resource named 'GainBrushConverter'" the first time WPF built a
       template that used the style, which is the same ordering rule the merged dictionaries
-      above are commented with. Converters are stateless, so one instance serves the whole
-      application.
+      above are commented with. (That converter has since gone - a brush belongs behind a
+      DynamicResource, not behind a converter that resolves it once.) Converters are
+      stateless, so one instance serves the whole application.
     -->
     <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
     <infra:BooleanToHiddenConverter x:Key="BoolToHiddenConverter" />
@@ -38,7 +39,6 @@
     <infra:HotspotCheckStateToBrushConverter x:Key="CheckStateBrushConverter" />
     <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
     <infra:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
-    <infra:GainToBrushConverter x:Key="GainBrushConverter" />
 
     <!-- ======== Icons ========
          Microsoft Fluent System Icons, filled paths from the official assets rather
@@ -354,11 +354,24 @@
         <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
     </Style>
 
-    <!-- The gain, which is the one figure allowed to turn green - and only when a paired
-         experiment verified it and the change is still applied. -->
+    <!--
+      The gain, which is the one figure allowed to turn green - and only when a paired
+      experiment verified it and the change is still applied.
+
+      A trigger with DynamicResource rather than a converter that looks a brush up. A
+      converter runs when its binding changes, and the theme changing is not a change to
+      ShowsReduction: the first version of this kept whichever palette had been loaded when
+      it first ran, so switching to the dark theme left the dash drawn in the light theme's
+      near-black on a near-black tile. Visible in the rendered frames and in nothing else.
+      DynamicResource follows the palette, which is why the rest of this file uses it.
+    -->
     <Style x:Key="PingGainStyle" TargetType="TextBlock" BasedOn="{StaticResource PingFigureStyle}">
-        <Setter Property="Foreground"
-                Value="{Binding PingCard.ShowsReduction, Converter={StaticResource GainBrushConverter}}" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding PingCard.ShowsReduction}" Value="True">
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
     </Style>
 
     <!-- The percentage, which is context for the gain and never the headline. -->

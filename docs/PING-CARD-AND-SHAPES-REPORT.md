@@ -18,9 +18,10 @@ yapıldı; aşağıda bunun neyi yakaladığı ve neyi hâlâ kapsamadığı yaz
 | --- | --- | --- |
 | `dotnet build` (Core + App + Tests) | başarılı | başarılı, 0 uyarı |
 | `dotnet test` | 1272 başarılı / 0 başarısız | **1319 başarılı / 0 başarısız** |
-| `--ui-selftest` (gerçek WPF penceresi, CI) | başarılı | başarılı — **ama önce üç gerçek hatayı yakaladı**, bkz. §6 |
+| `--ui-selftest` (gerçek WPF penceresi, CI) | başarılı | başarılı — **ama önce dört gerçek hatayı yakaladı**, bkz. §6 |
+| `scripts/tests/*.ps1` (CI) | başarılı | başarılı — bir ileri başvuruyu yakaladıktan sonra, bkz. §6.5 |
 
-Eklenen test sayısı: **47**.
+Eklenen test sayısı: **48**.
 
 ---
 
@@ -258,7 +259,29 @@ da düzeldi: karşılama kaldırılmıyor, **daraltılıyor**, yani `Loaded` uyg
 Self-test artık karta güvenmiyor, **bakıyor**: şablonun kurulmuş olması ve view
 model'in gösterdiği başlık, gövde ve simgenin kartın içinde bulunması şart.
 
-### 6.3 Anahtarın etiketi sonucu bildiriyordu
+### 6.3 Kazanç rakamı koyu temada görünmüyordu
+
+Yine karelere bakılarak bulundu: koyu temada "Kazanç" kutucuğundaki `—`
+neredeyse görünmezdi. Nedeni, rengi bir dönüştürücünün seçmesiydi. Bir
+dönüştürücü **bağlaması değişince** çalışır; tema değişmesi `ShowsReduction`'ın
+değişmesi değildir. Dolayısıyla ilk çalıştığında yüklü olan paletin fırçası
+donuyor ve koyu temada açık temanın neredeyse siyah metin rengiyle, neredeyse
+siyah bir kutucuğun üzerine çiziliyordu.
+
+Renk artık `DynamicResource` taşıyan bir tetikleyiciden geliyor — dosyanın geri
+kalanının zaten kullandığı biçim — ve `GainToBrushConverter` silindi. Self-test
+de artık markup'a değil, elemanın gerçekten tuttuğu fırçaya bakıyor: her ping
+rakamının rengi **o an yüklü paletin** bir fırçası olmak zorunda.
+
+**Not (bu geçişte düzeltilmedi).** Aynı biçim `SeverityBrushConverter` ve
+`CheckStateBrushConverter`'da da var; `MainWindow.xaml`'de beş yerde
+kullanılıyorlar ve aynı gizli kusuru taşıyorlar: çalışma sırasında tema
+değişirse bağlı değer değişmediği sürece renkleri eskisinde kalır. Bunlar bu
+çalışmadan önce de vardı ve her biri çok değerli bir girdi alıyor, yani
+tetikleyiciye çevirmek bu işin kapsamı dışında bir değişiklik olurdu. Bulgu
+olarak burada duruyor.
+
+### 6.4 Anahtarın etiketi sonucu bildiriyordu
 
 Aynı karelerde görüldü: anahtar `PingCard.Status`'a bağlıydı, yani son
 çalışmanın **sonucunu** gösteriyordu — oysa anahtar kullanıcının **tercihini**
@@ -301,4 +324,7 @@ Bunlar eksik değil, **yapılamayan** şeyler; sonuç uydurulmadı.
    `BadgeShapeTests` ile sayısal olarak, galeri PNG'sinde dört metin ölçeğiyle
    görsel olarak kapsanıyor — ama gerçek bir yüksek DPI ekranında değil.
 6. **PowerShell betik testleri** bu makinede çalıştırılamadı (PowerShell yok);
-   CI'da "Run the script and resource tests" adımı olarak geçiyor.
+   CI'da "Run the script and resource tests" adımı olarak geçiyor. Bu adım bir
+   **ileri başvuruyu** yakaladı (`PingSwitchStyle`, kendisinden 400 satır sonra
+   tanımlanan `SwitchStyle`'a `BasedOn` ile bağlıydı) ve aynı kural artık
+   `DesignSystemTests` içinde de var, yani Linux'ta da kırılıyor.
