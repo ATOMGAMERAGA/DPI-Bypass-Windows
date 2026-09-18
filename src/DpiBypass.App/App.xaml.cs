@@ -265,6 +265,10 @@ public partial class App : Application
         // The installer, the uninstaller and the command line share this executable.
         if (CommandLineTasks.IsHeadlessVerb(e.Args))
         {
+            // Before anything that could stop and wait. Setup starts its housekeeping
+            // hidden and then waits for it to exit, so on that path this process may
+            // never put up a dialog and may never run without a deadline.
+            CommandLineTasks.BeginUnattended(e.Args);
             InstallExceptionHandlers();
             _ = RunHeadlessAsync(e.Args);
             return;
@@ -1757,17 +1761,25 @@ public partial class App : Application
             // Nothing more we can do on the way down.
         }
 
-        try
+        // Never in front of an installer. This report is shown by a process Setup
+        // started hidden and is waiting on, so the dialog lands where no one can see
+        // it and no one can dismiss it - and the installation stops there, on a blank
+        // progress bar, until the machine is restarted. The crash file above is the
+        // account of what happened in that case.
+        if (!CommandLineTasks.Unattended)
         {
-            MessageBox.Show(
-                $"{AppPaths.ProductName} başlatılamadı.\n\n{exception.Message}\n\nAyrıntılar: {crashPath}",
-                AppPaths.ProductName,
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
-        }
-        catch (Exception)
-        {
-            // A headless session cannot show a dialog; the file is still written.
+            try
+            {
+                MessageBox.Show(
+                    $"{AppPaths.ProductName} başlatılamadı.\n\n{exception.Message}\n\nAyrıntılar: {crashPath}",
+                    AppPaths.ProductName,
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            catch (Exception)
+            {
+                // A headless session cannot show a dialog; the file is still written.
+            }
         }
 
         if (!recovering)

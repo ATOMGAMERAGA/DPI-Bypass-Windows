@@ -39,10 +39,141 @@ internal static class CommandLineTasks
     /// </summary>
     private static readonly HashSet<string> HeadlessVerbs = new(StringComparer.OrdinalIgnoreCase)
     {
-        "install-autostart", "uninstall-autostart", "restore-dns", "dns-watchdog", "health-check",
+        "install-autostart", "uninstall-autostart", "restore-dns", "restore-hosts",
+        "dns-watchdog", "health-check",
         "strategies", "isps", "version", "v", "help", "h", "?",
         "status", "test", "search", "domains", "enable", "disable", "hotspot", "vodafone", "latency",
     };
+
+    /// <summary>
+    /// The verbs Setup and the uninstaller run themselves, hidden, while they wait for
+    /// this process to exit.
+    /// </summary>
+    /// <remarks>
+    /// Nobody is looking at these runs and nobody can click anything in them: the
+    /// window they would be shown in belongs to a process started with SW_HIDE by an
+    /// installer that, on a silent install, is itself no more than a progress bar. A
+    /// dialog here is not a prompt, it is an installation that never finishes - so
+    /// these runs answer in the log instead, and they carry a deadline.
+    /// </remarks>
+    private static readonly HashSet<string> UnattendedVerbs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "install-autostart", "uninstall-autostart", "restore-dns", "restore-hosts",
+    };
+
+    /// <summary>
+    /// How long each of those may take before this process ends itself.
+    /// </summary>
+    /// <remarks>
+    /// Comfortably longer than the work is: restoring DNS writes every adapter in one
+    /// PowerShell call whose own budget reaches two minutes on a machine with many of
+    /// them, and the latency restore asks a running copy first with a 45 second budget
+    /// before doing the work itself. Long enough, in other words, that reaching the
+    /// deadline means something is wrong rather than something is slow.
+    /// </remarks>
+    private static TimeSpan UnattendedDeadline(string verb) => verb switch
+    {
+        "restore-dns" => TimeSpan.FromMinutes(4),
+        "latency" => TimeSpan.FromMinutes(3),
+        _ => TimeSpan.FromMinutes(1.5),
+    };
+
+    /// <summary>
+    /// Whether this process is doing installer housekeeping nobody is watching.
+    /// </summary>
+    /// <remarks>
+    /// Read by every place that would otherwise put something modal on screen. The
+    /// dialog would be invisible - and the wait behind it endless.
+    /// </remarks>
+    public static bool Unattended { get; private set; }
+
+    /// <summary>
+    /// Answers whether this launch is one the installer or the uninstaller is waiting
+    /// on, and if it is, puts a deadline on it.
+    /// </summary>
+    /// <remarks>
+    /// The deadline is the promise this executable makes to whoever started it: that
+    /// the wait ends. Setup has its own limit on top of this one, because the copy it
+    /// runs during an upgrade is the build already installed rather than this one, and
+    /// a promise made here cannot be made retroactively by a build that shipped first.
+    /// </remarks>
+    public static void BeginUnattended(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            return;
+        }
+
+        var verb = NormaliseVerb(args[0]);
+
+        // "latency restore" is the uninstaller's and the upgrade sweep's, and is the
+        // one unattended job whose verb alone does not say so - "latency status" and
+        // "latency test" are things a person runs and reads.
+        var unattended = UnattendedVerbs.Contains(verb)
+            || (verb == "latency"
+                && args.Length > 1
+                && string.Equals(args[1].Trim(), "restore", StringComparison.OrdinalIgnoreCase));
+
+        if (!unattended)
+        {
+            return;
+        }
+
+        Unattended = true;
+        StartDeadline(verb, UnattendedDeadline(verb));
+    }
+
+    /// <summary>
+    /// Ends this process, hard, once the deadline passes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A thread rather than a timer, so nothing can collect it while it waits, and a
+    /// background one, so a job that finishes on time is never held open by it.
+    /// <see cref="Process.Kill()"/> rather than
+    /// <see cref="Environment.Exit(int)"/> because the state this exists for is one
+    /// where an orderly shutdown is exactly what is not happening: a modal dialog on
+    /// the UI thread, or a wait that will not return. Kill needs no cooperation from
+    /// either.
+    /// </para>
+    /// <para>
+    /// The work itself is not lost by being cut short. A DNS snapshot that was not
+    /// put back is put back by the next launch, which reconciles it before anything
+    /// else, and by the separately named recovery process.
+    /// </para>
+    /// </remarks>
+    private static void StartDeadline(string verb, TimeSpan budget)
+    {
+        var watchdog = new Thread(() =>
+        {
+            Thread.Sleep(budget);
+
+            try
+            {
+                AppLog.Error(
+                    $"'{verb}' {budget.TotalSeconds:0} saniyede bitmedi; kurulumu bekletmemek için işlem sonlandırılıyor.");
+            }
+            catch (Exception)
+            {
+                // The log is a courtesy here; the exit is not.
+            }
+
+            try
+            {
+                Process.GetCurrentProcess().Kill();
+            }
+            catch (Exception)
+            {
+                Environment.Exit(3);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "unattended-deadline",
+        };
+
+        watchdog.Start();
+    }
 
     /// <summary>
     /// Answers, without doing any work, whether this launch is a headless job.
@@ -532,8 +663,10 @@ internal static class CommandLineTasks
         }
 
         // Maintenance runs under Setup with no parent console. A modal result
-        // dialog would keep Setup waiting indefinitely for this helper to exit.
-        if (!allowDialog)
+        // dialog would keep Setup waiting indefinitely for this helper to exit - so
+        // the caller can rule one out, and being an unattended run rules it out
+        // whatever the caller thought.
+        if (!allowDialog || Unattended)
         {
             AppLog.Info(text);
             return;
