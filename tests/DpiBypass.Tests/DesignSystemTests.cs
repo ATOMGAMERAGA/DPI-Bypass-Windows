@@ -333,4 +333,81 @@ public sealed class DesignSystemTests
 
         Assert.DoesNotContain(style.Descendants(), element => element.Name.LocalName is "ControlTemplate" or "Path");
     }
+
+    /// <summary>
+    /// A markup extension is never buried inside a longer attribute value.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// XAML only treats <c>{…}</c> as markup when it is the <em>whole</em> value. Written
+    /// anywhere else - <c>Margin="0,0,0,{StaticResource Space.8}"</c> - it is a literal
+    /// string, handed to the property's type converter, which throws while the window is
+    /// being built. And nothing catches it first: the compiler defers the conversion into
+    /// BAML, and a test that only checks whether each key resolves sees a perfectly good
+    /// key name.
+    /// </para>
+    /// <para>
+    /// This shipped once. ThicknessConverter threw on the two Margin setters above,
+    /// Shared.xaml stopped loading at that line, and every style declared after it - which
+    /// is most of them - was simply absent, so the retry died on a missing
+    /// SectionTitleStyle instead. The published app could not build its window at all.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoAttributeBuriesAMarkupExtensionInsideALongerValue()
+    {
+        var offenders = new List<string>();
+
+        foreach (var file in Directory.EnumerateFiles(
+            Path.GetDirectoryName(RepoFiles.MainWindowXaml)!,
+            "*.xaml",
+            SearchOption.AllDirectories))
+        {
+            var lines = File.ReadAllLines(file);
+
+            for (var number = 0; number < lines.Length; number++)
+            {
+                foreach (Match match in Regex.Matches(lines[number], @"[\w.:]+=""(?<value>[^""]*)"""))
+                {
+                    var value = match.Groups["value"].Value;
+
+                    // "{}" at the start is XAML's own escape for a literal brace, and a
+                    // value that begins with "{" is a real markup extension.
+                    if (value.Contains('{', StringComparison.Ordinal)
+                        && !value.TrimStart().StartsWith('{'))
+                    {
+                        offenders.Add($"{Path.GetFileName(file)}:{number + 1} {match.Value}");
+                    }
+                }
+            }
+        }
+
+        Assert.Empty(offenders);
+    }
+
+    /// <summary>
+    /// A Thickness, a CornerRadius or a FontFamily cannot be composed from a token, so the
+    /// composed values are tokens of their own.
+    /// </summary>
+    /// <remarks>
+    /// The rule above says what may not be written; this says what to write instead. Every
+    /// spacing value the styles use is either a whole-value resource reference or a plain
+    /// literal - never one glued to the other.
+    /// </remarks>
+    [Fact]
+    public void TheComposedSpacingValuesExistAsTokensOfTheirOwn()
+    {
+        var keys = KeysIn(TokensXaml);
+
+        foreach (var required in new[]
+        {
+            "Pad.Card", "Pad.Tile", "Pad.Control", "Pad.Pill", "Pad.Page",
+            "Gap.StackTight", "Gap.Stack", "Gap.StackWide", "Gap.Section",
+            "Gap.InlineStart", "Gap.InlineEnd",
+            "Border.Hairline", "Border.Focus",
+        })
+        {
+            Assert.Contains(required, keys);
+        }
+    }
 }

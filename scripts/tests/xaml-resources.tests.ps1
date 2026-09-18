@@ -40,10 +40,28 @@ Write-Host "  $($defined.Count) key(s) defined across the app's dictionaries"
 
 $missing = New-Object System.Collections.Generic.List[string]
 $forwardReferences = New-Object System.Collections.Generic.List[string]
+$buriedExtensions = New-Object System.Collections.Generic.List[string]
 $references = 0
 
 foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
     $text = Get-Content -Path $file.FullName -Raw
+
+    # XAML only treats {...} as markup when it is the WHOLE attribute value. Written
+    # anywhere else - Margin="0,0,0,{StaticResource Space.8}" - it is a literal string
+    # handed to the property's type converter, which throws while the window is being
+    # built. Nothing catches it earlier: the compiler defers the conversion into BAML and
+    # the key name itself is perfectly valid. This shipped once, and it stopped
+    # Shared.xaml loading at that line, so every style after it was simply absent.
+    $line = 0
+    foreach ($row in $text -split "`n") {
+        $line++
+        foreach ($attribute in [regex]::Matches($row, '[\w.:]+="([^"]*)"')) {
+            $value = $attribute.Groups[1].Value
+            if ($value.Contains('{') -and -not $value.TrimStart().StartsWith('{')) {
+                $buriedExtensions.Add("$($file.Name):$line $($attribute.Value)")
+            }
+        }
+    }
 
     foreach ($match in [regex]::Matches($text, '\{(StaticResource|DynamicResource)\s+([^},]+)\}')) {
         $kind = $match.Groups[1].Value
@@ -92,7 +110,7 @@ foreach ($file in Get-ChildItem $appDirectory -Filter '*.xaml' -Recurse) {
 
 Write-Host "  $references reference(s) checked"
 
-if ($missing.Count -gt 0 -or $forwardReferences.Count -gt 0) {
+if ($missing.Count -gt 0 -or $forwardReferences.Count -gt 0 -or $buriedExtensions.Count -gt 0) {
     Write-Host ''
     foreach ($entry in $missing) {
         Write-Host "  MISSING $entry" -ForegroundColor Red
@@ -100,9 +118,13 @@ if ($missing.Count -gt 0 -or $forwardReferences.Count -gt 0) {
     foreach ($entry in $forwardReferences) {
         Write-Host "  FORWARD $entry" -ForegroundColor Red
     }
+    foreach ($entry in $buriedExtensions) {
+        Write-Host "  BURIED  $entry" -ForegroundColor Red
+    }
 
     Write-Host ''
-    Write-Host "$($missing.Count) missing and $($forwardReferences.Count) forward resource reference(s)." -ForegroundColor Red
+    Write-Host ("$($missing.Count) missing, $($forwardReferences.Count) forward and " +
+        "$($buriedExtensions.Count) buried resource reference(s).") -ForegroundColor Red
     exit 1
 }
 

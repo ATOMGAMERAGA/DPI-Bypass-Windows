@@ -39,6 +39,7 @@
     <Thickness x:Key="Pad.Page">18,14,20,14</Thickness>
     <Thickness x:Key="Pad.TopBar">20,12</Thickness>
 
+    <Thickness x:Key="Gap.StackTight">0,0,0,8</Thickness>
     <Thickness x:Key="Gap.Stack">0,0,0,12</Thickness>
     <Thickness x:Key="Gap.StackWide">0,0,0,16</Thickness>
     <Thickness x:Key="Gap.Section">0,0,0,24</Thickness>
