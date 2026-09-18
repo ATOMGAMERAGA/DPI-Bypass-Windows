@@ -17,10 +17,10 @@ yapıldı; aşağıda bunun neyi yakaladığı ve neyi hâlâ kapsamadığı yaz
 | Kapı | `6c0b284` | Bu dalda |
 | --- | --- | --- |
 | `dotnet build` (Core + App + Tests) | başarılı | başarılı, 0 uyarı |
-| `dotnet test` | 1272 başarılı / 0 başarısız | **1318 başarılı / 0 başarısız** |
-| `--ui-selftest` (gerçek WPF penceresi, CI) | başarılı | başarılı — **ama önce bir gerçek hatayı yakaladı**, bkz. §6 |
+| `dotnet test` | 1272 başarılı / 0 başarısız | **1319 başarılı / 0 başarısız** |
+| `--ui-selftest` (gerçek WPF penceresi, CI) | başarılı | başarılı — **ama önce üç gerçek hatayı yakaladı**, bkz. §6 |
 
-Eklenen test sayısı: **46**.
+Eklenen test sayısı: **47**.
 
 ---
 
@@ -77,8 +77,10 @@ Gerçek çizim tarafında `UiLayoutSelfTest.VerifyBadgeShapes` üç pencere boyu
 iki palette yerleşmiş her kapsülü ölçüyor, ayrıca dört metin ölçeğinde bir rozet
 galerisi PNG'si üretiyor (`artifacts/ui-selftest/badges-*.png`, CI artefaktı).
 
-**Doğrulanamayan.** Rozetlerin *görünüşüne* dair bir yargı. Ekran görüntülerini
-CI üretiyor; bu oturumda onlara bakılmadı.
+**Görsel doğrulama.** CI'ın ürettiği `badges-Light.png` indirildi ve **bakıldı**:
+dört metin ölçeğinin dördünde de rozetler uçları yuvarlak kapsül, karşılama
+noktaları daire ve etkin nokta kapsül olarak çiziliyor. Yani bu maddede iddia
+yalnız geometriye değil, gerçek bir Windows çizimine dayanıyor.
 
 ---
 
@@ -213,7 +215,7 @@ sürdürüyor.
 
 ---
 
-## 6. CI'nın yakaladığı gerçek hata
+## 6. CI'nın yakaladığı gerçek hatalar
 
 Bu, "Windows'ta gerçek render ile doğrula" isteğinin neden haklı olduğunun
 kanıtı. Ping kartının kazanç rengini `Theme/Shared.xaml`'deki bir stil
@@ -237,6 +239,34 @@ ThatExists` bunu yakalayamazdı çünkü bütün dosyaların anahtarlarını tek
 topluyordu, yani **hiçbir kapsam modellemiyordu**; artık her dosyanın
 başvurularını o dosyanın gerçekten görebildiklerine karşı çözüyor.
 
+### 6.2 Karşılama kartı boş çiziliyordu
+
+Pencere yeşile döndükten sonra üretilen PNG'lere **bakıldı** ve karşılama
+kartının yerinde çıplak bir `0` olduğu görüldü. Kartı, `ApplyMotionPreference`
+içinden bir takma ad anahtarını iki şablondan birine yönelterek seçmek gerçek
+çizimde çalışmadı; `ContentTemplate` hiçbir şeye çözülünce sunucu bağlı değeri
+(kart indeksi) olduğu gibi çiziyor. Sessiz bir başarısızlık: derleme, birim
+testleri ve pencere sağlık denetimi hepsi geçiyordu.
+
+Seçim artık `MotionEnabled` üzerinde bir tetikleyici — bağlantı halkasının zaten
+kullandığı birleşik tercih — ve `ContentTemplate` sunucuya değil **stile**
+yazılıyor, çünkü yerel bir değer tetikleyiciyi yener. Işık, marka ve eylem
+çubuğu da aynı koşula taşındı; bu arada `Loaded` tetikleyicilerinin bir hatası
+da düzeldi: karşılama kaldırılmıyor, **daraltılıyor**, yani `Loaded` uygulamanın
+ömrü boyunca bir kez çalışırdı.
+
+Self-test artık karta güvenmiyor, **bakıyor**: şablonun kurulmuş olması ve view
+model'in gösterdiği başlık, gövde ve simgenin kartın içinde bulunması şart.
+
+### 6.3 Anahtarın etiketi sonucu bildiriyordu
+
+Aynı karelerde görüldü: anahtar `PingCard.Status`'a bağlıydı, yani son
+çalışmanın **sonucunu** gösteriyordu — oysa anahtar kullanıcının **tercihini**
+taşır. Ayrı tutulması istenen tam olarak bu iki durumdu ve bir anahtarın üstünde
+"Mevcut ayarlar korundu" yazabilirdi. Artık kendi işaretli durumundan Açık/Kapalı
+okuyor; başlığın altındaki durum sözcüğü ölçümlerin bulduğunu söylemeye devam
+ediyor.
+
 ---
 
 ## 7. Doğrulanamayanlar
@@ -255,14 +285,17 @@ Bunlar eksik değil, **yapılamayan** şeyler; sonuç uydurulmadı.
    `TotalBudget`); Traffic Guard'ın `MinimumRetainedThroughputShare` tabanı hızı
    ciddi düşüren bir kazancı kabul etmiyor. Bunlar bu geçişte **yazılmadı**,
    yalnız doğrulandı.
-3. **Ekran görüntülerine bakılmadı.** CI `artifacts/ui-selftest/*.png` üretiyor
-   (pencere kareleri ve yeni rozet galerisi); bu oturumda indirilip
-   incelenmediler. Şekil ve karşılama iddiaları geometri, yerleşim ölçümü ve
-   çalışan pencerenin hata vermemesi üzerine kuruludur, göze dayanmaz.
+3. **Ekran görüntülerine bakıldı, ama hepsine değil.** CI'ın ürettiği
+   `artifacts/ui-selftest/*.png` indirildi; rozet galerisi (açık palet) ve ping
+   kartı ile karşılama (koyu palet, 1080) incelendi. Rozetlerin dört metin
+   ölçeğinde de düzgün kapsül çizildiği ve karşılama kartının §6.2'den önce boş
+   olduğu **görülerek** doğrulandı. Diğer 20 kare açılmadı.
 4. **Karşılamanın hareketli hâli CI'da çizilmiyor.** Koşucu
    `SystemParameters.ClientAreaAnimation = false` bildiriyor ("Hareket azaltma
    etkin" günlüğü), yani CI'ın çizdiği **durağan** varyant. Hareketli yol için
-   kanıt markup testleri ve bütçe denetimidir; gerçek karesi alınmadı.
+   kanıt markup testleri ve bütçe denetimidir; gerçek karesi alınmadı. Bu aynı
+   zamanda §6.2'nin neden yalnız durağan yolda görüldüğü anlamına gelir — hareketli
+   yol da aynı takma ad mekanizmasını kullanıyordu, yani aynı hatayı taşıyordu.
 5. **%100/%125/%150/%200 DPI.** Self-test üç pencere boyutu ve iki paleti
    geziyor; DPI ölçeğini değiştirmiyor. Rozet geometrisi bu ölçeklerde
    `BadgeShapeTests` ile sayısal olarak, galeri PNG'sinde dört metin ölçeğiyle
