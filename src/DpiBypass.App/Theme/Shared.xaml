@@ -1245,6 +1245,15 @@
         </Style.Triggers>
     </Style>
 
+    <!--
+      The greeting fills the window's content area and nothing more.
+
+      It is a child of the window's layout root, so it covers the app and never the
+      monitor: it cannot resize the window, move it, or go full screen, because it has no
+      access to any of those. Collapsed when it is not wanted, which also stops every
+      storyboard inside it - a greeting that was dismissed or a window that went to the
+      notification area leaves nothing running.
+    -->
     <Style x:Key="WelcomeOverlayStyle" TargetType="Grid">
         <Setter Property="Visibility" Value="Collapsed" />
         <Setter Property="Background" Value="Transparent" />
@@ -1266,32 +1275,275 @@
     </Style>
 
     <!--
+      The light behind the greeting.
+
+      A radial gradient rather than a blurred surface. A BlurEffect is a per-frame GPU
+      pass over everything under it, and this window is meant to stay smooth on integrated
+      graphics; a gradient is one brush the compositor draws once. It also settles: the
+      entrance scales and fades it in, and then it stops. Nothing here repeats, so the
+      greeting costs nothing to leave on screen while somebody reads it.
+    -->
+    <Style x:Key="WelcomeGlowStyle" TargetType="Border">
+        <Setter Property="IsHitTestVisible" Value="False" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Width" Value="620" />
+        <Setter Property="Height" Value="460" />
+        <Setter Property="Opacity" Value="0.85" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+        <Setter Property="Background">
+            <Setter.Value>
+                <RadialGradientBrush GradientOrigin="0.5,0.42" Center="0.5,0.42" RadiusX="0.62" RadiusY="0.62">
+                    <GradientStop Color="{DynamicResource AppAccentGlowColor}" Offset="0" />
+                    <GradientStop Color="{DynamicResource AppAccentGlowFadeColor}" Offset="1" />
+                </RadialGradientBrush>
+            </Setter.Value>
+        </Setter>
+        <Setter Property="RenderTransform">
+            <Setter.Value>
+                <ScaleTransform ScaleX="1" ScaleY="1" />
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <EventTrigger RoutedEvent="Loaded">
+                <BeginStoryboard>
+                    <Storyboard>
+                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                         From="0" To="0.85"
+                                         Duration="{StaticResource Motion.StateSlow}"
+                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleX"
+                                         From="0.82" To="1"
+                                         Duration="{StaticResource Motion.StateSlow}"
+                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleY"
+                                         From="0.82" To="1"
+                                         Duration="{StaticResource Motion.StateSlow}"
+                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                    </Storyboard>
+                </BeginStoryboard>
+            </EventTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
+      The brand mark's arrival: up, in, and a touch of overshoot to land on.
+    -->
+    <Style x:Key="WelcomeBrandStyle" TargetType="StackPanel">
+        <Setter Property="Orientation" Value="Horizontal" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,0,0,32" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+        <Setter Property="RenderTransform">
+            <Setter.Value>
+                <TransformGroup>
+                    <ScaleTransform ScaleX="1" ScaleY="1" />
+                    <TranslateTransform X="0" Y="0" />
+                </TransformGroup>
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <EventTrigger RoutedEvent="Loaded">
+                <BeginStoryboard>
+                    <Storyboard>
+                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                         From="0" To="1"
+                                         Duration="{StaticResource Motion.Content}"
+                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleX"
+                                         From="0.88" To="1"
+                                         Duration="{StaticResource Motion.State}"
+                                         EasingFunction="{StaticResource Motion.Overshoot}" />
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleY"
+                                         From="0.88" To="1"
+                                         Duration="{StaticResource Motion.State}"
+                                         EasingFunction="{StaticResource Motion.Overshoot}" />
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[1].Y"
+                                         From="10" To="0"
+                                         Duration="{StaticResource Motion.State}"
+                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                    </Storyboard>
+                </BeginStoryboard>
+            </EventTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
+      The action bar, which arrives with the rest rather than after it.
+
+      Its entrance is the shortest thing here on purpose. A button that is still fading in
+      is already clickable - WPF hit-tests an element at zero opacity - but somebody who
+      cannot see it will not press it, so the wait to see it has to be short enough not to
+      be one. 130 ms with no delay.
+    -->
+    <Style x:Key="WelcomeActionsStyle" TargetType="Border" BasedOn="{StaticResource ChromeBorderStyle}">
+        <Setter Property="BorderThickness" Value="0,1,0,0" />
+        <Setter Property="Padding" Value="24,16" />
+        <Style.Triggers>
+            <EventTrigger RoutedEvent="Loaded">
+                <BeginStoryboard>
+                    <Storyboard>
+                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                         From="0" To="1"
+                                         Duration="{StaticResource Motion.Fast}"
+                                         EasingFunction="{StaticResource Motion.EaseOut}" />
+                    </Storyboard>
+                </BeginStoryboard>
+            </EventTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- The same two, with the movement taken out for a reduced-motion machine. -->
+    <Style x:Key="WelcomeGlowStaticStyle" TargetType="Border">
+        <Setter Property="IsHitTestVisible" Value="False" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Width" Value="620" />
+        <Setter Property="Height" Value="460" />
+        <Setter Property="Opacity" Value="0.85" />
+        <Setter Property="Background">
+            <Setter.Value>
+                <RadialGradientBrush GradientOrigin="0.5,0.42" Center="0.5,0.42" RadiusX="0.62" RadiusY="0.62">
+                    <GradientStop Color="{DynamicResource AppAccentGlowColor}" Offset="0" />
+                    <GradientStop Color="{DynamicResource AppAccentGlowFadeColor}" Offset="1" />
+                </RadialGradientBrush>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="WelcomeBrandStaticStyle" TargetType="StackPanel">
+        <Setter Property="Orientation" Value="Horizontal" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,0,0,32" />
+    </Style>
+
+    <!--
       One card of the greeting.
 
       Bound to the card index rather than to its text: changing the index re-instantiates
-      the template, whose Loaded trigger cross-fades the new card in. That is one
-      animation for any number of cards, and nothing to keep in step when one is added.
+      the template, whose Loaded trigger plays the entrance. That is one animation for any
+      number of cards, and nothing to keep in step when one is added - and it is also what
+      makes moving between steps feel like the same gesture every time.
 
-      The fade is opacity only - no slide, no scale. Reduced-motion guidance is about
-      movement rather than about change, so this stays on whatever the motion preference
-      says, and the animations that do move (the connection ring, the tick) are the ones
-      gated on it.
+      The three parts arrive in the order they are read, 70 ms apart, each rising a few
+      DIP as it fades. The last of them finishes 380 ms after the first frame, which is
+      short enough that nobody waits through it - and nobody has to: the buttons are in the
+      bar below, which has its own much shorter entrance and is clickable throughout.
+
+      Nothing here repeats. Each storyboard runs once per card and stops, so a greeting
+      left on screen is not costing frames, and a window that goes to the notification area
+      leaves nothing running behind it.
     -->
-    <DataTemplate x:Key="WelcomeCardTemplate">
+    <DataTemplate x:Key="WelcomeCardAnimatedTemplate">
         <StackPanel HorizontalAlignment="Center">
             <StackPanel.Triggers>
                 <EventTrigger RoutedEvent="Loaded">
                     <BeginStoryboard>
                         <Storyboard>
-                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                            <!-- The mark, with a little depth as it settles. -->
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardIcon"
+                                             Storyboard.TargetProperty="Opacity"
                                              From="0" To="1"
-                                             Duration="{StaticResource Motion.Micro}"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardIcon"
+                                             Storyboard.TargetProperty="RenderTransform.Children[0].ScaleX"
+                                             From="0.86" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardIcon"
+                                             Storyboard.TargetProperty="RenderTransform.Children[0].ScaleY"
+                                             From="0.86" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+
+                            <!-- Then the heading. -->
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardTitle"
+                                             Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             BeginTime="0:0:0.07"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardTitle"
+                                             Storyboard.TargetProperty="RenderTransform.Y"
+                                             From="12" To="0"
+                                             BeginTime="0:0:0.07"
+                                             Duration="{StaticResource Motion.ContentSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+
+                            <!-- Then the sentence under it. -->
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardBody"
+                                             Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             BeginTime="0:0:0.14"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardBody"
+                                             Storyboard.TargetProperty="RenderTransform.Y"
+                                             From="12" To="0"
+                                             BeginTime="0:0:0.14"
+                                             Duration="{StaticResource Motion.ContentSlow}"
                                              EasingFunction="{StaticResource Motion.EaseOut}" />
                         </Storyboard>
                     </BeginStoryboard>
                 </EventTrigger>
             </StackPanel.Triggers>
 
+            <Border x:Name="WelcomeCardIcon"
+                    Width="72" Height="72"
+                    HorizontalAlignment="Center"
+                    RenderTransformOrigin="0.5,0.5"
+                    CornerRadius="{StaticResource Radius.Surface}"
+                    Background="{DynamicResource AppAccentSoftBrush}">
+                <Border.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform ScaleX="1" ScaleY="1" />
+                    </TransformGroup>
+                </Border.RenderTransform>
+                <infra:FluentIcon Symbol="{Binding DataContext.WelcomeSymbol, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  Filled="True"
+                                  Size="{StaticResource IconSize.Hero}"
+                                  Foreground="{DynamicResource AppAccentBrush}" />
+            </Border>
+
+            <TextBlock x:Name="WelcomeCardTitle"
+                       Text="{Binding DataContext.WelcomeTitle, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.Display}"
+                       FontWeight="SemiBold"
+                       Margin="0,24,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource AppTextPrimaryBrush}">
+                <TextBlock.RenderTransform>
+                    <TranslateTransform X="0" Y="0" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+
+            <TextBlock x:Name="WelcomeCardBody"
+                       Text="{Binding DataContext.WelcomeBody, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.BodyLarge}"
+                       Margin="0,12,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       LineHeight="24"
+                       Foreground="{DynamicResource AppTextSecondaryBrush}">
+                <TextBlock.RenderTransform>
+                    <TranslateTransform X="0" Y="0" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+        </StackPanel>
+    </DataTemplate>
+
+    <!--
+      The same card with the motion taken out.
+
+      Not a stripped-down version: the same spacing, the same sizes, the same hierarchy.
+      A greeting on a machine that asked Windows for no animation has to look finished
+      rather than look like one that failed to start, which is why this is a whole template
+      rather than a trigger somebody remembers to check.
+    -->
+    <DataTemplate x:Key="WelcomeCardStaticTemplate">
+        <StackPanel HorizontalAlignment="Center">
             <Border Width="72" Height="72"
                     HorizontalAlignment="Center"
                     CornerRadius="{StaticResource Radius.Surface}"
@@ -1319,6 +1571,14 @@
                        Foreground="{DynamicResource AppTextSecondaryBrush}" />
         </StackPanel>
     </DataTemplate>
+
+    <!-- What the window binds to, as an alias rather than a third copy of the card.
+         App.ApplyMotionPreference points it at the static one when Windows reports that
+         client area animation is off; the window reads it with DynamicResource so the
+         swap also takes effect when the preference changes while the app is running. -->
+    <StaticResource x:Key="WelcomeCardTemplate" ResourceKey="WelcomeCardAnimatedTemplate" />
+    <StaticResource x:Key="WelcomeGlowCurrentStyle" ResourceKey="WelcomeGlowStyle" />
+    <StaticResource x:Key="WelcomeBrandCurrentStyle" ResourceKey="WelcomeBrandStyle" />
 
     <Style x:Key="WelcomeDotStyle" TargetType="Border">
         <Setter Property="Width" Value="8" />

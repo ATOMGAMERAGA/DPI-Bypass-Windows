@@ -2075,6 +2075,12 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
+        <!-- The light behind the greeting. First in the row so everything else draws over
+             it, and not hit-testable, so it never comes between a button and a click. -->
+        <Border x:Name="WelcomeGlow"
+                Grid.Row="0"
+                Style="{DynamicResource WelcomeGlowCurrentStyle}" />
+
         <!-- The card column is centred and capped, so the greeting reads the same in a
              narrow window and a maximised one, and scrolls rather than clipping when the
              window is short or the text scale is large. -->
@@ -2088,7 +2094,7 @@
                         Margin="0,40">
 
                 <!-- Brand. The existing identity, at a size that stays sharp at 200%. -->
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,32">
+                <StackPanel x:Name="WelcomeBrand" Style="{DynamicResource WelcomeBrandCurrentStyle}">
                     <Border Width="52" Height="52"
                             Background="{DynamicResource AppAccentSoftBrush}"
                             CornerRadius="{StaticResource Radius.Tile}">
@@ -2108,8 +2114,9 @@
                      between cards re-instantiates the template and its Loaded trigger runs
                      the cross-fade: one place, no per-card triggers, and nothing to keep in
                      step when a card is added. -->
-                <ContentControl Content="{Binding WelcomeIndex}"
-                                ContentTemplate="{StaticResource WelcomeCardTemplate}"
+                <ContentControl x:Name="WelcomeCard"
+                                Content="{Binding WelcomeIndex}"
+                                ContentTemplate="{DynamicResource WelcomeCardTemplate}"
                                 HorizontalAlignment="Stretch" />
 
                 <!-- Progress. Dots for the tour, nothing for the one-line greeting. -->
@@ -2135,10 +2142,9 @@
 
         <!-- Actions. Skip on the left because it is the quiet way out; Back and the
              primary action on the right, where the eye finishes. -->
-        <Border Grid.Row="1"
-                Style="{StaticResource ChromeBorderStyle}"
-                BorderThickness="0,1,0,0"
-                Padding="24,16">
+        <Border x:Name="WelcomeActions"
+                Grid.Row="1"
+                Style="{StaticResource WelcomeActionsStyle}">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />

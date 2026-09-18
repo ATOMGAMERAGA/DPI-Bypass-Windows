@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -312,6 +313,26 @@ internal static class UiLayoutSelfTest
                 $"The greeting is {overlay.ActualWidth:0} wide in a {client.ActualWidth:0} content area.");
             Require(overlay.ActualHeight <= client.ActualHeight + 1, "The greeting overflowed the content area.");
 
+            // Usable from the first frame. The entrance animates opacity and a few DIP of
+            // travel, and neither may stand between somebody and the way out: the actions
+            // are laid out, enabled, and hit-testable before any of it has finished.
+            foreach (var name in new[] { "Tanıtımı atla", "Karşılamayı açılışta göster" })
+            {
+                var action = Descendants<FrameworkElement>(overlay).FirstOrDefault(element =>
+                    AutomationProperties.GetName(element) == name);
+
+                Require(action is not null, $"The greeting has no '{name}' control.");
+                Require(action!.IsVisible, $"'{name}' is not visible on the first frame.");
+                Require(action.IsEnabled, $"'{name}' is not usable on the first frame.");
+                Require(action.ActualWidth > 0 && action.ActualHeight > 0,
+                    $"'{name}' has not been laid out on the first frame.");
+                Require(action.IsHitTestVisible, $"'{name}' cannot be clicked on the first frame.");
+            }
+
+            // The light behind the greeting never intercepts a click.
+            var glow = (FrameworkElement)window.FindName("WelcomeGlow");
+            Require(!glow.IsHitTestVisible, "The greeting's background light is hit-testable.");
+
             SaveFrame(window, $"welcome-{scenario}");
 
             // Every card is reachable and none of them overflows the content area.
@@ -329,6 +350,11 @@ internal static class UiLayoutSelfTest
         {
             viewModel.BeginWelcome(WelcomeKind.None);
             window.UpdateLayout();
+
+            // Collapsed, which is what stops every storyboard inside it. A greeting that
+            // was dismissed, or a window that went to the notification area, must not leave
+            // anything animating behind it.
+            Require(!overlay.IsVisible, "The greeting is still visible after being dismissed.");
         }
     }
 

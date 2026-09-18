@@ -28,6 +28,16 @@
     <SolidColorBrush x:Key="AppAccentHoverBrush" Color="#4A8CF2" />
     <SolidColorBrush x:Key="AppAccentPressedBrush" Color="#2768C8" />
     <SolidColorBrush x:Key="AppAccentSoftBrush" Color="#E4EEFE" />
+    <!--
+      The greeting's background light, as colours rather than brushes: a
+      RadialGradientBrush needs its stops given a Color, and a GradientStop cannot take a
+      SolidColorBrush. Both carry alpha so the light sits over whatever the window
+      material is showing rather than over an assumed background.
+      On white, the accent at a fifth of its opacity is enough to read as light rather than as a shape.
+    -->
+    <Color x:Key="AppAccentGlowColor">#332F7EF0</Color>
+    <Color x:Key="AppAccentGlowFadeColor">#002F7EF0</Color>
+
     <SolidColorBrush x:Key="AppFocusStrokeBrush" Color="#2F7EF0" />
 
     <!-- Status -->

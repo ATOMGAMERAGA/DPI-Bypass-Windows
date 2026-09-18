@@ -582,11 +582,33 @@ public partial class App : Application
                     ? "Sayfa geçiş animasyonu açık."
                     : "Hareket azaltma etkin; sayfa geçiş animasyonu kullanılmıyor.");
             }
+
+            // The greeting the same way. Its three pieces are swapped together so a
+            // reduced-motion machine cannot end up with a static card behind a glow that
+            // still scales in. The window reads all three with DynamicResource, so this
+            // also takes effect when the preference changes while the app is running.
+            SwapMotionResource("WelcomeCardTemplate", wanted ? "WelcomeCardAnimatedTemplate" : "WelcomeCardStaticTemplate");
+            SwapMotionResource("WelcomeGlowCurrentStyle", wanted ? "WelcomeGlowStyle" : "WelcomeGlowStaticStyle");
+            SwapMotionResource("WelcomeBrandCurrentStyle", wanted ? "WelcomeBrandStyle" : "WelcomeBrandStaticStyle");
         }
         catch (Exception ex)
         {
             // A 180ms fade is not worth a failed start.
             AppLog.Error("Sayfa geçiş animasyonu tercihi uygulanamadı", ex);
+        }
+    }
+
+    /// <summary>Points an alias key at one of its two variants, if it moved.</summary>
+    /// <remarks>
+    /// The alias is always left pointing at something real: a variant that cannot be found
+    /// leaves the previous value in place rather than clearing the key, because a missing
+    /// DataTemplate renders as an empty card and a missing Style as an unstyled one.
+    /// </remarks>
+    private void SwapMotionResource(string alias, string variant)
+    {
+        if (Resources[variant] is { } value && !ReferenceEquals(Resources[alias], value))
+        {
+            Resources[alias] = value;
         }
     }
 
