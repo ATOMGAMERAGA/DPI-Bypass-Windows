@@ -769,6 +769,16 @@ public sealed class ProtectionService : IAsyncDisposable
         ReportSave(_store.Save(Settings), "ayarlar");
         Changed?.Invoke();
 
+        // Off means stop, not "queue behind whatever is already going". A paired benchmark
+        // runs for minutes, and without this the switch sat on and busy for all of them
+        // before anything was put back - which reads as the switch being ignored. The run
+        // in flight restores what it applied on its way out, and the restore below then
+        // makes sure of it.
+        if (!enabled)
+        {
+            CancelLatencyRun();
+        }
+
         await _latencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var run = BeginLatencyRun(cancellationToken);
 
