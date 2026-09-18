@@ -157,7 +157,8 @@
                                     <Ellipse Style="{StaticResource ConnectionRingCompleteStyle}"
                                              Width="176" Height="176" />
 
-                                    <Button Style="{StaticResource ConnectButtonStyle}"
+                                    <Button x:Name="ConnectButton"
+                                            Style="{StaticResource ConnectButtonStyle}"
                                             Command="{Binding ConnectCommand}"
                                             AutomationProperties.Name="{Binding ConnectionAction}"
                                             ToolTip="{Binding ConnectionAction}" />

@@ -167,14 +167,14 @@ internal static class UiLayoutSelfTest
     /// </remarks>
     private static void VerifyConnectionControl(MainWindow window)
     {
-        var viewModel = (MainViewModel)window.DataContext;
         var shell = (FrameworkElement)window.FindName("AppShell");
 
-        var button = Descendants<Button>(shell)
-            .FirstOrDefault(candidate => candidate.Command == viewModel.ConnectCommand);
+        // By name, not by command: the top bar's button carries the same command, and a
+        // visual-tree walk reaches it first - it is 38 DIP tall, so a size check would
+        // have been measuring the wrong control.
+        var button = (Button)FindPageElement(window, "ConnectButton");
 
-        Require(button is not null, "The connection button is not on the status page.");
-        Require(button!.ActualWidth > 100 && button.ActualHeight > 100, "The connection button is not the hero control.");
+        Require(button.ActualWidth > 100 && button.ActualHeight > 100, "The connection button is not the hero control.");
 
         var anchor = button.TranslatePoint(new Point(), shell);
         Require(anchor.Y > 0, "The connection button is not laid out.");
@@ -214,17 +214,21 @@ internal static class UiLayoutSelfTest
             Require(double.IsNaN(left) || Math.Abs(window.Left - left) < 0.5, "The greeting moved the window.");
             Require(double.IsNaN(top) || Math.Abs(window.Top - top) < 0.5, "The greeting moved the window.");
 
-            // It fills the content area rather than floating in the middle of it.
-            Require(Math.Abs(overlay.ActualWidth - window.ActualWidth) < 2,
-                $"The greeting is {overlay.ActualWidth:0} wide in a {window.ActualWidth:0} window.");
+            // It fills the content area rather than floating in the middle of it. Measured
+            // against the window's own content element: Window.ActualWidth is the outer
+            // width, resize frame included, and the client area is several DIP narrower.
+            var client = (FrameworkElement)window.Content;
+            Require(Math.Abs(overlay.ActualWidth - client.ActualWidth) < 2,
+                $"The greeting is {overlay.ActualWidth:0} wide in a {client.ActualWidth:0} content area.");
+            Require(overlay.ActualHeight <= client.ActualHeight + 1, "The greeting overflowed the content area.");
 
             SaveFrame(window, $"welcome-{scenario}");
 
-            // Every card is reachable and none of them overflows its column.
+            // Every card is reachable and none of them overflows the content area.
             for (var card = 0; card < viewModel.WelcomeCards.Count; card++)
             {
                 window.UpdateLayout();
-                Require(overlay.ActualHeight <= window.ActualHeight + 1, "A greeting card overflowed the window.");
+                Require(overlay.ActualHeight <= client.ActualHeight + 1, "A greeting card overflowed the window.");
                 viewModel.WelcomeNextCommand.Execute(null);
             }
 

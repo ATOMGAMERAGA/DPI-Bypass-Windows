@@ -134,11 +134,19 @@ public sealed partial class MainViewModel
         ShowWelcomeTourCommand = new RelayCommand(() => BeginWelcome(WelcomeKind.Tour));
     }
 
-    /// <summary>Starts the greeting the launch context calls for. None means go straight in.</summary>
+    /// <summary>
+    /// Starts the greeting the launch context calls for.
+    /// </summary>
+    /// <param name="kind">
+    /// <see cref="WelcomeKind.None"/> means no greeting, and that includes putting away
+    /// one that is already up - so a caller unwinding from an error has a way to hand the
+    /// window back without knowing what state it was left in.
+    /// </param>
     public void BeginWelcome(WelcomeKind kind)
     {
         if (kind == WelcomeKind.None)
         {
+            FinishWelcome(completed: false);
             return;
         }
 
