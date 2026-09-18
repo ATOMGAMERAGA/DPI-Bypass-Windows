@@ -658,7 +658,9 @@ public static class LatencyComparison
 
         var gains = new (string Name, double Value, double Threshold, Func<LatencyDelta, double> Select)[]
         {
-            ("median", mean.MedianMs, Floor(Limit(baselineMean.MedianRttMs, medianFloor, medianShare) * scale, resolution), delta => delta.MedianMs),
+            ("median", mean.MedianMs, Floor((gameDisplay
+                ? Limit(baselineMean.MedianRttMs, medianFloor, medianShare)
+                : MedianGainThreshold(baselineMean.MedianRttMs, candidate.CpuSensitive)) * scale, resolution), delta => delta.MedianMs),
             ("p95", mean.P95Ms, Floor(Limit(baselineMean.P95RttMs, p95Floor, p95Share) * scale, resolution), delta => delta.P95Ms),
             ("p99", mean.P99Ms, Floor(Limit(baselineMean.P99RttMs, P99GainFloorMs, P99GainShare) * scale, resolution), delta => delta.P99Ms),
             ("jitter", mean.JitterMs, Floor(Limit(baselineMean.JitterMs, JitterGainFloorMs, JitterGainShare) * scale, resolution), delta => delta.JitterMs),
@@ -689,13 +691,31 @@ public static class LatencyComparison
             return Verdict(LatencyVerdictOutcome.Inconclusive, "tekrarlanması bekleniyor", mean);
         }
 
+        // Gains newly admitted by the 1 ms cap deserve more evidence, not fewer
+        // safeguards. Require two complete ABBA repetitions in production, including
+        // during the independent bundle confirmation.
+        var uncappedMedianThreshold = Floor(
+            Limit(baselineMean.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale, resolution);
+        var required = (usable.Length / 2) + 1;
+        if (options.RequireConfidenceInterval && !gameDisplay && !candidate.CpuSensitive
+            && winner.Name == "median"
+            && (winner.Value < uncappedMedianThreshold
+                || deltas.Count(delta => delta.MedianMs >= uncappedMedianThreshold) < required)
+            && usable.Length < 4)
+        {
+            return Verdict(
+                pairs.Count >= maximumCycles ? LatencyVerdictOutcome.NotMeasured : LatencyVerdictOutcome.Inconclusive,
+                "küçük ping kazancı için dört karşılaştırma turu gerekiyor",
+                mean,
+                cause: LatencyOutcomeCause.InsufficientData);
+        }
+
         var winningDeltas = deltas.Select(winner.Select).ToArray();
         var noise = LatencyStatistics.MedianAbsoluteDeviation(winningDeltas);
         var typicalGain = LatencyStatistics.Median(winningDeltas);
 
         // The same metric has to clear its meaningful-effect threshold in most cycles,
         // not merely move by a positive fraction of a millisecond.
-        var required = (usable.Length / 2) + 1;
         var improvedCycles = winningDeltas.Count(value => value >= winner.Threshold);
         if (improvedCycles < required)
         {
@@ -886,7 +906,8 @@ public static class LatencyComparison
         var delta = LatencyDelta.Between(before, after);
         var replies = Math.Min(before.RemoteReplies, after.RemoteReplies);
 
-        if (delta.MedianMs >= Limit(before.MedianRttMs, MedianGainFloorMs, MedianGainShare) * scale)
+        if (delta.MedianMs >= Floor(MedianGainThreshold(before.MedianRttMs, cpuSensitive) * scale,
+                Math.Max(before.ClockResolutionMs, after.ClockResolutionMs)))
         {
             return LatencyGainKind.Median;
         }
@@ -914,6 +935,16 @@ public static class LatencyComparison
         "p95" or "p99" or "jitter" => LatencyGainKind.Stability,
         _ => LatencyGainKind.None,
     };
+
+    private static double MedianGainThreshold(double baseline, bool cpuSensitive)
+    {
+        var threshold = Limit(baseline, MedianGainFloorMs, MedianGainShare);
+        // A repeatable 1 ms improvement is useful even on a 150 ms path. The
+        // percentage floor used to reject it solely because the server was farther
+        // away. Keep the extra cost gate for CPU-intensive NIC changes; confidence,
+        // balanced order, clock resolution and regression guards still apply to all.
+        return cpuSensitive ? threshold : Math.Min(1.0, threshold);
+    }
 
     /// <summary>Raises a threshold to whatever the instrument can actually resolve.</summary>
     private static double Floor(double threshold, double resolutionMs)

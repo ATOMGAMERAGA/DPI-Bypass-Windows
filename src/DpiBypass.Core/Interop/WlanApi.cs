@@ -34,6 +34,18 @@ public static class WlanApi
     private const uint OpcodeMediaStreamingMode = 3;
     private const uint OpcodeCurrentConnection = 7;
 
+    // Streaming mode is a request owned by a WLAN client, not a persistent driver
+    // switch. Keep the client alive through the benchmark and any accepted setting.
+    private static readonly WlanMediaStreamingSessions StreamingSessions = new(
+        () => WlanOpenHandle(ClientVersion, 0, out _, out var client) == 0 ? client : 0,
+        (client, adapter, enabled) =>
+        {
+            var value = enabled ? 1 : 0;
+            return WlanSetInterface(client, ref adapter, OpcodeMediaStreamingMode, sizeof(int), ref value, 0) == 0;
+        },
+        adapter => TryGetMediaStreamingMode(adapter.ToString()),
+        client => WlanCloseHandle(client, 0) is 0 or 6); // INVALID_HANDLE: already released by Windows.
+
     // Offsets inside WLAN_CONNECTION_ATTRIBUTES.
     private const int AssociationOffset = 4 + 4 + 512;
     private const int SsidLengthOffset = AssociationOffset;
@@ -165,17 +177,9 @@ public static class WlanApi
             return false;
         }
 
-        nint client = 0;
         try
         {
-            if (WlanOpenHandle(ClientVersion, 0, out _, out client) != 0)
-            {
-                return false;
-            }
-
-            var value = enabled ? 1 : 0;
-            return WlanSetInterface(client, ref guid, OpcodeMediaStreamingMode, sizeof(int), ref value, 0) == 0
-                && TryGetMediaStreamingMode(interfaceId) == enabled;
+            return StreamingSessions.TrySet(guid, enabled);
         }
         catch (DllNotFoundException)
         {
@@ -184,13 +188,6 @@ public static class WlanApi
         catch (EntryPointNotFoundException)
         {
             return false;
-        }
-        finally
-        {
-            if (client != 0)
-            {
-                WlanCloseHandle(client, 0);
-            }
         }
     }
 

@@ -167,7 +167,10 @@ public sealed record LatencyProfile
     /// so they are deliberately re-earned.
     /// </para>
     /// </remarks>
-    public const int CurrentMethodologyVersion = 4;
+    // Version 5 keeps WLAN streaming clients alive during measurement and accepts
+    // resolvable 1 ms gains without a baseline-relative floor for low-cost changes.
+    // Earlier rejections must not suppress the first real test after this fix.
+    public const int CurrentMethodologyVersion = 5;
 
     /// <summary>Beyond this a profile is re-measured rather than trusted.</summary>
     public static readonly TimeSpan MaximumAge = TimeSpan.FromDays(30);

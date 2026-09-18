@@ -693,6 +693,19 @@ keyword'üyle eşleşir, yerelleştirilmiş görünen ad **hiç okunmaz**):
   blok yoktur; yük altındaki lane ise NIC ayarı değil hat ve QoS ölçer. Katalogda
   kalma nedeni, eski bir kayıttan geri yükleyebilmektir.
 
+Wi-Fi streaming isteğinin Windows oturumu ölçüm boyunca ve ayar kabul edilirse
+mod açık kaldığı sürece korunur. Oturumu ayarı yazdıktan hemen sonra kapatmak,
+Windows'un isteği geri almasına ve özgün ayarların iki kez ölçülmesine yol
+açıyordu. Geri alırken yalnız uygulamanın kendi oturumu bırakılır.
+
+İşlemci maliyeti yüksek olmayan ayarlarda **tekrarlanan 1 ms median kazanç**,
+başlangıç pinginin yüzdesi küçük kaldığı için elenmez. Önceki yüzde eşiğinin
+altında kalan bu kazançlar dört eşli turla ve ardından ayrı paket doğrulamasıyla
+kontrol edilir; saat çözünürlüğü, gürültü, paket kaybı ve kötüleşme kontrolleri
+korunur. Eski yöntemle kaydedilmiş sonuçlar ilk çalıştırmada yeniden ölçülür.
+Bu, her bağlantıda ping düşüşü garantisi değildir; sürücü, Wi-Fi ve operatör
+koşulları sonucu belirler.
+
 **Bir ayar "uygulandı" sayılmaz, kanıtlanır.** Microsoft'un kendi belgesi
 `-NoRestart` için *"Many advanced properties require restarting the network
 adapter before the new settings take effect"* diyor — yani registry'nin yeni
