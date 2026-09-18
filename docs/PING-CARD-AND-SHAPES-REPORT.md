@@ -78,10 +78,11 @@ Gerçek çizim tarafında `UiLayoutSelfTest.VerifyBadgeShapes` üç pencere boyu
 iki palette yerleşmiş her kapsülü ölçüyor, ayrıca dört metin ölçeğinde bir rozet
 galerisi PNG'si üretiyor (`artifacts/ui-selftest/badges-*.png`, CI artefaktı).
 
-**Görsel doğrulama.** CI'ın ürettiği `badges-Light.png` indirildi ve **bakıldı**:
-dört metin ölçeğinin dördünde de rozetler uçları yuvarlak kapsül, karşılama
-noktaları daire ve etkin nokta kapsül olarak çiziliyor. Yani bu maddede iddia
-yalnız geometriye değil, gerçek bir Windows çizimine dayanıyor.
+**Görsel doğrulama.** CI'ın ürettiği `badges-Light.png` ve `badges-Dark.png`
+indirildi ve **bakıldı**: her iki palette de, dört metin ölçeğinin dördünde de
+rozetler uçları yuvarlak kapsül, karşılama noktaları daire ve etkin nokta kapsül
+olarak çiziliyor. Yani bu maddede iddia yalnız geometriye değil, gerçek bir
+Windows çizimine dayanıyor.
 
 ---
 
@@ -309,10 +310,11 @@ Bunlar eksik değil, **yapılamayan** şeyler; sonuç uydurulmadı.
    ciddi düşüren bir kazancı kabul etmiyor. Bunlar bu geçişte **yazılmadı**,
    yalnız doğrulandı.
 3. **Ekran görüntülerine bakıldı, ama hepsine değil.** CI'ın ürettiği
-   `artifacts/ui-selftest/*.png` indirildi; rozet galerisi (açık palet) ve ping
-   kartı ile karşılama (koyu palet, 1080) incelendi. Rozetlerin dört metin
-   ölçeğinde de düzgün kapsül çizildiği ve karşılama kartının §6.2'den önce boş
-   olduğu **görülerek** doğrulandı. Diğer 20 kare açılmadı.
+   `artifacts/ui-selftest/*.png` üç kez indirildi ve şunlar incelendi: rozet
+   galerisi (her iki palet), ping kartı (açık 1080 ve koyu 820) ve karşılama
+   (koyu 1080, açık 1080). §6.2, §6.3 ve §6.4 bu karelere bakılarak bulundu ve
+   düzeltmeleri yine bu karelerle doğrulandı. Geriye kalan ~20 kare açılmadı;
+   onlar için kanıt yalnız self-test'in geçmiş olmasıdır.
 4. **Karşılamanın hareketli hâli CI'da çizilmiyor.** Koşucu
    `SystemParameters.ClientAreaAnimation = false` bildiriyor ("Hareket azaltma
    etkin" günlüğü), yani CI'ın çizdiği **durağan** varyant. Hareketli yol için
