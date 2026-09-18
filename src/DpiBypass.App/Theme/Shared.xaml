@@ -368,6 +368,17 @@
                 Value="{Binding PingCard.Percent, Converter={StaticResource EmptyToCollapsedConverter}}" />
     </Style>
 
+    <!-- The ping switch, labelled with the preference it carries rather than with the
+         outcome of the last run. -->
+    <Style x:Key="PingSwitchStyle" TargetType="CheckBox" BasedOn="{StaticResource SwitchStyle}">
+        <Setter Property="Content" Value="Kapalı" />
+        <Style.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+                <Setter Property="Content" Value="Açık" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
     <!-- Each figure sits in its own tile so the three read as one row of equals. -->
     <Style x:Key="PingFigureTileStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
@@ -1326,30 +1337,44 @@
             </Setter.Value>
         </Setter>
         <Style.Triggers>
-            <EventTrigger RoutedEvent="Loaded">
-                <BeginStoryboard>
-                    <Storyboard>
-                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                         From="0" To="0.85"
-                                         Duration="{StaticResource Motion.StateSlow}"
-                                         EasingFunction="{StaticResource Motion.EaseOut}" />
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleX"
-                                         From="0.82" To="1"
-                                         Duration="{StaticResource Motion.StateSlow}"
-                                         EasingFunction="{StaticResource Motion.EaseOut}" />
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleY"
-                                         From="0.82" To="1"
-                                         Duration="{StaticResource Motion.StateSlow}"
-                                         EasingFunction="{StaticResource Motion.EaseOut}" />
-                    </Storyboard>
-                </BeginStoryboard>
-            </EventTrigger>
+            <!--
+              Fires when the greeting appears, and only when motion is wanted.
+
+              A MultiDataTrigger rather than a Loaded event, for two reasons. The greeting
+              is collapsed rather than unloaded, so it is shown again without being rebuilt
+              and a Loaded trigger would play once in the app's lifetime. And this is how
+              the entrance is gated on the motion preference at all: with the condition
+              false there is simply no storyboard, and the setters above are the finished
+              design. The storyboard names no target, so it animates the styled element.
+            -->
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsWelcomeVisible}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="0.85"
+                                             Duration="{StaticResource Motion.StateSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleX"
+                                             From="0.82" To="1"
+                                             Duration="{StaticResource Motion.StateSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleY"
+                                             From="0.82" To="1"
+                                             Duration="{StaticResource Motion.StateSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+            </MultiDataTrigger>
         </Style.Triggers>
     </Style>
 
-    <!--
-      The brand mark's arrival: up, in, and a touch of overshoot to land on.
-    -->
+    <!-- The brand mark's arrival: up, in, and a touch of overshoot to land on. -->
     <Style x:Key="WelcomeBrandStyle" TargetType="StackPanel">
         <Setter Property="Orientation" Value="Horizontal" />
         <Setter Property="HorizontalAlignment" Value="Center" />
@@ -1364,28 +1389,34 @@
             </Setter.Value>
         </Setter>
         <Style.Triggers>
-            <EventTrigger RoutedEvent="Loaded">
-                <BeginStoryboard>
-                    <Storyboard>
-                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                         From="0" To="1"
-                                         Duration="{StaticResource Motion.Content}"
-                                         EasingFunction="{StaticResource Motion.EaseOut}" />
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleX"
-                                         From="0.88" To="1"
-                                         Duration="{StaticResource Motion.State}"
-                                         EasingFunction="{StaticResource Motion.Overshoot}" />
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleY"
-                                         From="0.88" To="1"
-                                         Duration="{StaticResource Motion.State}"
-                                         EasingFunction="{StaticResource Motion.Overshoot}" />
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[1].Y"
-                                         From="10" To="0"
-                                         Duration="{StaticResource Motion.State}"
-                                         EasingFunction="{StaticResource Motion.EaseOut}" />
-                    </Storyboard>
-                </BeginStoryboard>
-            </EventTrigger>
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsWelcomeVisible}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleX"
+                                             From="0.88" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleY"
+                                             From="0.88" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[1].Y"
+                                             From="10" To="0"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+            </MultiDataTrigger>
         </Style.Triggers>
     </Style>
 
@@ -1401,41 +1432,23 @@
         <Setter Property="BorderThickness" Value="0,1,0,0" />
         <Setter Property="Padding" Value="24,16" />
         <Style.Triggers>
-            <EventTrigger RoutedEvent="Loaded">
-                <BeginStoryboard>
-                    <Storyboard>
-                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                         From="0" To="1"
-                                         Duration="{StaticResource Motion.Fast}"
-                                         EasingFunction="{StaticResource Motion.EaseOut}" />
-                    </Storyboard>
-                </BeginStoryboard>
-            </EventTrigger>
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsWelcomeVisible}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.Fast}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+            </MultiDataTrigger>
         </Style.Triggers>
-    </Style>
-
-    <!-- The same two, with the movement taken out for a reduced-motion machine. -->
-    <Style x:Key="WelcomeGlowStaticStyle" TargetType="Border">
-        <Setter Property="IsHitTestVisible" Value="False" />
-        <Setter Property="HorizontalAlignment" Value="Center" />
-        <Setter Property="VerticalAlignment" Value="Center" />
-        <Setter Property="Width" Value="620" />
-        <Setter Property="Height" Value="460" />
-        <Setter Property="Opacity" Value="0.85" />
-        <Setter Property="Background">
-            <Setter.Value>
-                <RadialGradientBrush GradientOrigin="0.5,0.42" Center="0.5,0.42" RadiusX="0.62" RadiusY="0.62">
-                    <GradientStop Color="{DynamicResource AppAccentGlowColor}" Offset="0" />
-                    <GradientStop Color="{DynamicResource AppAccentGlowFadeColor}" Offset="1" />
-                </RadialGradientBrush>
-            </Setter.Value>
-        </Setter>
-    </Style>
-
-    <Style x:Key="WelcomeBrandStaticStyle" TargetType="StackPanel">
-        <Setter Property="Orientation" Value="Horizontal" />
-        <Setter Property="HorizontalAlignment" Value="Center" />
-        <Setter Property="Margin" Value="0,0,0,32" />
     </Style>
 
     <!--
@@ -1593,13 +1606,34 @@
         </StackPanel>
     </DataTemplate>
 
-    <!-- What the window binds to, as an alias rather than a third copy of the card.
-         App.ApplyMotionPreference points it at the static one when Windows reports that
-         client area animation is off; the window reads it with DynamicResource so the
-         swap also takes effect when the preference changes while the app is running. -->
-    <StaticResource x:Key="WelcomeCardTemplate" ResourceKey="WelcomeCardAnimatedTemplate" />
-    <StaticResource x:Key="WelcomeGlowCurrentStyle" ResourceKey="WelcomeGlowStyle" />
-    <StaticResource x:Key="WelcomeBrandCurrentStyle" ResourceKey="WelcomeBrandStyle" />
+    <!--
+      What the window binds to: the animated card, or the still one when motion is off.
+
+      Chosen here with a trigger rather than by swapping the resource from code. The swap
+      was tried first and did not survive a real render - the window drew the raw content
+      where the card should have been - and a template that resolves to nothing has no
+      visible failure until somebody looks at it. A trigger on the same MotionEnabled the
+      rest of the window already uses cannot resolve to nothing, and it also follows the
+      preference while the app is running.
+
+      ContentTemplate is set from the Style rather than on the presenter, because a local
+      value would beat the trigger and the card would never switch.
+    -->
+    <DataTemplate x:Key="WelcomeCardTemplate">
+        <ContentPresenter Content="{Binding}">
+            <ContentPresenter.Style>
+                <Style TargetType="ContentPresenter">
+                    <Setter Property="ContentTemplate" Value="{StaticResource WelcomeCardAnimatedTemplate}" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding DataContext.MotionEnabled, RelativeSource={RelativeSource AncestorType=Window}}"
+                                     Value="False">
+                            <Setter Property="ContentTemplate" Value="{StaticResource WelcomeCardStaticTemplate}" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </ContentPresenter.Style>
+        </ContentPresenter>
+    </DataTemplate>
 
     <Style x:Key="WelcomeDotStyle" TargetType="Border">
         <Setter Property="Width" Value="8" />

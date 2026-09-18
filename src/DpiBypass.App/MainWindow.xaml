@@ -1037,10 +1037,14 @@
                                                    AutomationProperties.LiveSetting="Polite" />
                                     </StackPanel>
 
+                                    <!-- The switch says what the user asked for. The status
+                                         word under the title says what the measurements
+                                         found. Binding both to the same thing would put
+                                         "Mevcut ayarlar korundu" on a switch, which is not
+                                         a state a switch can be in. -->
                                     <CheckBox Grid.Column="1"
                                               x:Name="PingSwitch"
-                                              Content="{Binding PingCard.Status}"
-                                              Style="{StaticResource SwitchStyle}"
+                                              Style="{StaticResource PingSwitchStyle}"
                                               VerticalAlignment="Center"
                                               AutomationProperties.Name="Ping optimizasyonu"
                                               IsChecked="{Binding LowLatencyMode, Mode=TwoWay}" />
@@ -2070,7 +2074,7 @@
              it, and not hit-testable, so it never comes between a button and a click. -->
         <Border x:Name="WelcomeGlow"
                 Grid.Row="0"
-                Style="{DynamicResource WelcomeGlowCurrentStyle}" />
+                Style="{StaticResource WelcomeGlowStyle}" />
 
         <!-- The card column is centred and capped, so the greeting reads the same in a
              narrow window and a maximised one, and scrolls rather than clipping when the
@@ -2085,7 +2089,7 @@
                         Margin="0,40">
 
                 <!-- Brand. The existing identity, at a size that stays sharp at 200%. -->
-                <StackPanel x:Name="WelcomeBrand" Style="{DynamicResource WelcomeBrandCurrentStyle}">
+                <StackPanel x:Name="WelcomeBrand" Style="{StaticResource WelcomeBrandStyle}">
                     <Border Width="52" Height="52"
                             Background="{DynamicResource AppAccentSoftBrush}"
                             CornerRadius="{StaticResource Radius.Tile}">
@@ -2107,7 +2111,7 @@
                      step when a card is added. -->
                 <ContentControl x:Name="WelcomeCard"
                                 Content="{Binding WelcomeIndex}"
-                                ContentTemplate="{DynamicResource WelcomeCardTemplate}"
+                                ContentTemplate="{StaticResource WelcomeCardTemplate}"
                                 HorizontalAlignment="Stretch" />
 
                 <!-- Progress. Dots for the tour, nothing for the one-line greeting. -->

@@ -333,6 +333,21 @@ internal static class UiLayoutSelfTest
             var glow = (FrameworkElement)window.FindName("WelcomeGlow");
             Require(!glow.IsHitTestVisible, "The greeting's background light is hit-testable.");
 
+            // The card built its template rather than falling back to the raw content.
+            // A ContentTemplate that resolves to nothing is silent - the presenter just
+            // draws the bound value, which here is the card index, so the greeting shows
+            // "0" where the heading belongs. Nothing but looking at it catches that, so
+            // this looks: the card has to contain the title the view model is showing.
+            var welcomeCard = (ContentControl)window.FindName("WelcomeCard");
+            Require(welcomeCard.ContentTemplate is not null, "The greeting's card has no template.");
+
+            var headings = Descendants<TextBlock>(welcomeCard).Select(text => text.Text).ToArray();
+            Require(
+                headings.Contains(viewModel.WelcomeTitle),
+                $"The greeting's card does not show its title. It shows: {string.Join(" | ", headings)}");
+            Require(headings.Contains(viewModel.WelcomeBody), "The greeting's card does not show its body.");
+            Require(Descendants<FluentIcon>(welcomeCard).Any(), "The greeting's card has no mark.");
+
             SaveFrame(window, $"welcome-{scenario}");
 
             // Every card is reachable and none of them overflows the content area.

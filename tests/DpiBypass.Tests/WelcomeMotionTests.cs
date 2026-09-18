@@ -148,13 +148,50 @@ public sealed class WelcomeMotionTests
             Values(animated, "TextBlock", "Margin"),
             Values(stat1c, "TextBlock", "Margin"));
 
-        // And the other two pieces have static twins as well, so a reduced-motion machine
-        // cannot end up with a still card behind a light that is still scaling in.
-        foreach (var key in new[] { "WelcomeGlowStaticStyle", "WelcomeBrandStaticStyle" })
+        // And every other moving piece keeps its motion inside a condition on the same
+        // preference, so with motion off there is no storyboard at all and the plain
+        // setters are the whole design.
+        foreach (var key in new[] { "WelcomeGlowStyle", "WelcomeBrandStyle", "WelcomeActionsStyle" })
         {
-            Assert.DoesNotContain(Resource(key).Descendants(), IsAnimation);
+            foreach (var animation in Resource(key).Descendants().Where(IsAnimation))
+            {
+                Assert.True(
+                    animation.Ancestors().Any(IsMotionGate),
+                    $"{key} animates outside a MotionEnabled condition.");
+            }
         }
     }
+
+    [Fact]
+    public void TheCardTemplateIsARealTemplateAndNotAnAliasSwappedFromCode()
+    {
+        // The regression this exists for. The card was first selected by pointing an alias
+        // key at one of two templates from ApplyMotionPreference. It compiled, every test
+        // passed, and the greeting rendered the raw content where the card should have been
+        // - a ContentTemplate that resolves to nothing has no failure mode louder than
+        // somebody looking at it. Selection is a trigger now, and this keeps it one.
+        var template = Resource("WelcomeCardTemplate");
+        Assert.Equal("DataTemplate", template.Name.LocalName);
+
+        var references = template.DescendantsAndSelf()
+            .SelectMany(element => element.Attributes())
+            .Select(attribute => attribute.Value)
+            .ToArray();
+
+        Assert.Contains(references, value => value.Contains("WelcomeCardAnimatedTemplate", StringComparison.Ordinal));
+        Assert.Contains(references, value => value.Contains("WelcomeCardStaticTemplate", StringComparison.Ordinal));
+
+        // And nothing assigns that key at runtime any more.
+        var app = File.ReadAllText(RepoFiles.Find("src", "DpiBypass.App", "App.xaml.cs"));
+        Assert.DoesNotContain("WelcomeCardTemplate", app, StringComparison.Ordinal);
+    }
+
+    /// <summary>Whether this element is the condition that gates the greeting's motion.</summary>
+    private static bool IsMotionGate(XElement element)
+        => element.Name.LocalName is "MultiDataTrigger" or "DataTrigger"
+        && element.Descendants()
+            .SelectMany(child => child.Attributes())
+            .Any(attribute => attribute.Value.Contains("MotionEnabled", StringComparison.Ordinal));
 
     [Fact]
     public void TheGreetingCannotResizeOrMoveTheWindow()
@@ -179,6 +216,7 @@ public sealed class WelcomeMotionTests
     /// <summary>Every resource the greeting's look and motion is declared in.</summary>
     private static IReadOnlyList<XElement> WelcomeMarkup() =>
     [
+        Resource("WelcomeCardTemplate"),
         Resource("WelcomeCardAnimatedTemplate"),
         Resource("WelcomeCardStaticTemplate"),
         Resource("WelcomeGlowStyle"),
