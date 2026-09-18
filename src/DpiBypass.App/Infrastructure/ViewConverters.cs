@@ -117,3 +117,25 @@ public sealed class CountToVisibilityConverter : IValueConverter
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();
 }
+
+/// <summary>
+/// The colour for the gain figure on the ping card.
+/// </summary>
+/// <remarks>
+/// Green only for a reduction that a paired experiment verified and that is still applied.
+/// Everything else - no result, a steadiness-only result, a rejected candidate's
+/// difference - takes the ordinary text colour, so green on that line means one thing and
+/// only one thing. The card states the outcome in words beside it either way.
+/// </remarks>
+public sealed class GainToBrushConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        var key = value is true ? "AppSuccessBrush" : "AppTextPrimaryBrush";
+        return Application.Current?.TryFindResource(key) as System.Windows.Media.Brush
+            ?? System.Windows.Media.Brushes.Gray;
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}

@@ -40,6 +40,17 @@ public enum LatencyTargetKind
 
     /// <summary>An endpoint discovered from a running process's own sockets.</summary>
     Application = 2,
+
+    /// <summary>
+    /// Work it out: a live application session when one is unambiguous, the reference
+    /// otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The default, and the only one the main card offers. The other three remain as the
+    /// measurement logic underneath it and as an override for somebody who knows which
+    /// endpoint they want. See <see cref="AutomaticLatencyTarget"/> for the rule.
+    /// </remarks>
+    Automatic = 3,
 }
 
 /// <summary>
@@ -56,6 +67,9 @@ public enum LatencyTargetKind
 public sealed record LatencyTargetSpec
 {
     public static readonly LatencyTargetSpec Reference = new() { Kind = LatencyTargetKind.Reference };
+
+    /// <summary>Measure whatever is worth measuring, without asking.</summary>
+    public static readonly LatencyTargetSpec Automatic = new() { Kind = LatencyTargetKind.Automatic };
 
     public LatencyTargetKind Kind { get; init; } = LatencyTargetKind.Reference;
 
@@ -410,6 +424,7 @@ public sealed class LatencyTargetResolver : ILatencyTargetResolver
 
         return spec.Kind switch
         {
+            LatencyTargetKind.Automatic => await ResolveAutomaticAsync(spec, cancellationToken).ConfigureAwait(false),
             LatencyTargetKind.Custom => await ResolveCustomAsync(spec, cancellationToken).ConfigureAwait(false),
             LatencyTargetKind.Application => ResolveApplication(spec),
             _ => new LatencyTargetResolution
@@ -418,6 +433,101 @@ public sealed class LatencyTargetResolver : ILatencyTargetResolver
                 Notice = ReferenceLabel,
             },
         };
+    }
+
+    /// <summary>
+    /// Works out what to measure from what is running, and says what it settled on.
+    /// </summary>
+    /// <remarks>
+    /// The choice is <see cref="AutomaticLatencyTarget"/>'s and the rule is strict, so most
+    /// of the time this resolves to the reference - which is the honest answer when nobody
+    /// is playing anything. The line it puts in <see cref="LatencyTargetResolution.Notice"/>
+    /// is what the card shows under the numbers, so the user always knows which of the two
+    /// they are looking at without having had to choose.
+    /// </remarks>
+    private async Task<LatencyTargetResolution> ResolveAutomaticAsync(
+        LatencyTargetSpec spec,
+        CancellationToken cancellationToken)
+    {
+        var choice = AutomaticLatencyTarget.Choose(DiscoverSessions());
+        _log?.Invoke($"latency.target.auto: {choice.Summary}");
+
+        var resolution = choice.IsApplicationSession
+            ? ResolveApplication(choice.Spec)
+            : await ResolveAsync(LatencyTargetSpec.Reference, cancellationToken).ConfigureAwait(false);
+
+        // Discovery can succeed and resolution still fail - the process can exit between
+        // the two. The reference is always measurable, so that is where it lands, with the
+        // reason rather than a failure the user can do nothing about.
+        if (!resolution.Succeeded)
+        {
+            var fallback = AutomaticLatencyTarget.Reference(
+                resolution.Failure ?? "uygulama oturumu ölçülemedi");
+
+            resolution = await ResolveAsync(LatencyTargetSpec.Reference, cancellationToken).ConfigureAwait(false);
+            return resolution with { Notice = fallback.Summary };
+        }
+
+        // The automatic summary replaces the per-kind notice rather than joining it: the
+        // card has one line for this, and "which target" is what it is for.
+        return resolution with { Notice = choice.Summary };
+    }
+
+    /// <summary>Every connected application, with its endpoints ranked.</summary>
+    /// <remarks>
+    /// Capped, because this reads the connection table once per name and a busy machine has
+    /// a lot of names. The cap is generous enough that a game is never past it in practice:
+    /// the list is what already holds a remote connection, not every running process.
+    /// </remarks>
+    private IReadOnlyList<AutomaticTargetCandidate> DiscoverSessions()
+    {
+        const int MaximumProcessesExamined = 32;
+
+        IReadOnlyList<string> names;
+        try
+        {
+            names = _endpoints.ConnectedProcesses();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log?.Invoke($"latency.target.auto: bağlantı tablosu okunamadı ({ex.Message}).");
+            return [];
+        }
+
+        var flows = _flows?.Flows() ?? [];
+        var now = _now();
+        var sessions = new List<AutomaticTargetCandidate>();
+
+        foreach (var name in names.Take(MaximumProcessesExamined))
+        {
+            try
+            {
+                var endpoints = _endpoints.ForProcess(name);
+                if (!endpoints.ProcessFound)
+                {
+                    continue;
+                }
+
+                var ranked = GameEndpointDiscovery.Rank(
+                    name,
+                    _processIds(name),
+                    flows,
+                    endpoints.TcpConnections,
+                    now);
+
+                if (ranked.Count > 0)
+                {
+                    sessions.Add(new AutomaticTargetCandidate(name, ranked));
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // One unreadable process is not a reason to stop looking at the rest.
+                _log?.Invoke($"latency.target.auto: '{name}' incelenemedi ({ex.Message}).");
+            }
+        }
+
+        return sessions;
     }
 
     private async Task<LatencyTargetResolution> ResolveCustomAsync(

@@ -39,7 +39,14 @@ public sealed record NetworkProfile
 /// </remarks>
 public sealed record LatencyPreferences
 {
-    public LatencyTargetKind TargetKind { get; set; } = LatencyTargetKind.Reference;
+    /// <summary>
+    /// What to measure. Automatic by default, and what the main card always uses.
+    /// </summary>
+    /// <remarks>
+    /// The other kinds stay reachable from the advanced section for somebody who knows
+    /// which endpoint they want, and an existing settings file keeps whatever it had.
+    /// </remarks>
+    public LatencyTargetKind TargetKind { get; set; } = LatencyTargetKind.Automatic;
 
     /// <summary>Host or address for a custom target, exactly as the user typed it.</summary>
     public string? TargetHost { get; set; }
@@ -115,6 +122,11 @@ public sealed record LatencyPreferences
             Kind = LatencyTargetKind.Application,
             ProcessName = TargetProcess,
         },
+        LatencyTargetKind.Automatic => LatencyTargetSpec.Automatic,
+
+        // A kind whose own field is empty - Custom with no host, Application with no
+        // process - falls back to the reference rather than failing the run. Automatic
+        // needs no field, so it never lands here.
         _ => LatencyTargetSpec.Reference,
     };
 

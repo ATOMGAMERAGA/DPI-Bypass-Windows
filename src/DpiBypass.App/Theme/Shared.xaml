@@ -296,6 +296,67 @@
         </Style.Triggers>
     </Style>
 
+    <!-- ======== Ping card ========
+         Three numbers across the top of the card, one sentence under them, and one line
+         saying what was measured and when. Everything technical is behind the expander,
+         because a person turning this on is asking one question and these are its answer. -->
+
+    <!-- The state word beside the title: "Ölçülüyor", "Etkin", "Mevcut ayarlar korundu". -->
+    <Style x:Key="PingStatusWordStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+    </Style>
+
+    <!-- "Önce" / "Sonra" / "Kazanç". -->
+    <Style x:Key="PingFigureLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+        <Setter Property="Margin" Value="{StaticResource Gap.StackTight}" />
+    </Style>
+
+    <!--
+      The numbers themselves.
+
+      Display size because these three are the card, and tabular figures because they sit
+      in a row that must not shuffle sideways as the digits change: Segoe UI Variable's
+      proportional numerals make "48 ms" and "114 ms" different widths, and a live value
+      updating in place would jitter its own column.
+    -->
+    <Style x:Key="PingFigureStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource Type.FamilyDisplay}" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Display}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+    </Style>
+
+    <!-- The gain, which is the one figure allowed to turn green - and only when a paired
+         experiment verified it and the change is still applied. -->
+    <Style x:Key="PingGainStyle" TargetType="TextBlock" BasedOn="{StaticResource PingFigureStyle}">
+        <Setter Property="Foreground"
+                Value="{Binding PingCard.ShowsReduction, Converter={StaticResource GainBrushConverter}}" />
+    </Style>
+
+    <!-- The percentage, which is context for the gain and never the headline. -->
+    <Style x:Key="PingPercentStyle" TargetType="TextBlock" BasedOn="{StaticResource HintStyle}">
+        <Setter Property="Margin" Value="0,2,0,0" />
+        <Setter Property="Visibility"
+                Value="{Binding PingCard.Percent, Converter={StaticResource EmptyToCollapsedConverter}}" />
+    </Style>
+
+    <!-- Each figure sits in its own tile so the three read as one row of equals. -->
+    <Style x:Key="PingFigureTileStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Tile}" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Tile}" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+    </Style>
+
     <Style x:Key="NavTabControlStyle" TargetType="TabControl">
         <Setter Property="TabStripPlacement" Value="Left" />
         <Setter Property="Background" Value="Transparent" />

@@ -173,47 +173,74 @@ internal static class UiLayoutSelfTest
         }
     }
 
+    /// <summary>
+    /// The ping card holds still while a run starts, and its detail section still builds.
+    /// </summary>
+    /// <remarks>
+    /// The card is now one switch and three figures; the target pickers, the per-metric
+    /// tiles and the manual re-runs moved into the expander below it. So the figures are
+    /// what must not move when a run starts, and the moved controls are checked after the
+    /// expander is opened - collapsed content has no visual tree to look at.
+    /// </remarks>
     private static void VerifyLatencyProgress(MainWindow window, string scenario)
     {
         var panel = (FrameworkElement)FindPageElement(window, "LatencyProgressPanel");
         var slot = (FrameworkElement)FindPageElement(window, "LatencyProgressSlot");
-        var cards = (FrameworkElement)FindPageElement(window, "LatencyResultCards");
-        var button = (Button)FindPageElement(window, "LatencyPrimaryButton");
+        var figures = (FrameworkElement)FindPageElement(window, "PingFigures");
         var title = (TextBlock)FindPageElement(window, "LatencyProgressLabel");
         var section = (FrameworkElement)FindPageElement(window, "LatencySection");
         var idleHint = (FrameworkElement)FindPageElement(window, "LatencyIdleHint");
+        var statusWord = (TextBlock)FindPageElement(window, "PingStatusWord");
+        var switchControl = (FrameworkElement)FindPageElement(window, "PingSwitch");
+
         var oldHintVisibility = idleHint.Visibility;
         var oldVisibility = panel.Visibility;
         var oldText = title.Text;
-        var oldContent = button.Content;
-        var oldEnabled = button.IsEnabled;
+        var oldStatus = statusWord.Text;
         try
         {
             panel.SetCurrentValue(UIElement.VisibilityProperty, Visibility.Hidden);
-            button.SetCurrentValue(ContentControl.ContentProperty, "Bağlantımı analiz et");
+            statusWord.SetCurrentValue(TextBlock.TextProperty, "Kapalı");
             window.UpdateLayout();
-            var before = cards.TranslatePoint(new Point(), section);
-            var buttonSize = button.RenderSize;
-            var slotSize = slot.RenderSize;
-            Require(slotSize.Height is > 0 and <= 80, "Progress slot must remain compact.");
 
-            // Long updates and disabled captions must not grow the action or push the results down.
+            var before = figures.TranslatePoint(new Point(), section);
+            var figuresSize = figures.RenderSize;
+            var slotSize = slot.RenderSize;
+            var switchSize = switchControl.RenderSize;
+            Require(slotSize.Height is > 0 and <= 80, "Progress slot must remain compact.");
+            Require(figuresSize.Height is > 0, "The three figures did not lay out.");
+
+            // A long update and the longest status word must not push the figures down or
+            // squeeze the switch.
             idleHint.SetCurrentValue(UIElement.VisibilityProperty, Visibility.Collapsed);
             panel.SetCurrentValue(UIElement.VisibilityProperty, Visibility.Visible);
             title.SetCurrentValue(TextBlock.TextProperty,
                 "Daha iyi bağlantı yolu aranıyor; ağ kartı seçenekleri ve bağlantı kalitesi ölçülüyor…");
-            button.SetCurrentValue(ContentControl.ContentProperty, "Uygun ayarları dene");
-            button.SetCurrentValue(UIElement.IsEnabledProperty, false);
+            statusWord.SetCurrentValue(TextBlock.TextProperty, "İyileştirme uygulanıyor");
             window.UpdateLayout();
-            var after = cards.TranslatePoint(new Point(), section);
-            Require(Math.Abs(before.Y - after.Y) < 1, "Starting measurement moved the results.");
-            Require(button.RenderSize == buttonSize, "The busy action changed size.");
-            Require(slot.RenderSize == slotSize, "The progress panel changed size.");
 
-            // Open details explicitly and ensure its template/content can be materialized too.
+            var after = figures.TranslatePoint(new Point(), section);
+            Require(Math.Abs(before.Y - after.Y) < 1, "Starting a run moved the three figures.");
+            Require(figures.RenderSize == figuresSize, "The figures row changed size while busy.");
+            Require(slot.RenderSize == slotSize, "The progress panel changed size.");
+            Require(switchControl.RenderSize == switchSize, "The switch changed size while busy.");
+
+            // Open the details and make sure everything that moved in there still builds -
+            // its templates and StaticResource references are only resolved on expansion.
             var details = Descendants<Expander>(section).First();
             details.SetCurrentValue(Expander.IsExpandedProperty, true);
             window.UpdateLayout();
+
+            foreach (var name in new[] { "LatencyPrimaryButton", "LatencyResultCards" })
+            {
+                Require(
+                    Descendants<FrameworkElement>(details).Any(element => element.Name == name),
+                    $"{name} is not reachable from the details section at {scenario}.");
+            }
+
+            var action = Descendants<Button>(details).First(button => button.Name == "LatencyPrimaryButton");
+            Require(action.ActualHeight is > 0 and <= 64, "The detail action has an unexpected height.");
+
             details.SetCurrentValue(Expander.IsExpandedProperty, false);
             section.BringIntoView(new Rect(0, 0, section.ActualWidth, 400));
             window.UpdateLayout();
@@ -224,20 +251,10 @@ internal static class UiLayoutSelfTest
             idleHint.SetCurrentValue(UIElement.VisibilityProperty, oldHintVisibility);
             panel.SetCurrentValue(UIElement.VisibilityProperty, oldVisibility);
             title.SetCurrentValue(TextBlock.TextProperty, oldText);
-            button.SetCurrentValue(ContentControl.ContentProperty, oldContent);
-            button.SetCurrentValue(UIElement.IsEnabledProperty, oldEnabled);
+            statusWord.SetCurrentValue(TextBlock.TextProperty, oldStatus);
         }
     }
 
-    /// <summary>
-    /// The connection control draws every state, and its ring never displaces the text.
-    /// </summary>
-    /// <remarks>
-    /// The ring and the label are stacked, so a stage whose headline wraps to two lines
-    /// would move the button up under the ring if either were sized by its content. Each
-    /// stage is driven through the view model and the control's position is compared
-    /// against the first one.
-    /// </remarks>
     private static void VerifyConnectionControl(MainWindow window)
     {
         var shell = (FrameworkElement)window.FindName("AppShell");
