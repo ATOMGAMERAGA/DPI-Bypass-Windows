@@ -368,17 +368,6 @@
                 Value="{Binding PingCard.Percent, Converter={StaticResource EmptyToCollapsedConverter}}" />
     </Style>
 
-    <!-- The ping switch, labelled with the preference it carries rather than with the
-         outcome of the last run. -->
-    <Style x:Key="PingSwitchStyle" TargetType="CheckBox" BasedOn="{StaticResource SwitchStyle}">
-        <Setter Property="Content" Value="Kapalı" />
-        <Style.Triggers>
-            <Trigger Property="IsChecked" Value="True">
-                <Setter Property="Content" Value="Açık" />
-            </Trigger>
-        </Style.Triggers>
-    </Style>
-
     <!-- Each figure sits in its own tile so the three read as one row of equals. -->
     <Style x:Key="PingFigureTileStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
@@ -874,6 +863,19 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- The ping switch, labelled with the preference it carries rather than with the
+         outcome of the last run. After SwitchStyle rather than beside the rest of the ping
+         card's styles: BasedOn is a StaticResource, and one of those can only see what the
+         dictionary has already declared. -->
+    <Style x:Key="PingSwitchStyle" TargetType="CheckBox" BasedOn="{StaticResource SwitchStyle}">
+        <Setter Property="Content" Value="Kapalı" />
+        <Style.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+                <Setter Property="Content" Value="Açık" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ======== Expander for the advanced/risky settings group ======== -->

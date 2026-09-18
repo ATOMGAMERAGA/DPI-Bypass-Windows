@@ -292,6 +292,43 @@ public sealed class DesignSystemTests
     }
 
     /// <summary>
+    /// No StaticResource in the theme names a key declared later in the same file.
+    /// </summary>
+    /// <remarks>
+    /// Existence is not enough: a StaticResource is resolved as the dictionary is parsed,
+    /// so a key defined further down does not exist yet and the reference throws when WPF
+    /// builds whatever uses it. scripts/tests/xaml-resources.tests.ps1 has checked this on
+    /// Windows for a while and caught a forward BasedOn that had passed every test on
+    /// Linux; PowerShell does not run here, so the same rule is checked in both places
+    /// now.
+    /// </remarks>
+    [Fact]
+    public void NoStaticResourceInTheThemeNamesAKeyDeclaredBelowIt()
+    {
+        var markup = File.ReadAllText(RepoFiles.SharedThemeXaml);
+
+        // Where each key is declared. x:Key is written as an attribute, so its offset in
+        // the file is a good enough stand-in for parse order.
+        var declaredAt = Regex.Matches(markup, @"x:Key=""(?<key>[^""]+)""")
+            .GroupBy(match => match.Groups["key"].Value)
+            .ToDictionary(group => group.Key, group => group.Min(match => match.Index), StringComparer.Ordinal);
+
+        var forward = new List<string>();
+
+        foreach (Match match in Regex.Matches(markup, @"\{StaticResource\s+(?<key>[^}\s]+)\s*\}"))
+        {
+            var key = match.Groups["key"].Value;
+
+            if (declaredAt.TryGetValue(key, out var declaration) && declaration > match.Index)
+            {
+                forward.Add($"{key} is used at offset {match.Index} and declared at {declaration}");
+            }
+        }
+
+        Assert.Empty(forward);
+    }
+
+    /// <summary>
     /// The theme dictionaries the application loads are all of them, and they are merged
     /// in an order where a StaticResource can see what it needs.
     /// </summary>
