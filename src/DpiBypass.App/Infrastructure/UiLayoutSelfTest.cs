@@ -9,6 +9,10 @@ using DpiBypass.Core.Onboarding;
 using TabControl = System.Windows.Controls.TabControl;
 using Button = System.Windows.Controls.Button;
 using Point = System.Windows.Point;
+using Size = System.Windows.Size;
+using Brush = System.Windows.Media.Brush;
+using Orientation = System.Windows.Controls.Orientation;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
 
 namespace DpiBypass.App.Infrastructure;
 
@@ -90,11 +94,24 @@ internal static class UiLayoutSelfTest
                     SaveFrame(window, $"settings-{theme}-{width:0}");
 
                     VerifyWelcome(window, $"{theme}-{width:0}");
+
+                    // Every capsule in the window, against real measured heights rather
+                    // than against the markup that asked for them.
+                    VerifyBadgeShapes(window, $"{theme}-{width:0}");
                 }
             }
+            // One page of badges on their own, so the shape can be looked at rather than
+            // hunted for in a screenshot of the whole window.
+            foreach (var theme in new[] { "Light", "Dark" })
+            {
+                palette.Source = new Uri($"Theme/{theme}.xaml", UriKind.Relative);
+                SaveBadgeGallery(theme);
+            }
+
             AppLog.Info(
                 "Arayüz yerleşimi doğrulandı: 6 sekme, 3 pencere boyutu, 2 palet; "
-                + "ilerleme alanı sabit, karşılama ve bağlantı denetimi çizildi.");
+                + "ilerleme alanı sabit, karşılama ve bağlantı denetimi çizildi, "
+                + "kapsül rozetleri ölçülen yüksekliğe göre doğrulandı.");
         }
         finally
         {
@@ -102,6 +119,57 @@ internal static class UiLayoutSelfTest
             window.Width = originalWidth;
             window.Height = originalHeight;
             tabs.SelectedIndex = originalTab;
+        }
+    }
+
+    /// <summary>
+    /// Checks that every badge marked as a capsule is drawn as one.
+    /// </summary>
+    /// <remarks>
+    /// The bug this covers is that WPF does not read a large corner radius the way CSS
+    /// does. It clamps each axis on its own and never to <c>min(width, height) / 2</c>, so
+    /// "round the ends off" written as a big number draws an ellipse inscribed in the
+    /// badge - no straight edge anywhere, and points where the blunt ends should be. The
+    /// only radius that is a capsule is half the height the stroke leaves behind, and it
+    /// has to follow the measured height because these badges size themselves to their
+    /// text. See Infrastructure/PillShape.cs.
+    ///
+    /// Asserted here, on a laid-out window at three sizes and both palettes, because the
+    /// unit tests can only resolve the geometry WPF would produce - they cannot lay a
+    /// badge out and read back how tall it turned out to be.
+    /// </remarks>
+    private static void VerifyBadgeShapes(MainWindow window, string scenario)
+    {
+        var badges = Descendants<Border>(window)
+            .Where(border => PillShape.GetIsPill(border) && border.IsVisible && border.ActualHeight > 0)
+            .ToArray();
+
+        Require(badges.Length > 0, $"No capsule badges were laid out at {scenario}.");
+
+        foreach (var badge in badges)
+        {
+            var radius = badge.CornerRadius;
+            var expected = (badge.ActualHeight - badge.BorderThickness.Top) / 2;
+
+            Require(
+                Math.Abs(radius.TopLeft - expected) < 0.51,
+                $"A capsule {badge.ActualWidth:0.#}x{badge.ActualHeight:0.#} at {scenario} carries "
+                    + $"radius {radius.TopLeft:0.##}; a capsule needs {expected:0.##}.");
+
+            // Uniform, or Border takes its complex render path and the corners stop
+            // matching each other.
+            Require(
+                radius.TopLeft == radius.TopRight
+                && radius.TopLeft == radius.BottomLeft
+                && radius.TopLeft == radius.BottomRight,
+                $"A capsule at {scenario} has mismatched corners: {radius}.");
+
+            // A capsule needs somewhere to put its straight edge. A badge narrower than it
+            // is tall is a circle at best and an ellipse at worst, whatever radius it has.
+            Require(
+                badge.ActualWidth >= badge.ActualHeight - 0.51,
+                $"A capsule at {scenario} is {badge.ActualWidth:0.#} wide and {badge.ActualHeight:0.#} tall, "
+                    + "so it has no straight edge to round off.");
         }
     }
 
@@ -250,16 +318,100 @@ internal static class UiLayoutSelfTest
     private static FrameworkElement FindPageElement(MainWindow window, string name)
         => Descendants<FrameworkElement>(window).Single(element => element.Name == name);
 
+    /// <summary>
+    /// Renders the capsule badges on their own, at the text lengths and text scales that
+    /// a fixed radius could never have covered.
+    /// </summary>
+    /// <remarks>
+    /// The ends are what went wrong, and in a screenshot of the whole window a badge is
+    /// forty pixels across. This puts one of each on a page at a readable size so the
+    /// difference between a capsule and an oval is visible without measuring it.
+    /// </remarks>
+    private static void SaveBadgeGallery(string theme)
+    {
+        var rows = new StackPanel { Margin = new Thickness(24) };
+
+        foreach (var scale in new[] { 1.0, 1.25, 1.5, 2.0 })
+        {
+            foreach (var text in new[] { "i", "BETA", "Önerilen", "Çok daha uzun bir rozet metni" })
+            {
+                var badge = new Border
+                {
+                    Background = (Brush)Application.Current.Resources["AppAccentSoftBrush"],
+                    BorderBrush = (Brush)Application.Current.Resources["AppAccentBrush"],
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(10 * scale, 2 * scale, 10 * scale, 2 * scale),
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Margin = new Thickness(0, 0, 0, 10),
+                    Child = new TextBlock
+                    {
+                        Text = text,
+                        FontSize = 11.5 * scale,
+                        FontWeight = FontWeights.Bold,
+                        Foreground = (Brush)Application.Current.Resources["AppAccentBrush"],
+                    },
+                };
+
+                PillShape.SetIsPill(badge, true);
+                rows.Children.Add(badge);
+            }
+
+            // The welcome dots, at rest and current, on the same page.
+            var dots = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 18),
+            };
+
+            foreach (var width in new[] { 8d, 8d, 22d })
+            {
+                var dot = new Border
+                {
+                    Width = width * scale,
+                    Height = 8 * scale,
+                    Margin = new Thickness(4 * scale, 0, 4 * scale, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Background = (Brush)Application.Current.Resources[
+                        width > 8 ? "AppAccentBrush" : "AppDividerBrush"],
+                };
+
+                PillShape.SetIsPill(dot, true);
+                dots.Children.Add(dot);
+            }
+
+            rows.Children.Add(dots);
+        }
+
+        var page = new Border
+        {
+            Background = (Brush)Application.Current.Resources["AppBackgroundBrush"],
+            Child = rows,
+        };
+
+        // Measured and arranged off-window: nothing here is ever shown to a user, it only
+        // has to be laid out well enough to render.
+        page.Measure(new Size(520, double.PositiveInfinity));
+        page.Arrange(new Rect(new Point(0, 0), page.DesiredSize));
+        page.UpdateLayout();
+
+        SaveVisual(page, page.DesiredSize, $"badges-{theme}");
+    }
+
     private static void SaveFrame(MainWindow window, string scenario)
+    {
+        SaveVisual(window, new Size(window.ActualWidth, window.ActualHeight), $"latency-{scenario}");
+    }
+
+    private static void SaveVisual(Visual visual, Size size, string name)
     {
         var directory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "ui-selftest"));
         Directory.CreateDirectory(directory);
-        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),
-            (int)Math.Ceiling(window.ActualHeight), 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(window);
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(size.Width),
+            (int)Math.Ceiling(size.Height), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var output = File.Create(Path.Combine(directory, $"latency-{scenario}.png"));
+        using var output = File.Create(Path.Combine(directory, $"{name}.png"));
         encoder.Save(output);
     }
 

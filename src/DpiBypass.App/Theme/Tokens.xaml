@@ -36,6 +36,10 @@
     <Thickness x:Key="Pad.Control">14,7</Thickness>
     <Thickness x:Key="Pad.ControlPrimary">16,8</Thickness>
     <Thickness x:Key="Pad.Pill">12,6</Thickness>
+    <!-- A capsule's side padding has to clear its own end cap, whose radius is half the
+         badge height; at these type sizes that is about 9 DIP, so 8 let the first letter
+         sit on the curve. -->
+    <Thickness x:Key="Pad.Badge">10,2</Thickness>
     <Thickness x:Key="Pad.Page">18,14,20,14</Thickness>
     <Thickness x:Key="Pad.TopBar">20,12</Thickness>
 
@@ -67,7 +71,22 @@
     <CornerRadius x:Key="Radius.Tile">8</CornerRadius>
     <CornerRadius x:Key="Radius.Card">12</CornerRadius>
     <CornerRadius x:Key="Radius.Surface">16</CornerRadius>
-    <CornerRadius x:Key="Radius.Pill">999</CornerRadius>
+
+    <!--
+      There is deliberately no Radius.Pill here any more.
+
+      A large number is how CSS asks for a capsule, and it does not mean that to WPF.
+      Border.GenerateGeometry partitions an over-large radius across the edge it
+      overflows and then measures each corner's two arc radii independently from the
+      resulting points, so CornerRadius="999" on a 100x24 badge draws four elliptical
+      quadrants of 50x12 - an ellipse inscribed in the badge, with points at the left
+      and right rather than blunt ends. Nothing clamps to min(width, height) / 2.
+
+      The only radius that is a capsule is exactly half the measured height, so a
+      capsule is a behaviour and not a number: Infrastructure/PillShape.cs, applied as
+      infra:PillShape.IsPill="True". It also tracks text scaling, which a token cannot.
+    -->
+
 
     <!-- ======== Stroke ======== -->
 

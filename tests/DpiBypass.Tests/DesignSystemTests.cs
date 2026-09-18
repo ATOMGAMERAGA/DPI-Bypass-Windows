@@ -185,7 +185,7 @@ public sealed class DesignSystemTests
         foreach (var required in new[]
         {
             "Space.4", "Space.8", "Space.12", "Space.16", "Space.24",
-            "Radius.Small", "Radius.Control", "Radius.Tile", "Radius.Card", "Radius.Pill",
+            "Radius.Small", "Radius.Control", "Radius.Tile", "Radius.Card", "Radius.Surface",
             "IconSize.Small", "IconSize.Body", "IconSize.Large",
             "Type.Family", "Type.FamilyMono", "Type.Caption", "Type.Body", "Type.Title",
             "Motion.Fast", "Motion.Micro", "Motion.Content", "Motion.State",
@@ -194,6 +194,13 @@ public sealed class DesignSystemTests
         {
             Assert.Contains(required, keys);
         }
+
+        // Radius.Pill is deliberately not among them. A capsule is not a number in WPF:
+        // any radius large enough to "round the ends off" is clamped per axis and draws an
+        // ellipse, and the radius that does work depends on the badge's measured height.
+        // It lives in Infrastructure/PillShape.cs instead. See BadgeShapeTests.
+        Assert.DoesNotContain("Radius.Pill", keys);
+        Assert.Contains("Pad.Badge", keys);
     }
 
     /// <summary>
@@ -409,6 +416,13 @@ public sealed class DesignSystemTests
         {
             Assert.Contains(required, keys);
         }
+
+        // Radius.Pill is deliberately not among them. A capsule is not a number in WPF:
+        // any radius large enough to "round the ends off" is clamped per axis and draws an
+        // ellipse, and the radius that does work depends on the badge's measured height.
+        // It lives in Infrastructure/PillShape.cs instead. See BadgeShapeTests.
+        Assert.DoesNotContain("Radius.Pill", keys);
+        Assert.Contains("Pad.Badge", keys);
     }
 
     /// <summary>

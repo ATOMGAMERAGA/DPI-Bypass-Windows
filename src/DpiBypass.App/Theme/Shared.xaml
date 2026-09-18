@@ -101,10 +101,11 @@
     <!-- Severity-reactive status pill for the top bar. Severity is "ok", "warn" or
          "off"; the shape and the colour both change so state is never colour-only. -->
     <!--
-      A chip, not a lozenge. This used to carry Radius.Pill, which rounds the ends into
-      semicircles - beside the 8-radius primary action two chips along, that read as a
-      stray oval floating behind the words rather than as part of the same bar. It takes
-      the action's own radius so the top bar has one corner language.
+      A chip, not a lozenge. This used to ask for a capsule and got the oval described in
+      Tokens.xaml; beside the 8-radius primary action two chips along, that read as a
+      stray shape floating behind the words rather than as part of the same bar. A real
+      capsule was never what this wanted, so it takes the action's own radius and the top
+      bar has one corner language. Where a capsule IS wanted, use infra:PillShape.IsPill.
     -->
     <Style x:Key="StatusPillBorderStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
@@ -688,8 +689,8 @@
         <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
         <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
-        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
-        <Setter Property="Padding" Value="8,2" />
+        <Setter Property="infra:PillShape.IsPill" Value="True" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Badge}" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
@@ -703,8 +704,8 @@
         <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
         <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
-        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
-        <Setter Property="Padding" Value="8,2" />
+        <Setter Property="infra:PillShape.IsPill" Value="True" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Badge}" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
@@ -1262,7 +1263,7 @@
         <Setter Property="Width" Value="8" />
         <Setter Property="Height" Value="8" />
         <Setter Property="Margin" Value="4,0" />
-        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
+        <Setter Property="infra:PillShape.IsPill" Value="True" />
         <Setter Property="Background" Value="{DynamicResource AppDividerBrush}" />
         <Style.Triggers>
             <DataTrigger Binding="{Binding IsCurrent}" Value="True">
