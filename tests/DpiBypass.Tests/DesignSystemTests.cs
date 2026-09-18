@@ -185,7 +185,7 @@ public sealed class DesignSystemTests
         foreach (var required in new[]
         {
             "Space.4", "Space.8", "Space.12", "Space.16", "Space.24",
-            "Radius.Small", "Radius.Control", "Radius.Tile", "Radius.Card", "Radius.Pill",
+            "Radius.Small", "Radius.Control", "Radius.Tile", "Radius.Card", "Radius.Surface",
             "IconSize.Small", "IconSize.Body", "IconSize.Large",
             "Type.Family", "Type.FamilyMono", "Type.Caption", "Type.Body", "Type.Title",
             "Motion.Fast", "Motion.Micro", "Motion.Content", "Motion.State",
@@ -194,6 +194,13 @@ public sealed class DesignSystemTests
         {
             Assert.Contains(required, keys);
         }
+
+        // Radius.Pill is deliberately not among them. A capsule is not a number in WPF:
+        // any radius large enough to "round the ends off" is clamped per axis and draws an
+        // ellipse, and the radius that does work depends on the badge's measured height.
+        // It lives in Infrastructure/PillShape.cs instead. See BadgeShapeTests.
+        Assert.DoesNotContain("Radius.Pill", keys);
+        Assert.Contains("Pad.Badge", keys);
     }
 
     /// <summary>
@@ -239,19 +246,27 @@ public sealed class DesignSystemTests
     [Fact]
     public void EveryStaticResourceReferenceNamesAKeyThatExists()
     {
-        var declared = new HashSet<string>(StringComparer.Ordinal);
+        // Scope matters, and pooling every key from every file hides the mistake this is
+        // for. A StaticResource sees the dictionary it is written in and whatever that
+        // dictionary merged before it - nothing else. The theme cannot see the window's
+        // own Window.Resources, so a converter declared there and used by a style here
+        // compiles cleanly and throws the first time WPF builds a template that uses the
+        // style. That is what happened to GainBrushConverter, and only the Windows render
+        // caught it.
+        var tokens = KeysIn(TokensXaml).Concat(KeysIn(IconsXaml)).ToHashSet(StringComparer.Ordinal);
 
-        foreach (var file in new[] { TokensXaml, IconsXaml, LightXaml, DarkXaml, RepoFiles.SharedThemeXaml, RepoFiles.MainWindowXaml })
-        {
-            foreach (var key in KeysIn(file))
-            {
-                declared.Add(key);
-            }
-        }
+        // The palette is merged by ThemeManager at application level and swapped live, so
+        // the theme reaches it with DynamicResource. Its keys are deliberately not here.
+        var themeScope = tokens.Concat(KeysIn(RepoFiles.SharedThemeXaml)).ToHashSet(StringComparer.Ordinal);
+        var windowScope = themeScope.Concat(KeysIn(RepoFiles.MainWindowXaml)).ToHashSet(StringComparer.Ordinal);
 
         var unresolved = new List<string>();
 
-        foreach (var file in new[] { RepoFiles.SharedThemeXaml, RepoFiles.MainWindowXaml })
+        foreach (var (file, visible) in new[]
+        {
+            (RepoFiles.SharedThemeXaml, themeScope),
+            (RepoFiles.MainWindowXaml, windowScope),
+        })
         {
             var markup = File.ReadAllText(file);
 
@@ -266,7 +281,7 @@ public sealed class DesignSystemTests
                     continue;
                 }
 
-                if (!declared.Contains(key))
+                if (!visible.Contains(key))
                 {
                     unresolved.Add($"{Path.GetFileName(file)}: {key}");
                 }
@@ -274,6 +289,43 @@ public sealed class DesignSystemTests
         }
 
         Assert.Empty(unresolved);
+    }
+
+    /// <summary>
+    /// No StaticResource in the theme names a key declared later in the same file.
+    /// </summary>
+    /// <remarks>
+    /// Existence is not enough: a StaticResource is resolved as the dictionary is parsed,
+    /// so a key defined further down does not exist yet and the reference throws when WPF
+    /// builds whatever uses it. scripts/tests/xaml-resources.tests.ps1 has checked this on
+    /// Windows for a while and caught a forward BasedOn that had passed every test on
+    /// Linux; PowerShell does not run here, so the same rule is checked in both places
+    /// now.
+    /// </remarks>
+    [Fact]
+    public void NoStaticResourceInTheThemeNamesAKeyDeclaredBelowIt()
+    {
+        var markup = File.ReadAllText(RepoFiles.SharedThemeXaml);
+
+        // Where each key is declared. x:Key is written as an attribute, so its offset in
+        // the file is a good enough stand-in for parse order.
+        var declaredAt = Regex.Matches(markup, @"x:Key=""(?<key>[^""]+)""")
+            .GroupBy(match => match.Groups["key"].Value)
+            .ToDictionary(group => group.Key, group => group.Min(match => match.Index), StringComparer.Ordinal);
+
+        var forward = new List<string>();
+
+        foreach (Match match in Regex.Matches(markup, @"\{StaticResource\s+(?<key>[^}\s]+)\s*\}"))
+        {
+            var key = match.Groups["key"].Value;
+
+            if (declaredAt.TryGetValue(key, out var declaration) && declaration > match.Index)
+            {
+                forward.Add($"{key} is used at offset {match.Index} and declared at {declaration}");
+            }
+        }
+
+        Assert.Empty(forward);
     }
 
     /// <summary>
@@ -409,6 +461,13 @@ public sealed class DesignSystemTests
         {
             Assert.Contains(required, keys);
         }
+
+        // Radius.Pill is deliberately not among them. A capsule is not a number in WPF:
+        // any radius large enough to "round the ends off" is clamped per axis and draws an
+        // ellipse, and the radius that does work depends on the badge's measured height.
+        // It lives in Infrastructure/PillShape.cs instead. See BadgeShapeTests.
+        Assert.DoesNotContain("Radius.Pill", keys);
+        Assert.Contains("Pad.Badge", keys);
     }
 
     /// <summary>

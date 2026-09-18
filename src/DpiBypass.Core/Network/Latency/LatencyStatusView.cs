@@ -159,18 +159,45 @@ public sealed record LatencyStatusView
     public string AdapterName { get; init; } = string.Empty;
 
     /// <summary>
-    /// The idle round trip: the link quiet, nothing transferring.
+    /// The idle round trip as it stands now: the link quiet, nothing transferring.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Only ever a measurement whose own load counters say the link was idle. It used to
     /// be filled with <c>After ?? Before</c>, and the deep test put its loaded window in
     /// <c>After</c> - so a card could report the 140 ms measured mid-upload as the user's
     /// idle ping.
+    /// </para>
+    /// <para>
+    /// It is also only ever a reading that describes the machine as it is now. The other
+    /// half of the same bug was that <c>After</c> held the rejected candidate's reading on
+    /// a rolled-back run, so the card printed the increase that caused the rollback as the
+    /// user's current ping - underneath a headline saying the change had been taken back
+    /// off. A reading whose settings are no longer in force is not this.
+    /// </para>
     /// </remarks>
     public LatencyMeasurement? Idle { get; init; }
 
-    /// <summary>The idle round trip measured again with the final settings, when there is one.</summary>
+    /// <summary>
+    /// The idle round trip measured with the final settings, while they are still applied.
+    /// </summary>
+    /// <remarks>
+    /// The "after" of a before/after, and therefore null unless something was kept. A
+    /// rolled-back run has no after.
+    /// </remarks>
     public LatencyMeasurement? IdleAfter { get; init; }
+
+    /// <summary>Where the post-rollback re-measurement got to.</summary>
+    public LatencyRemeasureState Remeasure { get; init; } = LatencyRemeasureState.NotNeeded;
+
+    /// <summary>
+    /// What kind of win this is, when it is one.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="LatencyGainKind.Stability"/> gets its own sentence and never a
+    /// millisecond figure on the ping: the typical round trip did not move.
+    /// </remarks>
+    public LatencyGainKind GainKind { get; init; } = LatencyGainKind.None;
 
     /// <summary>
     /// The idle baseline, kept alongside <see cref="IdleAfter"/> so a before/after can be
@@ -247,7 +274,14 @@ public sealed record LatencyStatusView
 
         // Idle means idle. A measurement whose own counters say the link was busy is a
         // loaded window whatever field it arrived in, and is not shown as the idle ping.
+        //
+        // "After" is the still-applied verification and nothing else; "Current" is what the
+        // connection reads now, which after a rollback is a fresh reading and not the
+        // candidate's. Older results carry neither, so a result that predates the split
+        // falls back to its own After only when that After still describes the machine.
         var idleAfter = IdleOnly(result.After);
+        var idleNow = IdleOnly(result.Current)
+            ?? (idleAfter is not null && DescribesCurrentState(result.After) ? idleAfter : null);
 
         return new LatencyStatusView
         {
@@ -263,9 +297,11 @@ public sealed record LatencyStatusView
             Protocol = result.TargetProtocol,
             RouteReferenceOnly = result.RouteReferenceOnly,
             AdapterName = result.AdapterName,
-            Idle = idleAfter ?? IdleOnly(result.Before),
+            Idle = idleNow ?? IdleOnly(result.Before),
             IdleAfter = idleAfter,
             IdleBefore = IdleOnly(result.Before),
+            Remeasure = result.Remeasure,
+            GainKind = result.GainKind,
             UploadLoaded = result.UploadLoaded,
             UploadLoadedAfter = result.UploadLoadedAfter ?? result.TrafficGuard?.LoadedAfter,
             DownloadLoaded = result.DownloadLoaded,
@@ -292,6 +328,19 @@ public sealed record LatencyStatusView
     /// </remarks>
     private static LatencyMeasurement? IdleOnly(LatencyMeasurement? measurement)
         => measurement is null || measurement.Load.IsLoaded ? null : measurement;
+
+    /// <summary>
+    /// Whether a reading may stand in for "what your connection reads now".
+    /// </summary>
+    /// <remarks>
+    /// Unstamped readings come from results built before roles existed, and from the
+    /// loaded lane and the quick test, which change nothing and whose readings are
+    /// therefore current by construction. A reading that explicitly says it was taken
+    /// under a candidate is the one case this refuses.
+    /// </remarks>
+    private static bool DescribesCurrentState(LatencyMeasurement? measurement)
+        => measurement is not null
+        && (measurement.Role == LatencyMeasurementRole.Unspecified || measurement.DescribesCurrentState);
 
     /// <summary>
     /// Which of the real situations this result is, from its fields rather than its prose.

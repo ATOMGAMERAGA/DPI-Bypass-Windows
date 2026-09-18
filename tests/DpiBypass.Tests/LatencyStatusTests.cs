@@ -348,14 +348,17 @@ public sealed class LatencyProfileContextTests
 public sealed class LatencyPreferencesTests
 {
     [Fact]
-    public void TheDefaultIsTheGeneralReferenceAndTheGuardIsOff()
+    public void TheDefaultIsAutomaticAndTheGuardIsOff()
     {
+        // Automatic rather than the reference, because the card no longer asks. It picks a
+        // live application session when there is an unambiguous one and the reference
+        // otherwise, and says which it settled on. See AutomaticLatencyTarget.
         var preferences = new AppSettings().Latency;
 
-        Assert.Equal(LatencyTargetKind.Reference, preferences.TargetKind);
+        Assert.Equal(LatencyTargetKind.Automatic, preferences.TargetKind);
         Assert.False(preferences.TrafficGuardEnabled);
         Assert.Null(preferences.TrafficGuardApplication);
-        Assert.Equal(LatencyTargetKind.Reference, preferences.ToSpec().Kind);
+        Assert.Equal(LatencyTargetKind.Automatic, preferences.ToSpec().Kind);
     }
 
     [Fact]
@@ -368,7 +371,7 @@ public sealed class LatencyPreferencesTests
         var settings = new ConfigStore(path, Path.Combine(directory.Path, "networks.json")).Load();
 
         Assert.NotNull(settings.Latency);
-        Assert.Equal(LatencyTargetKind.Reference, settings.Latency.TargetKind);
+        Assert.Equal(LatencyTargetKind.Automatic, settings.Latency.TargetKind);
         Assert.False(settings.Latency.TrafficGuardEnabled);
     }
 

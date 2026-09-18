@@ -582,6 +582,7 @@ public partial class App : Application
                     ? "Sayfa geçiş animasyonu açık."
                     : "Hareket azaltma etkin; sayfa geçiş animasyonu kullanılmıyor.");
             }
+
         }
         catch (Exception ex)
         {
@@ -589,6 +590,7 @@ public partial class App : Application
             AppLog.Error("Sayfa geçiş animasyonu tercihi uygulanamadı", ex);
         }
     }
+
 
     private bool TryCreateWindow()
     {

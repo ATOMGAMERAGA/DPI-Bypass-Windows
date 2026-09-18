@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -9,6 +10,10 @@ using DpiBypass.Core.Onboarding;
 using TabControl = System.Windows.Controls.TabControl;
 using Button = System.Windows.Controls.Button;
 using Point = System.Windows.Point;
+using Size = System.Windows.Size;
+using Brush = System.Windows.Media.Brush;
+using Orientation = System.Windows.Controls.Orientation;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
 
 namespace DpiBypass.App.Infrastructure;
 
@@ -90,11 +95,24 @@ internal static class UiLayoutSelfTest
                     SaveFrame(window, $"settings-{theme}-{width:0}");
 
                     VerifyWelcome(window, $"{theme}-{width:0}");
+
+                    // Every capsule in the window, against real measured heights rather
+                    // than against the markup that asked for them.
+                    VerifyBadgeShapes(window, $"{theme}-{width:0}");
                 }
             }
+            // One page of badges on their own, so the shape can be looked at rather than
+            // hunted for in a screenshot of the whole window.
+            foreach (var theme in new[] { "Light", "Dark" })
+            {
+                palette.Source = new Uri($"Theme/{theme}.xaml", UriKind.Relative);
+                SaveBadgeGallery(theme);
+            }
+
             AppLog.Info(
                 "Arayüz yerleşimi doğrulandı: 6 sekme, 3 pencere boyutu, 2 palet; "
-                + "ilerleme alanı sabit, karşılama ve bağlantı denetimi çizildi.");
+                + "ilerleme alanı sabit, karşılama ve bağlantı denetimi çizildi, "
+                + "kapsül rozetleri ölçülen yüksekliğe göre doğrulandı.");
         }
         finally
         {
@@ -105,47 +123,145 @@ internal static class UiLayoutSelfTest
         }
     }
 
+    /// <summary>
+    /// Checks that every badge marked as a capsule is drawn as one.
+    /// </summary>
+    /// <remarks>
+    /// The bug this covers is that WPF does not read a large corner radius the way CSS
+    /// does. It clamps each axis on its own and never to <c>min(width, height) / 2</c>, so
+    /// "round the ends off" written as a big number draws an ellipse inscribed in the
+    /// badge - no straight edge anywhere, and points where the blunt ends should be. The
+    /// only radius that is a capsule is half the height the stroke leaves behind, and it
+    /// has to follow the measured height because these badges size themselves to their
+    /// text. See Infrastructure/PillShape.cs.
+    ///
+    /// Asserted here, on a laid-out window at three sizes and both palettes, because the
+    /// unit tests can only resolve the geometry WPF would produce - they cannot lay a
+    /// badge out and read back how tall it turned out to be.
+    /// </remarks>
+    private static void VerifyBadgeShapes(MainWindow window, string scenario)
+    {
+        var badges = Descendants<Border>(window)
+            .Where(border => PillShape.GetIsPill(border) && border.IsVisible && border.ActualHeight > 0)
+            .ToArray();
+
+        Require(badges.Length > 0, $"No capsule badges were laid out at {scenario}.");
+
+        foreach (var badge in badges)
+        {
+            var radius = badge.CornerRadius;
+            var expected = (badge.ActualHeight - badge.BorderThickness.Top) / 2;
+
+            Require(
+                Math.Abs(radius.TopLeft - expected) < 0.51,
+                $"A capsule {badge.ActualWidth:0.#}x{badge.ActualHeight:0.#} at {scenario} carries "
+                    + $"radius {radius.TopLeft:0.##}; a capsule needs {expected:0.##}.");
+
+            // Uniform, or Border takes its complex render path and the corners stop
+            // matching each other.
+            Require(
+                radius.TopLeft == radius.TopRight
+                && radius.TopLeft == radius.BottomLeft
+                && radius.TopLeft == radius.BottomRight,
+                $"A capsule at {scenario} has mismatched corners: {radius}.");
+
+            // A capsule needs somewhere to put its straight edge. A badge narrower than it
+            // is tall is a circle at best and an ellipse at worst, whatever radius it has.
+            Require(
+                badge.ActualWidth >= badge.ActualHeight - 0.51,
+                $"A capsule at {scenario} is {badge.ActualWidth:0.#} wide and {badge.ActualHeight:0.#} tall, "
+                    + "so it has no straight edge to round off.");
+        }
+    }
+
+    /// <summary>
+    /// The ping card holds still while a run starts, and its detail section still builds.
+    /// </summary>
+    /// <remarks>
+    /// The card is now one switch and three figures; the target pickers, the per-metric
+    /// tiles and the manual re-runs moved into the expander below it. So the figures are
+    /// what must not move when a run starts, and the moved controls are checked after the
+    /// expander is opened - collapsed content has no visual tree to look at.
+    /// </remarks>
     private static void VerifyLatencyProgress(MainWindow window, string scenario)
     {
         var panel = (FrameworkElement)FindPageElement(window, "LatencyProgressPanel");
         var slot = (FrameworkElement)FindPageElement(window, "LatencyProgressSlot");
-        var cards = (FrameworkElement)FindPageElement(window, "LatencyResultCards");
-        var button = (Button)FindPageElement(window, "LatencyPrimaryButton");
+        var figures = (FrameworkElement)FindPageElement(window, "PingFigures");
         var title = (TextBlock)FindPageElement(window, "LatencyProgressLabel");
         var section = (FrameworkElement)FindPageElement(window, "LatencySection");
         var idleHint = (FrameworkElement)FindPageElement(window, "LatencyIdleHint");
+        var statusWord = (TextBlock)FindPageElement(window, "PingStatusWord");
+        var switchControl = (FrameworkElement)FindPageElement(window, "PingSwitch");
+
         var oldHintVisibility = idleHint.Visibility;
         var oldVisibility = panel.Visibility;
         var oldText = title.Text;
-        var oldContent = button.Content;
-        var oldEnabled = button.IsEnabled;
+        var oldStatus = statusWord.Text;
         try
         {
             panel.SetCurrentValue(UIElement.VisibilityProperty, Visibility.Hidden);
-            button.SetCurrentValue(ContentControl.ContentProperty, "Bağlantımı analiz et");
+            statusWord.SetCurrentValue(TextBlock.TextProperty, "Kapalı");
             window.UpdateLayout();
-            var before = cards.TranslatePoint(new Point(), section);
-            var buttonSize = button.RenderSize;
-            var slotSize = slot.RenderSize;
-            Require(slotSize.Height is > 0 and <= 80, "Progress slot must remain compact.");
 
-            // Long updates and disabled captions must not grow the action or push the results down.
+            var before = figures.TranslatePoint(new Point(), section);
+            var figuresSize = figures.RenderSize;
+            var slotSize = slot.RenderSize;
+            var switchSize = switchControl.RenderSize;
+            Require(slotSize.Height is > 0 and <= 80, "Progress slot must remain compact.");
+            Require(figuresSize.Height is > 0, "The three figures did not lay out.");
+
+            // A long update and the longest status word must not push the figures down or
+            // squeeze the switch.
             idleHint.SetCurrentValue(UIElement.VisibilityProperty, Visibility.Collapsed);
             panel.SetCurrentValue(UIElement.VisibilityProperty, Visibility.Visible);
             title.SetCurrentValue(TextBlock.TextProperty,
                 "Daha iyi bağlantı yolu aranıyor; ağ kartı seçenekleri ve bağlantı kalitesi ölçülüyor…");
-            button.SetCurrentValue(ContentControl.ContentProperty, "Uygun ayarları dene");
-            button.SetCurrentValue(UIElement.IsEnabledProperty, false);
+            statusWord.SetCurrentValue(TextBlock.TextProperty, "İyileştirme uygulanıyor");
             window.UpdateLayout();
-            var after = cards.TranslatePoint(new Point(), section);
-            Require(Math.Abs(before.Y - after.Y) < 1, "Starting measurement moved the results.");
-            Require(button.RenderSize == buttonSize, "The busy action changed size.");
-            Require(slot.RenderSize == slotSize, "The progress panel changed size.");
 
-            // Open details explicitly and ensure its template/content can be materialized too.
+            // Every figure paints with the palette that is loaded now.
+            //
+            // The gain used to take its colour from a converter, and a converter runs when
+            // its binding changes - which a theme swap is not. It therefore kept whichever
+            // palette had been loaded when it first ran, and the dark theme got a dash
+            // drawn in the light theme's near-black on a near-black tile. Nothing but a
+            // rendered frame showed it, so this looks at the brush the element actually
+            // holds rather than at the markup that asked for one.
+            foreach (var figure in Descendants<TextBlock>(figures).Where(text => text.IsVisible))
+            {
+                var live = new[] { "AppTextPrimaryBrush", "AppTextSecondaryBrush", "AppSuccessBrush" }
+                    .Select(key => Application.Current.TryFindResource(key))
+                    .OfType<Brush>()
+                    .ToArray();
+
+                Require(
+                    live.Any(brush => ReferenceEquals(brush, figure.Foreground)),
+                    $"A ping figure at {scenario} paints with a brush that is not in the loaded palette.");
+            }
+
+            var after = figures.TranslatePoint(new Point(), section);
+            Require(Math.Abs(before.Y - after.Y) < 1, "Starting a run moved the three figures.");
+            Require(figures.RenderSize == figuresSize, "The figures row changed size while busy.");
+            Require(slot.RenderSize == slotSize, "The progress panel changed size.");
+            Require(switchControl.RenderSize == switchSize, "The switch changed size while busy.");
+
+            // Open the details and make sure everything that moved in there still builds -
+            // its templates and StaticResource references are only resolved on expansion.
             var details = Descendants<Expander>(section).First();
             details.SetCurrentValue(Expander.IsExpandedProperty, true);
             window.UpdateLayout();
+
+            foreach (var name in new[] { "LatencyPrimaryButton", "LatencyResultCards" })
+            {
+                Require(
+                    Descendants<FrameworkElement>(details).Any(element => element.Name == name),
+                    $"{name} is not reachable from the details section at {scenario}.");
+            }
+
+            var action = Descendants<Button>(details).First(button => button.Name == "LatencyPrimaryButton");
+            Require(action.ActualHeight is > 0 and <= 64, "The detail action has an unexpected height.");
+
             details.SetCurrentValue(Expander.IsExpandedProperty, false);
             section.BringIntoView(new Rect(0, 0, section.ActualWidth, 400));
             window.UpdateLayout();
@@ -156,20 +272,10 @@ internal static class UiLayoutSelfTest
             idleHint.SetCurrentValue(UIElement.VisibilityProperty, oldHintVisibility);
             panel.SetCurrentValue(UIElement.VisibilityProperty, oldVisibility);
             title.SetCurrentValue(TextBlock.TextProperty, oldText);
-            button.SetCurrentValue(ContentControl.ContentProperty, oldContent);
-            button.SetCurrentValue(UIElement.IsEnabledProperty, oldEnabled);
+            statusWord.SetCurrentValue(TextBlock.TextProperty, oldStatus);
         }
     }
 
-    /// <summary>
-    /// The connection control draws every state, and its ring never displaces the text.
-    /// </summary>
-    /// <remarks>
-    /// The ring and the label are stacked, so a stage whose headline wraps to two lines
-    /// would move the button up under the ring if either were sized by its content. Each
-    /// stage is driven through the view model and the control's position is compared
-    /// against the first one.
-    /// </remarks>
     private static void VerifyConnectionControl(MainWindow window)
     {
         var shell = (FrameworkElement)window.FindName("AppShell");
@@ -227,6 +333,41 @@ internal static class UiLayoutSelfTest
                 $"The greeting is {overlay.ActualWidth:0} wide in a {client.ActualWidth:0} content area.");
             Require(overlay.ActualHeight <= client.ActualHeight + 1, "The greeting overflowed the content area.");
 
+            // Usable from the first frame. The entrance animates opacity and a few DIP of
+            // travel, and neither may stand between somebody and the way out: the actions
+            // are laid out, enabled, and hit-testable before any of it has finished.
+            foreach (var name in new[] { "Tanıtımı atla", "Karşılamayı açılışta göster" })
+            {
+                var action = Descendants<FrameworkElement>(overlay).FirstOrDefault(element =>
+                    AutomationProperties.GetName(element) == name);
+
+                Require(action is not null, $"The greeting has no '{name}' control.");
+                Require(action!.IsVisible, $"'{name}' is not visible on the first frame.");
+                Require(action.IsEnabled, $"'{name}' is not usable on the first frame.");
+                Require(action.ActualWidth > 0 && action.ActualHeight > 0,
+                    $"'{name}' has not been laid out on the first frame.");
+                Require(action.IsHitTestVisible, $"'{name}' cannot be clicked on the first frame.");
+            }
+
+            // The light behind the greeting never intercepts a click.
+            var glow = (FrameworkElement)window.FindName("WelcomeGlow");
+            Require(!glow.IsHitTestVisible, "The greeting's background light is hit-testable.");
+
+            // The card built its template rather than falling back to the raw content.
+            // A ContentTemplate that resolves to nothing is silent - the presenter just
+            // draws the bound value, which here is the card index, so the greeting shows
+            // "0" where the heading belongs. Nothing but looking at it catches that, so
+            // this looks: the card has to contain the title the view model is showing.
+            var welcomeCard = (ContentControl)window.FindName("WelcomeCard");
+            Require(welcomeCard.ContentTemplate is not null, "The greeting's card has no template.");
+
+            var headings = Descendants<TextBlock>(welcomeCard).Select(text => text.Text).ToArray();
+            Require(
+                headings.Contains(viewModel.WelcomeTitle),
+                $"The greeting's card does not show its title. It shows: {string.Join(" | ", headings)}");
+            Require(headings.Contains(viewModel.WelcomeBody), "The greeting's card does not show its body.");
+            Require(Descendants<FluentIcon>(welcomeCard).Any(), "The greeting's card has no mark.");
+
             SaveFrame(window, $"welcome-{scenario}");
 
             // Every card is reachable and none of them overflows the content area.
@@ -244,22 +385,111 @@ internal static class UiLayoutSelfTest
         {
             viewModel.BeginWelcome(WelcomeKind.None);
             window.UpdateLayout();
+
+            // Collapsed, which is what stops every storyboard inside it. A greeting that
+            // was dismissed, or a window that went to the notification area, must not leave
+            // anything animating behind it.
+            Require(!overlay.IsVisible, "The greeting is still visible after being dismissed.");
         }
     }
 
     private static FrameworkElement FindPageElement(MainWindow window, string name)
         => Descendants<FrameworkElement>(window).Single(element => element.Name == name);
 
+    /// <summary>
+    /// Renders the capsule badges on their own, at the text lengths and text scales that
+    /// a fixed radius could never have covered.
+    /// </summary>
+    /// <remarks>
+    /// The ends are what went wrong, and in a screenshot of the whole window a badge is
+    /// forty pixels across. This puts one of each on a page at a readable size so the
+    /// difference between a capsule and an oval is visible without measuring it.
+    /// </remarks>
+    private static void SaveBadgeGallery(string theme)
+    {
+        var rows = new StackPanel { Margin = new Thickness(24) };
+
+        foreach (var scale in new[] { 1.0, 1.25, 1.5, 2.0 })
+        {
+            foreach (var text in new[] { "i", "BETA", "Önerilen", "Çok daha uzun bir rozet metni" })
+            {
+                var badge = new Border
+                {
+                    Background = (Brush)Application.Current.Resources["AppAccentSoftBrush"],
+                    BorderBrush = (Brush)Application.Current.Resources["AppAccentBrush"],
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(10 * scale, 2 * scale, 10 * scale, 2 * scale),
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Margin = new Thickness(0, 0, 0, 10),
+                    Child = new TextBlock
+                    {
+                        Text = text,
+                        FontSize = 11.5 * scale,
+                        FontWeight = FontWeights.Bold,
+                        Foreground = (Brush)Application.Current.Resources["AppAccentBrush"],
+                    },
+                };
+
+                PillShape.SetIsPill(badge, true);
+                rows.Children.Add(badge);
+            }
+
+            // The welcome dots, at rest and current, on the same page.
+            var dots = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 18),
+            };
+
+            foreach (var width in new[] { 8d, 8d, 22d })
+            {
+                var dot = new Border
+                {
+                    Width = width * scale,
+                    Height = 8 * scale,
+                    Margin = new Thickness(4 * scale, 0, 4 * scale, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Background = (Brush)Application.Current.Resources[
+                        width > 8 ? "AppAccentBrush" : "AppDividerBrush"],
+                };
+
+                PillShape.SetIsPill(dot, true);
+                dots.Children.Add(dot);
+            }
+
+            rows.Children.Add(dots);
+        }
+
+        var page = new Border
+        {
+            Background = (Brush)Application.Current.Resources["AppBackgroundBrush"],
+            Child = rows,
+        };
+
+        // Measured and arranged off-window: nothing here is ever shown to a user, it only
+        // has to be laid out well enough to render.
+        page.Measure(new Size(520, double.PositiveInfinity));
+        page.Arrange(new Rect(new Point(0, 0), page.DesiredSize));
+        page.UpdateLayout();
+
+        SaveVisual(page, page.DesiredSize, $"badges-{theme}");
+    }
+
     private static void SaveFrame(MainWindow window, string scenario)
+    {
+        SaveVisual(window, new Size(window.ActualWidth, window.ActualHeight), $"latency-{scenario}");
+    }
+
+    private static void SaveVisual(Visual visual, Size size, string name)
     {
         var directory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "ui-selftest"));
         Directory.CreateDirectory(directory);
-        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),
-            (int)Math.Ceiling(window.ActualHeight), 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(window);
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(size.Width),
+            (int)Math.Ceiling(size.Height), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var output = File.Create(Path.Combine(directory, $"latency-{scenario}.png"));
+        using var output = File.Create(Path.Combine(directory, $"{name}.png"));
         encoder.Save(output);
     }
 

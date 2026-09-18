@@ -205,6 +205,14 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _isLatencyBusy;
     private string _latencyStatusLine = "Kapalı.";
     private string _latencyHeadline = "Kapalı";
+    private DpiBypass.Core.Network.Latency.LatencyHeadline _pingCard =
+        DpiBypass.Core.Network.Latency.LatencyHeadline.From(
+            LatencyStatusView.From(modeEnabled: false, new LatencyOptimizationResult
+            {
+                Status = LatencyOptimizationStatus.Disabled,
+                StatusLine = "Kapalı.",
+            }),
+            DateTimeOffset.UtcNow);
     private string _latencyStatusSeverity = "off";
     private string _latencyTargetSummary = "Genel internet referansı — oyun sunucusu değildir";
     private string _latencyPathSummary = string.Empty;
@@ -1091,6 +1099,20 @@ public sealed partial class MainViewModel : ObservableObject
     {
         get => _latencyHeadline;
         private set => Set(ref _latencyHeadline, value);
+    }
+
+    /// <summary>
+    /// The whole ping card: status word, before, after, gain, and the two lines under them.
+    /// </summary>
+    /// <remarks>
+    /// Composed in the core rather than here, so the rules about what may be shown as a
+    /// gain are testable without a window and cannot be worked around by a binding. See
+    /// <see cref="DpiBypass.Core.Network.Latency.LatencyHeadline"/>.
+    /// </remarks>
+    public DpiBypass.Core.Network.Latency.LatencyHeadline PingCard
+    {
+        get => _pingCard;
+        private set => Set(ref _pingCard, value);
     }
 
     /// <summary>"off", "ok", "warn" or "info" - colour only; the wording carries meaning.</summary>
@@ -2007,6 +2029,7 @@ public sealed partial class MainViewModel : ObservableObject
     private void ApplyLatencyStatus(LatencyStatusView status)
     {
         RefreshLatencyFlow(status);
+        PingCard = DpiBypass.Core.Network.Latency.LatencyHeadline.From(status, DateTimeOffset.UtcNow);
         LatencyHeadline = status.Headline;
         LatencyStatusSeverity = status.Severity;
         LatencyStatusLine = string.IsNullOrWhiteSpace(status.Detail) ? status.Headline : status.Detail;

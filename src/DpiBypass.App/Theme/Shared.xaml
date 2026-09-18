@@ -19,6 +19,27 @@
       window be re-spaced or re-timed without reading 1800 lines of markup.
     -->
 
+    <!--
+      Value converters.
+
+      Here rather than in the window, because styles in this file use them and a
+      StaticResource resolves against the dictionaries it can see - a window's own
+      Window.Resources is not one of them. Putting them in the window compiled fine and
+      threw "Cannot find resource named 'GainBrushConverter'" the first time WPF built a
+      template that used the style, which is the same ordering rule the merged dictionaries
+      above are commented with. (That converter has since gone - a brush belongs behind a
+      DynamicResource, not behind a converter that resolves it once.) Converters are
+      stateless, so one instance serves the whole application.
+    -->
+    <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+    <infra:BooleanToHiddenConverter x:Key="BoolToHiddenConverter" />
+    <infra:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibilityConverter" />
+    <infra:EmptyStringToCollapsedConverter x:Key="EmptyToCollapsedConverter" />
+    <infra:SeverityToBrushConverter x:Key="SeverityBrushConverter" />
+    <infra:HotspotCheckStateToBrushConverter x:Key="CheckStateBrushConverter" />
+    <infra:MeasuredToOpacityConverter x:Key="MeasuredOpacityConverter" />
+    <infra:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
+
     <!-- ======== Icons ========
          Microsoft Fluent System Icons, filled paths from the official assets rather
          than strokes drawn here by hand. FluentIcon resolves symbol + size to the
@@ -101,10 +122,11 @@
     <!-- Severity-reactive status pill for the top bar. Severity is "ok", "warn" or
          "off"; the shape and the colour both change so state is never colour-only. -->
     <!--
-      A chip, not a lozenge. This used to carry Radius.Pill, which rounds the ends into
-      semicircles - beside the 8-radius primary action two chips along, that read as a
-      stray oval floating behind the words rather than as part of the same bar. It takes
-      the action's own radius so the top bar has one corner language.
+      A chip, not a lozenge. This used to ask for a capsule and got the oval described in
+      Tokens.xaml; beside the 8-radius primary action two chips along, that read as a
+      stray shape floating behind the words rather than as part of the same bar. A real
+      capsule was never what this wanted, so it takes the action's own radius and the top
+      bar has one corner language. Where a capsule IS wanted, use infra:PillShape.IsPill.
     -->
     <Style x:Key="StatusPillBorderStyle" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
@@ -293,6 +315,80 @@
                 <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
             </DataTrigger>
         </Style.Triggers>
+    </Style>
+
+    <!-- ======== Ping card ========
+         Three numbers across the top of the card, one sentence under them, and one line
+         saying what was measured and when. Everything technical is behind the expander,
+         because a person turning this on is asking one question and these are its answer. -->
+
+    <!-- The state word beside the title: "Ölçülüyor", "Etkin", "Mevcut ayarlar korundu". -->
+    <Style x:Key="PingStatusWordStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+    </Style>
+
+    <!-- "Önce" / "Sonra" / "Kazanç". -->
+    <Style x:Key="PingFigureLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}" />
+        <Setter Property="Margin" Value="{StaticResource Gap.StackTight}" />
+    </Style>
+
+    <!--
+      The numbers themselves.
+
+      Display size because these three are the card, and tabular figures because they sit
+      in a row that must not shuffle sideways as the digits change: Segoe UI Variable's
+      proportional numerals make "48 ms" and "114 ms" different widths, and a live value
+      updating in place would jitter its own column.
+    -->
+    <Style x:Key="PingFigureStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource Type.FamilyDisplay}" />
+        <Setter Property="FontSize" Value="{StaticResource Type.Display}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+    </Style>
+
+    <!--
+      The gain, which is the one figure allowed to turn green - and only when a paired
+      experiment verified it and the change is still applied.
+
+      A trigger with DynamicResource rather than a converter that looks a brush up. A
+      converter runs when its binding changes, and the theme changing is not a change to
+      ShowsReduction: the first version of this kept whichever palette had been loaded when
+      it first ran, so switching to the dark theme left the dash drawn in the light theme's
+      near-black on a near-black tile. Visible in the rendered frames and in nothing else.
+      DynamicResource follows the palette, which is why the rest of this file uses it.
+    -->
+    <Style x:Key="PingGainStyle" TargetType="TextBlock" BasedOn="{StaticResource PingFigureStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding PingCard.ShowsReduction}" Value="True">
+                <Setter Property="Foreground" Value="{DynamicResource AppSuccessBrush}" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- The percentage, which is context for the gain and never the headline. -->
+    <Style x:Key="PingPercentStyle" TargetType="TextBlock" BasedOn="{StaticResource HintStyle}">
+        <Setter Property="Margin" Value="0,2,0,0" />
+        <Setter Property="Visibility"
+                Value="{Binding PingCard.Percent, Converter={StaticResource EmptyToCollapsedConverter}}" />
+    </Style>
+
+    <!-- Each figure sits in its own tile so the three read as one row of equals. -->
+    <Style x:Key="PingFigureTileStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource AppSubtleBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AppCardBorderBrush}" />
+        <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
+        <Setter Property="CornerRadius" Value="{StaticResource Radius.Tile}" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Tile}" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
     </Style>
 
     <Style x:Key="NavTabControlStyle" TargetType="TabControl">
@@ -688,8 +784,8 @@
         <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
         <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
-        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
-        <Setter Property="Padding" Value="8,2" />
+        <Setter Property="infra:PillShape.IsPill" Value="True" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Badge}" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
@@ -703,8 +799,8 @@
         <Setter Property="Background" Value="{DynamicResource AppAccentSoftBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
         <Setter Property="BorderThickness" Value="{StaticResource Border.Hairline}" />
-        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
-        <Setter Property="Padding" Value="8,2" />
+        <Setter Property="infra:PillShape.IsPill" Value="True" />
+        <Setter Property="Padding" Value="{StaticResource Pad.Badge}" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
@@ -780,6 +876,19 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- The ping switch, labelled with the preference it carries rather than with the
+         outcome of the last run. After SwitchStyle rather than beside the rest of the ping
+         card's styles: BasedOn is a StaticResource, and one of those can only see what the
+         dictionary has already declared. -->
+    <Style x:Key="PingSwitchStyle" TargetType="CheckBox" BasedOn="{StaticResource SwitchStyle}">
+        <Setter Property="Content" Value="Kapalı" />
+        <Style.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+                <Setter Property="Content" Value="Açık" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ======== Expander for the advanced/risky settings group ======== -->
@@ -1183,6 +1292,15 @@
         </Style.Triggers>
     </Style>
 
+    <!--
+      The greeting fills the window's content area and nothing more.
+
+      It is a child of the window's layout root, so it covers the app and never the
+      monitor: it cannot resize the window, move it, or go full screen, because it has no
+      access to any of those. Collapsed when it is not wanted, which also stops every
+      storyboard inside it - a greeting that was dismissed or a window that went to the
+      notification area leaves nothing running.
+    -->
     <Style x:Key="WelcomeOverlayStyle" TargetType="Grid">
         <Setter Property="Visibility" Value="Collapsed" />
         <Setter Property="Background" Value="Transparent" />
@@ -1204,32 +1322,277 @@
     </Style>
 
     <!--
+      The light behind the greeting.
+
+      A radial gradient rather than a blurred surface. A BlurEffect is a per-frame GPU
+      pass over everything under it, and this window is meant to stay smooth on integrated
+      graphics; a gradient is one brush the compositor draws once. It also settles: the
+      entrance scales and fades it in, and then it stops. Nothing here repeats, so the
+      greeting costs nothing to leave on screen while somebody reads it.
+    -->
+    <Style x:Key="WelcomeGlowStyle" TargetType="Border">
+        <Setter Property="IsHitTestVisible" Value="False" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Width" Value="620" />
+        <Setter Property="Height" Value="460" />
+        <Setter Property="Opacity" Value="0.85" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+        <Setter Property="Background">
+            <Setter.Value>
+                <RadialGradientBrush GradientOrigin="0.5,0.42" Center="0.5,0.42" RadiusX="0.62" RadiusY="0.62">
+                    <GradientStop Color="{DynamicResource AppAccentGlowColor}" Offset="0" />
+                    <GradientStop Color="{DynamicResource AppAccentGlowFadeColor}" Offset="1" />
+                </RadialGradientBrush>
+            </Setter.Value>
+        </Setter>
+        <Setter Property="RenderTransform">
+            <Setter.Value>
+                <ScaleTransform ScaleX="1" ScaleY="1" />
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <!--
+              Fires when the greeting appears, and only when motion is wanted.
+
+              A MultiDataTrigger rather than a Loaded event, for two reasons. The greeting
+              is collapsed rather than unloaded, so it is shown again without being rebuilt
+              and a Loaded trigger would play once in the app's lifetime. And this is how
+              the entrance is gated on the motion preference at all: with the condition
+              false there is simply no storyboard, and the setters above are the finished
+              design. The storyboard names no target, so it animates the styled element.
+            -->
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsWelcomeVisible}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="0.85"
+                                             Duration="{StaticResource Motion.StateSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleX"
+                                             From="0.82" To="1"
+                                             Duration="{StaticResource Motion.StateSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleY"
+                                             From="0.82" To="1"
+                                             Duration="{StaticResource Motion.StateSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+            </MultiDataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- The brand mark's arrival: up, in, and a touch of overshoot to land on. -->
+    <Style x:Key="WelcomeBrandStyle" TargetType="StackPanel">
+        <Setter Property="Orientation" Value="Horizontal" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,0,0,32" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+        <Setter Property="RenderTransform">
+            <Setter.Value>
+                <TransformGroup>
+                    <ScaleTransform ScaleX="1" ScaleY="1" />
+                    <TranslateTransform X="0" Y="0" />
+                </TransformGroup>
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsWelcomeVisible}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleX"
+                                             From="0.88" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[0].ScaleY"
+                                             From="0.88" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Children[1].Y"
+                                             From="10" To="0"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+            </MultiDataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
+      The action bar, which arrives with the rest rather than after it.
+
+      Its entrance is the shortest thing here on purpose. A button that is still fading in
+      is already clickable - WPF hit-tests an element at zero opacity - but somebody who
+      cannot see it will not press it, so the wait to see it has to be short enough not to
+      be one. 130 ms with no delay.
+    -->
+    <Style x:Key="WelcomeActionsStyle" TargetType="Border" BasedOn="{StaticResource ChromeBorderStyle}">
+        <Setter Property="BorderThickness" Value="0,1,0,0" />
+        <Setter Property="Padding" Value="24,16" />
+        <Style.Triggers>
+            <MultiDataTrigger>
+                <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding IsWelcomeVisible}" Value="True" />
+                    <Condition Binding="{Binding MotionEnabled}" Value="True" />
+                </MultiDataTrigger.Conditions>
+                <MultiDataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             Duration="{StaticResource Motion.Fast}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </MultiDataTrigger.EnterActions>
+            </MultiDataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--
       One card of the greeting.
 
       Bound to the card index rather than to its text: changing the index re-instantiates
-      the template, whose Loaded trigger cross-fades the new card in. That is one
-      animation for any number of cards, and nothing to keep in step when one is added.
+      the template, whose Loaded trigger plays the entrance. That is one animation for any
+      number of cards, and nothing to keep in step when one is added - and it is also what
+      makes moving between steps feel like the same gesture every time.
 
-      The fade is opacity only - no slide, no scale. Reduced-motion guidance is about
-      movement rather than about change, so this stays on whatever the motion preference
-      says, and the animations that do move (the connection ring, the tick) are the ones
-      gated on it.
+      The three parts arrive in the order they are read, 70 ms apart, each rising a few
+      DIP as it fades. The last of them finishes 380 ms after the first frame, which is
+      short enough that nobody waits through it - and nobody has to: the buttons are in the
+      bar below, which has its own much shorter entrance and is clickable throughout.
+
+      Nothing here repeats. Each storyboard runs once per card and stops, so a greeting
+      left on screen is not costing frames, and a window that goes to the notification area
+      leaves nothing running behind it.
     -->
-    <DataTemplate x:Key="WelcomeCardTemplate">
+    <DataTemplate x:Key="WelcomeCardAnimatedTemplate">
         <StackPanel HorizontalAlignment="Center">
             <StackPanel.Triggers>
                 <EventTrigger RoutedEvent="Loaded">
                     <BeginStoryboard>
                         <Storyboard>
-                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                            <!-- The mark, with a little depth as it settles. -->
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardIcon"
+                                             Storyboard.TargetProperty="Opacity"
                                              From="0" To="1"
-                                             Duration="{StaticResource Motion.Micro}"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardIcon"
+                                             Storyboard.TargetProperty="RenderTransform.Children[0].ScaleX"
+                                             From="0.86" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardIcon"
+                                             Storyboard.TargetProperty="RenderTransform.Children[0].ScaleY"
+                                             From="0.86" To="1"
+                                             Duration="{StaticResource Motion.State}"
+                                             EasingFunction="{StaticResource Motion.Overshoot}" />
+
+                            <!-- Then the heading. -->
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardTitle"
+                                             Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             BeginTime="0:0:0.07"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardTitle"
+                                             Storyboard.TargetProperty="RenderTransform.Y"
+                                             From="12" To="0"
+                                             BeginTime="0:0:0.07"
+                                             Duration="{StaticResource Motion.ContentSlow}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+
+                            <!-- Then the sentence under it. -->
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardBody"
+                                             Storyboard.TargetProperty="Opacity"
+                                             From="0" To="1"
+                                             BeginTime="0:0:0.14"
+                                             Duration="{StaticResource Motion.Content}"
+                                             EasingFunction="{StaticResource Motion.EaseOut}" />
+                            <DoubleAnimation Storyboard.TargetName="WelcomeCardBody"
+                                             Storyboard.TargetProperty="RenderTransform.Y"
+                                             From="12" To="0"
+                                             BeginTime="0:0:0.14"
+                                             Duration="{StaticResource Motion.ContentSlow}"
                                              EasingFunction="{StaticResource Motion.EaseOut}" />
                         </Storyboard>
                     </BeginStoryboard>
                 </EventTrigger>
             </StackPanel.Triggers>
 
+            <Border x:Name="WelcomeCardIcon"
+                    Width="72" Height="72"
+                    HorizontalAlignment="Center"
+                    RenderTransformOrigin="0.5,0.5"
+                    CornerRadius="{StaticResource Radius.Surface}"
+                    Background="{DynamicResource AppAccentSoftBrush}">
+                <Border.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform ScaleX="1" ScaleY="1" />
+                    </TransformGroup>
+                </Border.RenderTransform>
+                <infra:FluentIcon Symbol="{Binding DataContext.WelcomeSymbol, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  Filled="True"
+                                  Size="{StaticResource IconSize.Hero}"
+                                  Foreground="{DynamicResource AppAccentBrush}" />
+            </Border>
+
+            <TextBlock x:Name="WelcomeCardTitle"
+                       Text="{Binding DataContext.WelcomeTitle, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.Display}"
+                       FontWeight="SemiBold"
+                       Margin="0,24,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource AppTextPrimaryBrush}">
+                <TextBlock.RenderTransform>
+                    <TranslateTransform X="0" Y="0" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+
+            <TextBlock x:Name="WelcomeCardBody"
+                       Text="{Binding DataContext.WelcomeBody, RelativeSource={RelativeSource AncestorType=Window}}"
+                       FontSize="{StaticResource Type.BodyLarge}"
+                       Margin="0,12,0,0"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       LineHeight="24"
+                       Foreground="{DynamicResource AppTextSecondaryBrush}">
+                <TextBlock.RenderTransform>
+                    <TranslateTransform X="0" Y="0" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+        </StackPanel>
+    </DataTemplate>
+
+    <!--
+      The same card with the motion taken out.
+
+      Not a stripped-down version: the same spacing, the same sizes, the same hierarchy.
+      A greeting on a machine that asked Windows for no animation has to look finished
+      rather than look like one that failed to start, which is why this is a whole template
+      rather than a trigger somebody remembers to check.
+    -->
+    <DataTemplate x:Key="WelcomeCardStaticTemplate">
+        <StackPanel HorizontalAlignment="Center">
             <Border Width="72" Height="72"
                     HorizontalAlignment="Center"
                     CornerRadius="{StaticResource Radius.Surface}"
@@ -1258,11 +1621,40 @@
         </StackPanel>
     </DataTemplate>
 
+    <!--
+      What the window binds to: the animated card, or the still one when motion is off.
+
+      Chosen here with a trigger rather than by swapping the resource from code. The swap
+      was tried first and did not survive a real render - the window drew the raw content
+      where the card should have been - and a template that resolves to nothing has no
+      visible failure until somebody looks at it. A trigger on the same MotionEnabled the
+      rest of the window already uses cannot resolve to nothing, and it also follows the
+      preference while the app is running.
+
+      ContentTemplate is set from the Style rather than on the presenter, because a local
+      value would beat the trigger and the card would never switch.
+    -->
+    <DataTemplate x:Key="WelcomeCardTemplate">
+        <ContentPresenter Content="{Binding}">
+            <ContentPresenter.Style>
+                <Style TargetType="ContentPresenter">
+                    <Setter Property="ContentTemplate" Value="{StaticResource WelcomeCardAnimatedTemplate}" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding DataContext.MotionEnabled, RelativeSource={RelativeSource AncestorType=Window}}"
+                                     Value="False">
+                            <Setter Property="ContentTemplate" Value="{StaticResource WelcomeCardStaticTemplate}" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </ContentPresenter.Style>
+        </ContentPresenter>
+    </DataTemplate>
+
     <Style x:Key="WelcomeDotStyle" TargetType="Border">
         <Setter Property="Width" Value="8" />
         <Setter Property="Height" Value="8" />
         <Setter Property="Margin" Value="4,0" />
-        <Setter Property="CornerRadius" Value="{StaticResource Radius.Pill}" />
+        <Setter Property="infra:PillShape.IsPill" Value="True" />
         <Setter Property="Background" Value="{DynamicResource AppDividerBrush}" />
         <Style.Triggers>
             <DataTrigger Binding="{Binding IsCurrent}" Value="True">
