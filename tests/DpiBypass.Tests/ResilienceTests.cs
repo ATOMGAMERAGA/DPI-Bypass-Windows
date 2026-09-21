@@ -6,6 +6,7 @@ using DpiBypass.Core.Diagnostics;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Engine;
 using DpiBypass.Core.Interop;
+using DpiBypass.Core.Net;
 using Xunit;
 
 namespace DpiBypass.Tests;
@@ -131,15 +132,19 @@ public sealed class TransientSendErrorTests
 {
     [Theory]
     [InlineData(1231)] // ERROR_NETWORK_UNREACHABLE
-    [InlineData(1232)] // ERROR_HOST_UNREACHABLE
     [InlineData(1450)] // ERROR_NO_SYSTEM_RESOURCES
     [InlineData(1453)] // ERROR_WORKING_SET_QUOTA
     [InlineData(8)]    // ERROR_NOT_ENOUGH_MEMORY
     [InlineData(21)]   // ERROR_NOT_READY
-    [InlineData(87)]   // ERROR_INVALID_PARAMETER - this packet, not this handle
-    [InlineData(299)]  // a short write
     public void ARouteThatMovedIsOnePacketsProblem(int error)
         => Assert.True(WinDivertHandle.IsTransientSendError(error));
+
+    [Theory]
+    [InlineData(1232)] // ERROR_HOST_UNREACHABLE - WinDivert impostor TTL-loop guard
+    [InlineData(87)]   // ERROR_INVALID_PARAMETER
+    [InlineData(299)]  // ERROR_PARTIAL_COPY - an incomplete injection is not safe to repeat
+    public void AnImpostorLoopOrInvalidWriteIsNotTransient(int error)
+        => Assert.False(WinDivertHandle.IsTransientSendError(error));
 
     [Theory]
     [InlineData(6)]    // ERROR_INVALID_HANDLE
@@ -149,6 +154,176 @@ public sealed class TransientSendErrorTests
     [InlineData(5)]    // ERROR_ACCESS_DENIED
     public void AHandleThatIsFinishedIsNotWorthRetrying(int error)
         => Assert.False(WinDivertHandle.IsTransientSendError(error));
+
+    /// <summary>
+    /// A pass-through packet must never be silently discarded while the filter remains
+    /// active. Releasing the handle lets TCP retransmission take the normal kernel path.
+    /// </summary>
+    [Theory]
+    [InlineData(1232)]
+    [InlineData(87)]
+    [InlineData(299)]
+    [InlineData(1450)]
+    public void EveryPassThroughSendFailureReleasesTheFilter(int error)
+    {
+        var messages = new List<string>();
+        using var engine = new BypassEngine(new TargetMatcher(), log: messages.Add);
+        var sender = new FakePacketSender(succeeds: false, error);
+        var packet = PacketFactory.BuildIPv4Tcp(
+            FakePayloadFactory.CreateTlsClientHello("auth.riotgames.com"));
+        var original = packet.ToArray();
+        var address = new WinDivertAddress { Outbound = true };
+
+        var keepReading = engine.ForwardPacket(packet, ref address, sender.Send, sender.Shutdown);
+
+        Assert.False(keepReading);
+        Assert.Equal(1, sender.ShutdownCount);
+        Assert.Equal(original, sender.SentPacket);
+        Assert.Contains(messages, message => message.Contains($"error={error}", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AQuicOnlyFaultMarksTheWholeEngineForRecovery()
+    {
+        using var engine = new BypassEngine(new TargetMatcher());
+        string? reportedRole = null;
+        engine.Faulted += role => reportedRole = role;
+
+        Assert.False(engine.FilterFaulted);
+        engine.RaiseFaulted("QUIC");
+
+        Assert.True(engine.FilterFaulted);
+        Assert.True(engine.NeedsRestart);
+        Assert.Equal("QUIC", reportedRole);
+
+        var service = File.ReadAllText(Path.Combine(RepoFiles.CoreProjectDirectory, "ProtectionService.cs"));
+        Assert.Contains("if (!engine.NeedsRestart)", service, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NonTargetRiotTlsPassThroughIsByteIdentical(bool ipv6)
+    {
+        const string host = "auth.riotgames.com";
+        var matcher = new TargetMatcher { Scope = ProtectionScope.DiscordOnly };
+        Assert.False(matcher.ShouldProtect(host, @"C:\Riot Games\VALORANT\VALORANT.exe"));
+
+        using var engine = new BypassEngine(matcher);
+        var sender = new FakePacketSender(succeeds: true);
+        var hello = FakePayloadFactory.CreateTlsClientHello(host);
+        var packet = ipv6
+            ? PacketFactory.BuildIPv6Tcp(hello)
+            : PacketFactory.BuildIPv4Tcp(hello);
+        var original = packet.ToArray();
+        var address = new WinDivertAddress { Outbound = true, IPv6 = ipv6 };
+
+        var decision = engine.ClassifyTcpHandshake(packet);
+        var keepReading = engine.ForwardPacket(packet, ref address, sender.Send, sender.Shutdown);
+
+        Assert.True(decision.IsHandshake);
+        Assert.Equal(host, decision.HostName);
+        Assert.False(decision.ShouldProtect);
+        Assert.True(keepReading);
+        Assert.Equal(0, sender.ShutdownCount);
+        Assert.Equal(original, sender.SentPacket);
+    }
+
+    [Fact]
+    public void QuicPassThroughIsByteIdenticalWhenSuppressionIsOff()
+    {
+        using var engine = new BypassEngine(new TargetMatcher()) { BlockQuicHandshakes = false };
+        var sender = new FakePacketSender(succeeds: true);
+        var packet = PacketFactory.BuildIPv6(
+            TcpIpPacket.ProtocolUdp,
+            "2606:4700:4700::1111",
+            sourcePort: 53001,
+            destinationPort: 443,
+            payloadBytes: 40);
+        var original = packet.ToArray();
+        var address = new WinDivertAddress { Outbound = true, IPv6 = true };
+
+        Assert.False(engine.ShouldDropQuic(packet));
+        var keepReading = engine.ForwardPacket(packet, ref address, sender.Send, sender.Shutdown);
+
+        Assert.True(keepReading);
+        Assert.Equal(0, sender.ShutdownCount);
+        Assert.Equal(original, sender.SentPacket);
+    }
+
+    private sealed class FakePacketSender(bool succeeds, int error = 0)
+    {
+        public byte[]? SentPacket { get; private set; }
+
+        public int ShutdownCount { get; private set; }
+
+        public bool Send(ReadOnlySpan<byte> packet, ref WinDivertAddress address, out int nativeError)
+        {
+            _ = address;
+            SentPacket = packet.ToArray();
+            nativeError = error;
+            return succeeds;
+        }
+
+        public void Shutdown() => ShutdownCount++;
+    }
+}
+
+/// <summary>Send-failure logs identify the packet path without copying application data.</summary>
+public sealed class SendFailureDiagnosticTests
+{
+    [Fact]
+    public void TcpFailureMetadataHasRoutingFactsButNoTlsIdentity()
+    {
+        const string host = "auth.riotgames.com";
+        var packet = PacketFactory.BuildIPv4Tcp(
+            FakePayloadFactory.CreateTlsClientHello(host),
+            sourcePort: 50123,
+            destinationPort: 443);
+        var address = new WinDivertAddress
+        {
+            Outbound = true,
+            Impostor = true,
+            IPChecksum = true,
+            TCPChecksum = true,
+            IfIdx = 17,
+            SubIfIdx = 4,
+        };
+
+        var description = BypassEngine.DescribeSendFailure(packet, 1232, address);
+
+        Assert.Contains("path=pass-through", description, StringComparison.Ordinal);
+        Assert.Contains("protocol=tcp", description, StringComparison.Ordinal);
+        Assert.Contains("family=IPv4", description, StringComparison.Ordinal);
+        Assert.Contains("localPort=50123", description, StringComparison.Ordinal);
+        Assert.Contains("remotePort=443", description, StringComparison.Ordinal);
+        Assert.Contains("error=1232", description, StringComparison.Ordinal);
+        Assert.Contains("layer=Network", description, StringComparison.Ordinal);
+        Assert.Contains("event=NetworkPacket", description, StringComparison.Ordinal);
+        Assert.Contains("impostor:True", description, StringComparison.Ordinal);
+        Assert.Contains("interface=17/4", description, StringComparison.Ordinal);
+        Assert.DoesNotContain(host, description, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void UdpFailureMetadataRecognisesIpv6WithoutPayloadData()
+    {
+        var packet = PacketFactory.BuildIPv6(
+            TcpIpPacket.ProtocolUdp,
+            "2606:4700:4700::1111",
+            sourcePort: 53001,
+            destinationPort: 443,
+            payloadBytes: 40);
+        var address = new WinDivertAddress { Outbound = true, IPv6 = true };
+
+        var description = BypassEngine.DescribeSendFailure(packet, 87, address);
+
+        Assert.Contains("protocol=udp", description, StringComparison.Ordinal);
+        Assert.Contains("family=IPv6", description, StringComparison.Ordinal);
+        Assert.Contains("localPort=53001", description, StringComparison.Ordinal);
+        Assert.Contains("remotePort=443", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("2606:4700", description, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>

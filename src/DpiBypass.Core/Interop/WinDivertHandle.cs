@@ -165,16 +165,15 @@ public sealed class WinDivertHandle : IDisposable
     public const int ShortWriteError = 299;
 
     /// <summary>
-    /// Errors that describe one packet rather than the handle.
+    /// Errors that commonly describe a temporary resource or route condition.
     /// </summary>
     /// <remarks>
-    /// All of these are ordinary on a machine whose network is moving: a route that has
-    /// just gone (1231/1232), a driver briefly out of non-paged pool under a burst
-    /// (1450/8), a send that raced the adapter coming back (21/1231). The packet is lost,
-    /// the sender retransmits it, and the connection carries on. Releasing the filter
-    /// over one of them is the outage - not the packet.
+    /// This classification is diagnostic only. A blocking divert handle must still fail
+    /// open after any refused pass-through injection, otherwise it can discard every TCP
+    /// retransmission. ERROR_HOST_UNREACHABLE (1232) is deliberately absent: WinDivert
+    /// uses it when an impostor packet reaches a zero TTL while cycling through drivers.
     /// </remarks>
-    public static bool IsTransientSendError(int error) => error is 8 or 21 or 87 or 299 or 1231 or 1232 or 1450 or 1453;
+    public static bool IsTransientSendError(int error) => error is 8 or 21 or 1231 or 1450 or 1453;
 
     public static bool CalculateChecksums(Span<byte> packet, ref WinDivertAddress addr)
         => WinDivertNative.CalcChecksums(ref MemoryMarshal.GetReference(packet), (uint)packet.Length, ref addr, 0);

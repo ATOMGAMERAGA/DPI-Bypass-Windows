@@ -1794,7 +1794,7 @@ public sealed class ProtectionService : IAsyncDisposable
             return;
         }
 
-        if (engine.IsRunning)
+        if (!engine.NeedsRestart)
         {
             _engineRecovery.NoteHealthy(now);
             return;

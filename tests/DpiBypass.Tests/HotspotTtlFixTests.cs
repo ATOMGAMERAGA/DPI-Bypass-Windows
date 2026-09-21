@@ -112,6 +112,10 @@ public class HotspotTtlFixTests
         Assert.Contains("outbound", filter, StringComparison.Ordinal);
         Assert.Contains($"ip.TTL >= {TtlFixSettings.DefaultGuard}", filter, StringComparison.Ordinal);
 
+        // This lower-priority handle must still see packets injected by the DPI engine;
+        // the engine itself is the boundary that excludes packets injected upstream.
+        Assert.DoesNotContain("impostor", filter, StringComparison.OrdinalIgnoreCase);
+
         if (dropIPv6)
         {
             Assert.DoesNotContain("HopLimit", filter, StringComparison.Ordinal);

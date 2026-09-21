@@ -124,7 +124,7 @@ public struct WinDivertAddress
 
     public bool Loopback { get => GetBit(LoopbackBit); set => SetBit(LoopbackBit, value); }
 
-    /// <summary>True when WinDivert itself injected the packet - i.e. one of ours coming back around.</summary>
+    /// <summary>True when this or another packet driver already injected the packet.</summary>
     public bool Impostor { get => GetBit(ImpostorBit); set => SetBit(ImpostorBit, value); }
 
     public bool IPv6 { get => GetBit(IPv6Bit); set => SetBit(IPv6Bit, value); }

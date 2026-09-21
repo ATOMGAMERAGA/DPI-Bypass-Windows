@@ -1,8 +1,21 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using DpiBypass.Core.Interop;
 using DpiBypass.Core.Net;
 
 namespace DpiBypass.Core.Engine;
+
+internal delegate bool PacketSender(
+    ReadOnlySpan<byte> packet,
+    ref WinDivertAddress address,
+    out int error);
+
+internal readonly record struct TcpHandshakeDecision(
+    TcpIpPacket Packet,
+    bool IsHandshake,
+    bool IsTls,
+    string? HostName,
+    bool ShouldProtect);
 
 /// <summary>
 /// The packet path.
@@ -28,7 +41,7 @@ public sealed class BypassEngine : IDisposable
     /// established HTTP/HTTPS payload does not cross the user-mode packet path.
     /// </summary>
     private const string HandshakeFilter =
-        "outbound and tcp and ("
+        "outbound and !impostor and tcp and ("
         + "(tcp.DstPort == 443 and tcp.PayloadLength >= 6 and tcp.Payload[0] == 0x16 and tcp.Payload[5] == 0x01)"
         + " or (tcp.DstPort == 80 and tcp.PayloadLength >= 5 and ("
         + "tcp.Payload[0] == 0x47 or tcp.Payload[0] == 0x50 or tcp.Payload[0] == 0x48 or tcp.Payload[0] == 0x44"
@@ -37,10 +50,10 @@ public sealed class BypassEngine : IDisposable
 
     /// <summary>Fallbacks for WinDivert builds that reject payload indexing.</summary>
     private const string TcpFilter =
-        "outbound and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+        "outbound and !impostor and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
     private const string TcpFilterV6 =
-        "outbound and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+        "outbound and !impostor and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
     internal static IReadOnlyList<string> TcpFilterLadder => [HandshakeFilter, TcpFilter, TcpFilterV6];
 
@@ -51,12 +64,12 @@ public sealed class BypassEngine : IDisposable
     /// video over QUIC costs nothing even when suppression is switched on.
     /// </summary>
     private const string QuicFilter =
-        "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32 "
+        "outbound and !impostor and udp and udp.DstPort == 443 and udp.PayloadLength > 32 "
         + "and ((udp.Payload[0] >= 0xC0 and udp.Payload[0] <= 0xCF) "
         + "or (udp.Payload[0] >= 0xD0 and udp.Payload[0] <= 0xDF))";
 
     /// <summary>Used if the driver rejects payload indexing in a filter.</summary>
-    private const string QuicFilterFallback = "outbound and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
+    private const string QuicFilterFallback = "outbound and !impostor and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
 
     /// <summary>
     /// Exposed so the fast-path tests can pin how narrow the UDP side stays.
@@ -69,18 +82,6 @@ public sealed class BypassEngine : IDisposable
     internal static IReadOnlyList<string> QuicFilterLadder => [QuicFilter, QuicFilterFallback];
 
     private const int MaxPacket = 65535;
-
-    /// <summary>
-    /// How many re-injections the driver may refuse in a row before the filter is released.
-    /// </summary>
-    /// <remarks>
-    /// A refused packet is a lost packet, and TCP retransmits lost packets - so a handful
-    /// of them while a route is being rebuilt costs a retransmit each and nothing else.
-    /// Releasing the filter, on the other hand, takes protection off the machine until
-    /// something notices and rebuilds it. The threshold is what separates the two: a run
-    /// this long is not a moving route, it is a handle that has stopped working.
-    /// </remarks>
-    private const int MaxConsecutiveSendFailures = 64;
 
     /// <summary>How many receive errors in a row before the handle is treated as finished.</summary>
     private const int MaxConsecutiveReceiveFailures = 8;
@@ -119,6 +120,7 @@ public sealed class BypassEngine : IDisposable
     private WinDivertHandle? _quicHandle;
     private volatile BypassStrategy _strategy = StrategyLibrary.Default;
     private int _workerCount;
+    private int _filterFaulted;
     private volatile bool _disposed;
 
     public BypassEngine(TargetMatcher matcher, ProcessPortMap? portMap = null, Action<string>? log = null)
@@ -131,6 +133,14 @@ public sealed class BypassEngine : IDisposable
     public EngineStatistics Stats { get; } = new();
 
     public bool IsRunning => _tcpHandle?.IsOpen == true;
+
+    /// <summary>
+    /// True when the TCP handle is down or any independently managed filter reported a
+    /// terminal fault. This includes a QUIC-only failure while TCP remains open.
+    /// </summary>
+    public bool NeedsRestart => !IsRunning || FilterFaulted;
+
+    internal bool FilterFaulted => Volatile.Read(ref _filterFaulted) != 0;
 
     /// <summary>The recipe in force. Swapping it is atomic and takes effect on the next connection.</summary>
     public BypassStrategy Strategy
@@ -178,6 +188,8 @@ public sealed class BypassEngine : IDisposable
         {
             return;
         }
+
+        Interlocked.Exchange(ref _filterFaulted, 0);
 
         if (_stopping.IsCancellationRequested)
         {
@@ -255,7 +267,7 @@ public sealed class BypassEngine : IDisposable
             var workers = _workerCount;
             StopCore();
             StartCore(workers);
-            return IsRunning;
+            return !NeedsRestart;
         }
     }
 
@@ -476,8 +488,10 @@ public sealed class BypassEngine : IDisposable
         return true;
     }
 
-    private void RaiseFaulted(string role)
+    internal void RaiseFaulted(string role)
     {
+        Interlocked.Exchange(ref _filterFaulted, 1);
+
         try
         {
             Faulted?.Invoke(role);
@@ -515,7 +529,7 @@ public sealed class BypassEngine : IDisposable
                 {
                     if (!TryRewrite(handle, packet, scratch, ref address))
                     {
-                        if (!Forward(handle, packet, health, ref address))
+                        if (!Forward(handle, packet, ref address))
                         {
                             return;
                         }
@@ -599,47 +613,85 @@ public sealed class BypassEngine : IDisposable
     /// Re-injects a packet the engine is not rewriting.
     /// </summary>
     /// <remarks>
-    /// A driver that refuses one packet is refusing one packet: the route moved, the
-    /// adapter is coming back, the non-paged pool is briefly full. TCP retransmits, and
-    /// the connection carries on. This used to release the whole filter on the first
-    /// refusal, so a Wi-Fi roam could take protection off the machine for the rest of the
-    /// session with nothing but a log line to say so.
+    /// A packet captured by a non-sniffing handle is blocked until it is re-injected.
+    /// If re-injection fails, leaving the handle active silently drops this packet and
+    /// can drop every retransmission after it. Releasing the handle fails open so the
+    /// next retransmission remains on Windows' normal kernel path.
     /// </remarks>
     /// <returns>False when the reader should stop.</returns>
-    private bool Forward(WinDivertHandle handle, ReadOnlySpan<byte> packet, LoopHealth health, ref WinDivertAddress address)
+    private bool Forward(WinDivertHandle handle, ReadOnlySpan<byte> packet, ref WinDivertAddress address)
+        => ForwardPacket(packet, ref address, handle.Send, handle.Shutdown);
+
+    /// <summary>
+    /// Re-injects one unchanged packet through an injectable boundary so the success and
+    /// fail-open contracts can be verified without loading the kernel driver.
+    /// </summary>
+    internal bool ForwardPacket(
+        ReadOnlySpan<byte> packet,
+        ref WinDivertAddress address,
+        PacketSender send,
+        Action shutdown)
     {
-        if (handle.Send(packet, ref address, out var error))
+        if (send(packet, ref address, out var error))
         {
-            health.Sends = 0;
             return true;
         }
 
         Stats.AddError();
-        health.Sends++;
-
-        if (health.Sends <= MaxConsecutiveSendFailures && WinDivertHandle.IsTransientSendError(error))
-        {
-            if (health.Sends == 1)
-            {
-                _log?.Invoke($"WinDivert refused a pass-through packet (error {error}); dropping it and carrying on.");
-            }
-
-            return true;
-        }
 
         _log?.Invoke(
-            $"WinDivert refused {health.Sends} pass-through packet(s) in a row (error {error}); "
-            + "releasing the filter so traffic flows.");
-        handle.Shutdown();
+            $"WinDivert refused a pass-through packet ({DescribeSendFailure(packet, error, address)}); "
+            + "releasing the filter so retransmission uses the normal kernel path.");
+
+        shutdown();
         return false;
+    }
+
+    /// <summary>Builds a low-noise failure description without addresses, hosts, or payload bytes.</summary>
+    internal static string DescribeSendFailure(
+        ReadOnlySpan<byte> packet,
+        int error,
+        in WinDivertAddress address)
+    {
+        var protocol = "unknown";
+        var sourcePort = 0;
+        var destinationPort = 0;
+        var isIPv6 = address.IPv6;
+
+        var tcp = TcpIpPacket.Parse(packet);
+        if (tcp.IsValid)
+        {
+            protocol = "tcp";
+            sourcePort = tcp.SourcePort;
+            destinationPort = tcp.DestinationPort;
+            isIPv6 = tcp.IsIPv6;
+        }
+        else if (TcpIpPacket.TryLocateTransport(
+                     packet,
+                     TcpIpPacket.ProtocolUdp,
+                     out var packetIsIPv6,
+                     out var udpOffset,
+                     out var usableLength)
+                 && udpOffset + 8 <= usableLength)
+        {
+            protocol = "udp";
+            sourcePort = BinaryPrimitives.ReadUInt16BigEndian(packet[udpOffset..]);
+            destinationPort = BinaryPrimitives.ReadUInt16BigEndian(packet[(udpOffset + 2)..]);
+            isIPv6 = packetIsIPv6;
+        }
+
+        return $"path=pass-through, protocol={protocol}, family={(isIPv6 ? "IPv6" : "IPv4")}, "
+            + $"localPort={sourcePort}, remotePort={destinationPort}, error={error}, "
+            + $"layer={address.Layer}, event={address.Event}, "
+            + $"flags=sniffed:{address.Sniffed},outbound:{address.Outbound},loopback:{address.Loopback},impostor:{address.Impostor},"
+            + $"ipChecksum:{address.IPChecksum},tcpChecksum:{address.TCPChecksum},udpChecksum:{address.UDPChecksum}, "
+            + $"interface={address.IfIdx}/{address.SubIfIdx}";
     }
 
     /// <summary>Consecutive failure counts for one reader. Never shared between threads.</summary>
     private sealed class LoopHealth
     {
         public int Receives;
-
-        public int Sends;
 
         public int Rewrites;
     }
@@ -653,17 +705,8 @@ public sealed class BypassEngine : IDisposable
             return false;
         }
 
-        var parsed = TcpIpPacket.Parse(packet);
-        if (!parsed.IsValid || parsed.PayloadLength <= 0)
-        {
-            return false;
-        }
-
-        var payload = packet.Slice(parsed.PayloadOffset, parsed.PayloadLength);
-        var isTls = parsed.DestinationPort == 443 && TlsClientHello.IsClientHello(payload);
-        var isHttp = parsed.DestinationPort == 80 && HttpRequestHead.IsRequest(payload);
-
-        if (!isTls && !isHttp)
+        var decision = ClassifyTcpHandshake(packet);
+        if (!decision.IsHandshake)
         {
             // Mid-stream data. Not interesting, and not counted, so the numbers on
             // the status page mean "handshakes seen" rather than "packets seen".
@@ -672,26 +715,16 @@ public sealed class BypassEngine : IDisposable
 
         Stats.AddInspected();
 
-        string? hostName = null;
-        if (isTls)
-        {
-            if (TlsClientHello.TryParse(payload, out var hello))
-            {
-                hostName = hello.ServerName;
-            }
-        }
-        else if (HttpRequestHead.TryParse(payload, out var head))
-        {
-            hostName = head.Host;
-        }
-
-        var imagePath = _portMap?.GetImagePath(parsed.SourcePort);
-
-        if (!_matcher.ShouldProtect(hostName, imagePath, parsed.SourcePort))
+        if (!decision.ShouldProtect)
         {
             Stats.AddPassedThrough();
             return false;
         }
+
+        var parsed = decision.Packet;
+        var payload = packet.Slice(parsed.PayloadOffset, parsed.PayloadLength);
+        var isTls = decision.IsTls;
+        var hostName = decision.HostName;
 
         var strategy = _strategy;
         if (strategy.IsPassthrough)
@@ -866,6 +899,44 @@ public sealed class BypassEngine : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Parses the first TCP data packet and applies the configured scope. The result is
+    /// side-effect free so non-target pass-through can be verified without a driver.
+    /// </summary>
+    internal TcpHandshakeDecision ClassifyTcpHandshake(ReadOnlySpan<byte> packet)
+    {
+        var parsed = TcpIpPacket.Parse(packet);
+        if (!parsed.IsValid || parsed.PayloadLength <= 0)
+        {
+            return default;
+        }
+
+        var payload = packet.Slice(parsed.PayloadOffset, parsed.PayloadLength);
+        var isTls = parsed.DestinationPort == 443 && TlsClientHello.IsClientHello(payload);
+        var isHttp = parsed.DestinationPort == 80 && HttpRequestHead.IsRequest(payload);
+        if (!isTls && !isHttp)
+        {
+            return new TcpHandshakeDecision(parsed, false, false, null, false);
+        }
+
+        string? hostName = null;
+        if (isTls)
+        {
+            if (TlsClientHello.TryParse(payload, out var hello))
+            {
+                hostName = hello.ServerName;
+            }
+        }
+        else if (HttpRequestHead.TryParse(payload, out var head))
+        {
+            hostName = head.Host;
+        }
+
+        var imagePath = _portMap?.GetImagePath(parsed.SourcePort);
+        var shouldProtect = _matcher.ShouldProtect(hostName, imagePath, parsed.SourcePort);
+        return new TcpHandshakeDecision(parsed, true, isTls, hostName, shouldProtect);
+    }
+
     private void QuicLoop(WinDivertHandle handle)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(MaxPacket);
@@ -890,7 +961,7 @@ public sealed class BypassEngine : IDisposable
 
                 if (address.Impostor || !ShouldDropQuic(packet))
                 {
-                    if (!Forward(handle, packet, health, ref address))
+                    if (!Forward(handle, packet, ref address))
                     {
                         return;
                     }
@@ -908,7 +979,7 @@ public sealed class BypassEngine : IDisposable
         }
     }
 
-    private bool ShouldDropQuic(ReadOnlySpan<byte> packet)
+    internal bool ShouldDropQuic(ReadOnlySpan<byte> packet)
     {
         if (!BlockQuicHandshakes)
         {

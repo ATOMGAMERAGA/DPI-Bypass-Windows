@@ -192,6 +192,17 @@ public sealed class DpiFastPathTests
     }
 
     /// <summary>
+    /// Packets injected by another WFP callout stay on the kernel path. Capturing and
+    /// re-injecting them again can create a driver loop and eventually exhaust the
+    /// packet's TTL, which WinDivert reports as ERROR_HOST_UNREACHABLE.
+    /// </summary>
+    [Fact]
+    public void PacketsInjectedByAnotherDriverNeverEnterTheDpiEngine()
+        => Assert.All(
+            AllFilters(),
+            filter => Assert.Contains("!impostor", filter, StringComparison.Ordinal));
+
+    /// <summary>
     /// Ordinary UDP is what games use. The only UDP the engine looks at is a QUIC
     /// Initial on 443, identified by the first payload byte in the kernel, so an
     /// established QUIC session - and every game protocol - is never diverted.
