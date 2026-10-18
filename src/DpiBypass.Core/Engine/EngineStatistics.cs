@@ -31,6 +31,21 @@ public sealed class EngineStatistics
 
     public TimeSpan Uptime => StartedAt is null ? TimeSpan.Zero : DateTimeOffset.UtcNow - StartedAt.Value;
 
+    internal static EngineStatistics FromSnapshot(long inspected, long rewritten, long segments,
+        long decoys, long passedThrough, long quicBlocked, long errors, string? lastHost,
+        DateTimeOffset? startedAt) => new()
+    {
+        _inspected = inspected,
+        _rewritten = rewritten,
+        _segments = segments,
+        _decoys = decoys,
+        _passedThrough = passedThrough,
+        _quicBlocked = quicBlocked,
+        _errors = errors,
+        LastHost = lastHost,
+        StartedAt = startedAt,
+    };
+
     internal void AddInspected() => Interlocked.Increment(ref _inspected);
 
     internal void AddRewritten() => Interlocked.Increment(ref _rewritten);

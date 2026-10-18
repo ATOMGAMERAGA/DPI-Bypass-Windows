@@ -23,7 +23,9 @@ public static class AppPaths
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         LegacyProductName);
 
-    public static string LogDirectory { get; } = Path.Combine(StateDirectory, "logs");
+    public static string LogDirectory { get; } = Path.Combine(
+        Interop.Elevation.IsElevated ? StateDirectory : Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductName), "logs");
 
     public static string SettingsFile { get; } = Path.Combine(StateDirectory, "settings.json");
 
@@ -42,7 +44,7 @@ public static class AppPaths
 
     public static void EnsureCreated()
     {
-        Directory.CreateDirectory(StateDirectory);
+        if (Interop.Elevation.IsElevated) Directory.CreateDirectory(StateDirectory);
         Directory.CreateDirectory(LogDirectory);
     }
 

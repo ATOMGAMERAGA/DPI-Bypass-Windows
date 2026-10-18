@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "DPI Bypass Social Observer — Alpha",
+  "version": "1.0.0",
+  "description": "Locally observes one explicitly selected YouTube target. No account data or page text is exported.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7hH1qB57veGWgLgrfuOdLtpdIrPHmzQhBcIaPRpIdpUTAzvNUvNxSxdGkMVWSOFg72297adAHeOCUQaOM7RAXKfzvHur1GA/wb+sm5gpxbc8Y9Se20m67CAtV481/8DkAK56nG6IuvaEPylMMMJmVX1n1tLnUKNUoPNUZYO732QkXfn5J7I7duQwpoDlS8xjk6oqgA2AeiIv6z2y8fipEEzjk2tbcmRN95Eih3E0V3khqWz0JNcd4JfXgAZK/fjIhw9Rnl6Q8H8pKCdKzV4iiZgfMD/Kfsj5+ZFz/3KWRmL9+gzjJ6jqvvOGFjqb8GV9V5ezqpfSAWAAcB7Dj3dnowIDAQAB",
+  "permissions": ["activeTab", "scripting", "nativeMessaging", "storage", "webRequest", "alarms"],
+  "host_permissions": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+  "background": { "service_worker": "worker.js" },
+  "action": { "default_popup": "popup.html" }
+}

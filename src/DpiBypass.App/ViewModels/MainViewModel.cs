@@ -127,7 +127,7 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>How many lines the log page keeps. The file keeps everything.</summary>
     private const int LogCapacity = 500;
 
-    private readonly ProtectionService _service;
+    private readonly IProtectionController _service;
     private readonly AutoStartManager _autoStart;
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _refreshTimer;
@@ -251,7 +251,7 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _isTuning;
     private bool _suppressPersist;
 
-    public MainViewModel(ProtectionService service, Dispatcher dispatcher)
+    public MainViewModel(IProtectionController service, Dispatcher dispatcher, bool integrationEnabled = true)
     {
         _service = service;
         _dispatcher = dispatcher;
@@ -454,7 +454,7 @@ public sealed partial class MainViewModel : ObservableObject
         // answerable for themselves. A fault here used to disappear with the task and
         // leave the two summaries reading "Aranıyor…" for the life of the process.
         _ = LoadInstalledAppsAsync();
-        _ = LoadAutoStartStateAsync();
+        if (integrationEnabled) _ = LoadAutoStartStateAsync();
     }
 
     public ObservableCollection<IspOption> IspOptions { get; }

@@ -47,7 +47,7 @@ public sealed class AutoStartManagerTests
         // Two starts can never become two copies: the Run entry and the trigger both go
         // through this one task, and a second instance of it is dropped.
         Assert.Equal("IgnoreNew", document.Descendants(ns + "MultipleInstancesPolicy").Single().Value);
-        Assert.Equal("HighestAvailable", document.Descendants(ns + "RunLevel").Single().Value);
+        Assert.Equal("LeastPrivilege", document.Descendants(ns + "RunLevel").Single().Value);
         Assert.Equal("/opt/DPI Bypass/DpiBypass.exe", document.Descendants(ns + "Command").Single().Value);
     }
 

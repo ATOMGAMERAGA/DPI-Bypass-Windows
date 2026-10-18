@@ -122,6 +122,7 @@ public sealed class StrategyCoordinator : IDisposable
     private string? _pendingAutomaticNetworkKey;
 
     private bool _disposed;
+    private StrategyLease? _experiment;
     private long _supersededWrites;
 
     public StrategyCoordinator(
@@ -174,6 +175,37 @@ public sealed class StrategyCoordinator : IDisposable
 
     public BypassStrategy CurrentStrategy => _read();
 
+    public StrategyLease? AcquireExperiment(string? expectedStrategyId = null)
+    {
+        CancellationTokenSource? cancel;
+        StrategyLease lease;
+        lock (_gate)
+        {
+            if (_disposed || _session == 0 || _experiment is not null) return null;
+            if (expectedStrategyId is not null && _read().Id != expectedStrategyId) return null;
+            _generation++;
+            cancel = _running; _running = null;
+            _pendingAutomatic = null; _pendingAutomaticNetworkKey = null;
+            lease = new(this, _generation, _session, _networkKey, "social-access-alpha");
+            _experiment = lease;
+        }
+        Cancel(cancel);
+        return lease;
+    }
+
+    public bool ReleaseExperiment(StrategyLease lease, BypassStrategy before, BypassStrategy installed)
+    {
+        lock (_gate)
+        {
+            if (!ReferenceEquals(_experiment, lease)) return true;
+            if (_read() != installed && _read() != before) return false;
+            if (_read() == installed) _write(before);
+            if (_read() != before) return false;
+            _experiment = null; _generation++;
+            return true;
+        }
+    }
+
     /// <summary>How many writes were refused because their run had been superseded.</summary>
     public long SupersededWrites => Interlocked.Read(ref _supersededWrites);
 
@@ -188,6 +220,7 @@ public sealed class StrategyCoordinator : IDisposable
 
         lock (_gate)
         {
+            _experiment = null;
             session = ++_session;
             _generation++;
             _networkKey = networkKey ?? string.Empty;
@@ -211,6 +244,7 @@ public sealed class StrategyCoordinator : IDisposable
 
         lock (_gate)
         {
+            _experiment = null;
             _session = 0;
             _generation++;
             cancel = _running;
@@ -268,7 +302,7 @@ public sealed class StrategyCoordinator : IDisposable
 
         lock (_gate)
         {
-            if (_disposed || _session == 0)
+            if (_disposed || _session == 0 || _experiment is not null)
             {
                 return false;
             }
@@ -346,6 +380,11 @@ public sealed class StrategyCoordinator : IDisposable
     {
         ArgumentNullException.ThrowIfNull(work);
 
+        lock (_gate)
+        {
+            if (_experiment is not null) return coalescedResult;
+        }
+
         if (kind == StrategyWorkKind.Automatic)
         {
             Task? join;
@@ -381,10 +420,14 @@ public sealed class StrategyCoordinator : IDisposable
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         CancellationTokenSource? superseded = null;
         var run = new CancellationTokenSource();
+        long runGeneration;
+        long runSession;
+        string runNetwork;
 
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_experiment is not null) { run.Dispose(); return coalescedResult; }
 
             if (kind == StrategyWorkKind.Manual)
             {
@@ -400,6 +443,9 @@ public sealed class StrategyCoordinator : IDisposable
             }
 
             _running = run;
+            runGeneration = _generation;
+            runSession = _session;
+            runNetwork = _networkKey;
 
             if (kind == StrategyWorkKind.Automatic)
             {
@@ -432,7 +478,7 @@ public sealed class StrategyCoordinator : IDisposable
         StrategyLease lease;
         lock (_gate)
         {
-            lease = new StrategyLease(this, _generation, _session, _networkKey, reason);
+            lease = new StrategyLease(this, runGeneration, runSession, runNetwork, reason);
         }
 
         try

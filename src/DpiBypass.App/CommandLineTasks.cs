@@ -200,6 +200,17 @@ internal static class CommandLineTasks
         var verb = NormaliseVerb(args[0]);
         var argument = args.Length > 1 ? args[1] : null;
 
+        // Installer runs already elevated. Direct CLI housekeeping elevates only
+        // this headless action; status/catalogue and the normal GUI stay user-level.
+        var privileged = verb is "restore-dns" or "restore-hosts" or "dns-watchdog"
+            or "install-autostart" or "uninstall-autostart"
+            || verb == "latency" && string.Equals(argument, "restore", StringComparison.OrdinalIgnoreCase);
+        if (privileged && !DpiBypass.Core.Interop.Elevation.IsElevated)
+        {
+            Environment.ExitCode = await EngineHelper.RunMaintenanceAsync(args).ConfigureAwait(false);
+            return true;
+        }
+
         switch (verb)
         {
             // --- installer and uninstaller ---------------------------------------

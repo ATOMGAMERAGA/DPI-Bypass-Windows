@@ -87,7 +87,7 @@ public sealed record HotspotStatus(
 /// The one object the UI talks to. Owns the engine, the encrypted resolver, the
 /// network watcher and the auto-tuner, and keeps them consistent with each other.
 /// </summary>
-public sealed class ProtectionService : IAsyncDisposable
+public sealed partial class ProtectionService : IProtectionController
 {
     private readonly ConfigStore _store;
     private readonly LearnedDomainStore _learned;
@@ -2577,6 +2577,8 @@ public sealed class ProtectionService : IAsyncDisposable
     /// </remarks>
     internal void OnNetworkChanged(NetworkFingerprint fingerprint)
     {
+        if (_socialRuntime is not null && !string.Equals(Network.Key, fingerprint.Key, StringComparison.Ordinal))
+            _ = _socialRuntime.Coordinator.StopAsync("CONTEXT_CHANGED");
         AdoptNetwork(fingerprint);
 
         // DHCP/RA can replace DNS even when the adapter index and TTL rule did not
@@ -2901,6 +2903,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public void ApplyScope(ProtectionScope scope)
     {
+        _ = InvalidateSocialSettingsContext();
         Settings.Scope = scope;
         _matcher.Scope = scope;
         ReportSave(_store.Save(Settings), "ayarlar");
@@ -2910,8 +2913,15 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public void ApplyManualStrategy(string? strategyId)
     {
+        var socialStop = InvalidateSocialSettingsContext();
         Settings.ManualStrategyId = strategyId;
         ReportSave(_store.Save(Settings), "ayarlar");
+
+        if (socialStop is not null)
+        {
+            _background.Track(ApplySelectedStrategyAfterSocialAsync(socialStop, strategyId));
+            return;
+        }
 
         if (_engine is not null && StrategyLibrary.Find(strategyId) is { } strategy)
         {
@@ -2925,6 +2935,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public void ApplyManualIsp(string? ispProfileId)
     {
+        _ = InvalidateSocialSettingsContext();
         Settings.ManualIspProfileId = ispProfileId;
         ReportSave(_store.Save(Settings), "ayarlar");
 
@@ -2948,6 +2959,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public void ApplyQuicSetting(bool blockQuic)
     {
+        _ = InvalidateSocialSettingsContext();
         Settings.BlockQuicHandshakes = blockQuic;
         ReportSave(_store.Save(Settings), "ayarlar");
 
@@ -3052,6 +3064,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
+        if (_socialRuntime is not null) await _socialRuntime.Coordinator.StopAsync().ConfigureAwait(false);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -3626,6 +3639,7 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <summary>Adds a domain the user typed in. Returns false when it was already covered.</summary>
     public bool AddDomain(string domain)
     {
+        _ = InvalidateSocialSettingsContext();
         var normalised = domain?.Trim().Trim('.').ToLowerInvariant();
         if (string.IsNullOrEmpty(normalised) || !normalised.Contains('.'))
         {
@@ -3652,6 +3666,7 @@ public sealed class ProtectionService : IAsyncDisposable
     /// </summary>
     public bool RemoveDomain(string domain)
     {
+        _ = InvalidateSocialSettingsContext();
         var normalised = domain?.Trim().Trim('.').ToLowerInvariant();
         if (string.IsNullOrEmpty(normalised))
         {
@@ -3682,6 +3697,7 @@ public sealed class ProtectionService : IAsyncDisposable
     /// <summary>Restores a domain that was excluded from the shipped list.</summary>
     public bool RestoreDomain(string domain)
     {
+        _ = InvalidateSocialSettingsContext();
         var normalised = domain?.Trim().Trim('.').ToLowerInvariant();
         if (string.IsNullOrEmpty(normalised)
             || Settings.ExcludedDomains.RemoveAll(d => string.Equals(d, normalised, StringComparison.OrdinalIgnoreCase)) == 0)
@@ -3740,6 +3756,7 @@ public sealed class ProtectionService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_socialRuntime is not null) await _socialRuntime.DisposeAsync().ConfigureAwait(false);
         CancelHotspotDiagnostics();
         StopNetworkWatch();
 

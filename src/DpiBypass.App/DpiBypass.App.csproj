@@ -45,6 +45,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="../../browser-companion/*.js;../../browser-companion/*.json;../../browser-companion/*.html;../../browser-companion/README.md;../../browser-companion/install-windows.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>browser-companion/%(Filename)%(Extension)</Link>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Setting ThemeMode puts WPF's Fluent theming in charge of the window, and its
          ThemeManager.ApplyStyleOnWindow calls WindowBackdropManager.SetBackdrop(window,
          MainWindow) from Window.CreateSourceWindow - so WPF asks for Mica on this window

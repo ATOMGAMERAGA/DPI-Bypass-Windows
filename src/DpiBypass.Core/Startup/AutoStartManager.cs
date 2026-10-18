@@ -388,7 +388,7 @@ public sealed class AutoStartManager
                 <Principal id="Author">
             {principalIdentity}
                   <LogonType>InteractiveToken</LogonType>
-                  <RunLevel>HighestAvailable</RunLevel>
+                  <RunLevel>LeastPrivilege</RunLevel>
                 </Principal>
               </Principals>
               <Settings>

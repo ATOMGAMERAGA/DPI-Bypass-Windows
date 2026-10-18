@@ -100,7 +100,7 @@ public partial class App : Application
 
     private SingleInstance? _instance;
     private ControlServer? _control;
-    private ProtectionService? _service;
+    private IProtectionController? _service;
     private ThemeManager? _theme;
     private TrayIcon? _tray;
     private MainViewModel? _viewModel;
@@ -109,7 +109,6 @@ public partial class App : Application
     private DispatcherTimer? _idleMemoryTimer;
     private StartupPlan _plan = new(StartupVisibility.ShowWindow, "başlatılıyor");
     private bool _shuttingDown;
-    private bool _dnsWatchdogStarted;
     private bool _powerEventsHooked;
 
     /// <summary>
@@ -253,6 +252,14 @@ public partial class App : Application
     /// error dialog and nothing else.
     /// </para>
     /// </remarks>
+    private async Task RunEngineHelperAsync(string[] args)
+    {
+        var result = 1;
+        try { result = await EngineHelper.RunAsync(args); }
+        catch (Exception) { AppLog.Error("Ayrıcalıklı motor başlatılamadı veya kapatıldı."); }
+        finally { AppLog.Shutdown(); Shutdown(result); }
+    }
+
     private void Start(StartupEventArgs e)
     {
         AppPaths.MigrateLegacyState();
@@ -261,6 +268,11 @@ public partial class App : Application
         AppLog.Info($"{AppPaths.ProductName} başlatılıyor · {AppPaths.Author}");
         AppLog.Info($"Sürüm {typeof(App).Assembly.GetName().Version?.ToString(4) ?? "-"} · "
             + $"klasör: {AppPaths.InstallDirectory} · komut satırı: {(e.Args.Length == 0 ? "(yok)" : string.Join(' ', e.Args))}");
+
+        if (e.Args.Length > 0 && e.Args[0] == EngineHelper.Switch)
+        {
+            _ = RunEngineHelperAsync(e.Args); return;
+        }
 
         // The installer, the uninstaller and the command line share this executable.
         if (CommandLineTasks.IsHeadlessVerb(e.Args))
@@ -288,14 +300,15 @@ public partial class App : Application
             return;
         }
 
-        _instance = SingleInstance.Acquire();
-        StartupTrace.Mark($"tek örnek kilidi alındı · birincil={_instance.IsPrimary}");
-
-        if (!TryContinueAsPrimary())
+        if (!_selfTest)
         {
-            StartupTrace.Mark("ikincil kopya · devredildi, çıkılıyor");
-            Shutdown();
-            return;
+            _instance = SingleInstance.Acquire();
+            StartupTrace.Mark($"tek örnek kilidi alındı · birincil={_instance.IsPrimary}");
+            if (!TryContinueAsPrimary())
+            {
+                StartupTrace.Mark("ikincil kopya · devredildi, çıkılıyor");
+                Shutdown(); return;
+            }
         }
 
         StartupTrace.Mark("bu kopya birincil");
@@ -307,7 +320,7 @@ public partial class App : Application
         // never gets sent. A launch that hears nothing takes over and ends this
         // process, which is a window appearing and vanishing again during an install.
         // Listening from here means the answer is "on its way" from the first moment.
-        Guarded("Etkinleştirme dinleyicisi", () =>
+        if (!_selfTest) Guarded("Etkinleştirme dinleyicisi", () =>
         {
             // A second launch (Start menu, desktop shortcut) arrives here.
             _instance!.ActivationRequested += OnActivationRequested;
@@ -315,45 +328,28 @@ public partial class App : Application
             StartupTrace.Mark("etkinleştirme dinleyicisi çalışıyor");
         });
 
-        // The packet driver is unopenable without elevation. The manifest asks for it,
-        // so reaching this branch means the manifest was bypassed somehow; ask once and
-        // hand over rather than starting up half working.
-        StartupTrace.Mark($"yükseltme durumu · yönetici={Elevation.IsElevated}");
-
-        if (!Elevation.IsElevated)
+        // Older scheduled tasks or an explicit elevated launch must still show only a user GUI.
+        if (Elevation.IsElevated)
         {
-            // Release the instance lock first, or the elevated copy we are about to
-            // start would see it held and exit straight back out.
-            _instance.Dispose();
-            _instance = null;
-
-            if (Elevation.TryRelaunchElevated(string.Join(' ', e.Args)))
-            {
-                Shutdown();
-                return;
-            }
-
-            MessageBox.Show(
-                $"{AppPaths.ProductName}, ağ sürücüsünü açabilmek için yönetici hakları gerektirir.\n\n"
-                    + "Uygulamayı sağ tıklayıp \"Yönetici olarak çalıştır\" seçeneğiyle başlatın.",
-                AppPaths.ProductName,
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
-            Shutdown();
-            return;
+            _instance?.Dispose(); _instance = null;
+            if (!DpiBypass.Core.SocialAccess.DesktopUrlLauncher.TryLaunchUserApplication(e.Args))
+                AppLog.Error("Kullanıcı oturumunda arayüz başlatılamadı; yükseltilmiş pencere açılmadı.");
+            Shutdown(); return;
         }
 
         InstallExceptionHandlers();
 
         // --- phase one: the parts without which there is nothing to show -----------
         StartupTrace.Mark("ProtectionService kurucusu başladı");
-        _service = new ProtectionService();
+        _service = new RemoteProtectionClient(_selfTest
+            ? _ => Task.FromException<ProtectionRpcClient>(new InvalidOperationException("SELF_TEST_NO_ENGINE"))
+            : EngineHelper.LaunchAsync, isolatedUiTest: _selfTest);
         StartupTrace.Mark("ProtectionService kurucusu bitti");
 
         HookPowerEvents();
 
         StartupTrace.Mark("MainViewModel kurucusu başladı");
-        _viewModel = new MainViewModel(_service, Dispatcher);
+        _viewModel = new MainViewModel(_service, Dispatcher, integrationEnabled: !_selfTest);
         StartupTrace.Mark("MainViewModel kurucusu bitti");
 
         // The palette is applied before the window is built so the first frame is
@@ -1392,20 +1388,6 @@ public partial class App : Application
 
         try
         {
-            if (_service.Settings.DnsMode != DnsMode.SystemDefault && !_dnsWatchdogStarted)
-            {
-                // System DNS is about to be changed. Do not make a process-local DNS
-                // proxy a single point of failure unless a separately named recovery
-                // process is already watching this owner.
-                if (!CommandLineTasks.TryStartDnsWatchdog())
-                {
-                    throw new InvalidOperationException(
-                        "DNS çökme koruması başlatılamadı; internet ayarları güvenlik için değiştirilmedi.");
-                }
-
-                _dnsWatchdogStarted = true;
-            }
-
             await _service.StartAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
@@ -1463,22 +1445,7 @@ public partial class App : Application
     {
         try
         {
-            var configurator = new DnsConfigurator(AppPaths.StateDirectory, AppLog.InfoSink);
-            if (!configurator.HasPendingRestore)
-            {
-                return;
-            }
-
-            // The engine owns the resolvers whenever it is running, and it re-applies
-            // them itself on the way up. Undoing a redirect it has just installed
-            // would be worse than the leftover this is here to clean up.
-            if (_service is not { State: ProtectionState.Stopped })
-            {
-                return;
-            }
-
-            AppLog.Warning("Önceki çalıştırmadan kalan DNS yönlendirmesi bulundu; geri alınıyor.");
-            await configurator.RestoreAsync().ConfigureAwait(false);
+            if (_service is not null) await _service.RunStartupHotspotCheckAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
