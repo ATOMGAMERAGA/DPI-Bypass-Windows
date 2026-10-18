@@ -151,6 +151,7 @@ public sealed record LatencyPreferences
 
 public sealed record AppSettings : IHotspotLegacyState
 {
+    public SocialAccess.SocialPreferences SocialAccess { get; set; } = new();
     /// <summary>Discord only, Discord plus browsers, or the whole machine.</summary>
     public ProtectionScope Scope { get; set; } = ProtectionScope.DiscordAndBrowsers;
 
@@ -684,6 +685,7 @@ public sealed class ConfigStore
     /// </summary>
     private static void Normalise(AppSettings settings)
     {
+        settings.SocialAccess ??= new();
         if (!Enum.IsDefined(settings.Appearance))
         {
             settings.Appearance = AppearanceMode.System;

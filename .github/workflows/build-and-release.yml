@@ -97,6 +97,14 @@ jobs:
           -p:AssemblyVersion=${{ steps.version.outputs.full }}
           -p:InformationalVersion=${{ steps.version.outputs.full }}
 
+      - name: Package the optional local browser observer
+        shell: pwsh
+        run: >
+          dotnet publish src/DpiBypass.SocialHost/DpiBypass.SocialHost.csproj
+          --configuration Release
+          --output artifacts/publish/browser-companion/host
+          -p:Version=${{ steps.version.outputs.full }}
+
       - name: Check the payload is complete
         shell: pwsh
         run: |
@@ -268,7 +276,7 @@ jobs:
           - Beta Ping Düşürme: eşli A/B turlarıyla median/p95/p99/jitter ölçer; kazanç tekrarlanmazsa ayarı geri alır.
           - Şifreli DNS: Cloudflare birincil, Google ve Quad9 yedek.
           - Kapsam seçimi: yalnızca Discord, engelli site listesi, + tarayıcılar veya tüm sistem.
-          - Her Windows açılışında yükseltilmiş oturum açma göreviyle başlar.
+          - Her Windows açılışında kullanıcı oturumunda başlar; ağ motoru ayrı yönetici helper'ında çalışır.
           - Kaldırma sırasında özgün NIC ve DNS ayarları geri yüklenir.
 
           Derleme: `${{ github.sha }}`

@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/DpiBypass.App/DpiBypass.App.csproj" />
     <Project Path="src/DpiBypass.Core/DpiBypass.Core.csproj" />
+    <Project Path="src/DpiBypass.SocialHost/DpiBypass.SocialHost.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DpiBypass.Tests/DpiBypass.Tests.csproj" />

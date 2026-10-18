@@ -952,8 +952,8 @@ pencere tanıtıcısı oluşmuş, hiç çizilmemiş bir pencere `0` döndürmez.
 `--ui-selftest` uygulamayı normal biçimde açar, penceresinin gerçekten çizilip
 çizilmediğini ölçer ve sonucu çıkış koduyla bildirip kapanır. Paket sürücüsünü
 açmaz, DNS'e dokunmaz ve denetim kanalını başlatmaz; bir arıza bulursa pencere
-durumunu ve açılış izlemesini `%ProgramData%\DPI Bypass\logs\ui-diagnostics.log`
-dosyasına yazar. Başka bir kopya çalışmıyorken çalıştırın.
+durumunu ve açılış izlemesini `%LocalAppData%\DPI Bypass\logs\ui-diagnostics.log`
+dosyasına yazar. Self-test ayrı bir örnekte çalışır; kurulu çalışan kopyaya katılmaz.
 
 Durum ve denetim komutları, adlandırılmış bir kanal üzerinden **çalışan
 uygulamaya** bağlanır — ayarları dosyadan okuyup tahmin etmez. Uygulama
@@ -965,15 +965,15 @@ gösterilir.
 ## Gereksinimler
 
 - Windows 10 sürüm 1809 veya daha yenisi / Windows 11, 64 bit
-- Yönetici hakları (ağ sürücüsü açmak için zorunlu)
+- Ağ işlemleri için yönetici onayı (GUI normal kullanıcı olarak açılır; sürücü/DNS işlemleri ayrı helper'da çalışır)
 - .NET kurmanız gerekmez; uygulama çalışma zamanını kendi içinde taşır
 
 ## Otomatik başlatma
 
 Kurulumda uygulama Windows'un **Başlangıç Uygulamaları** listesine eklenir. Bu
-kayıt, **yükseltilmiş** çalışan `DpiBypass-Autostart` görevini tetikler; böylece
-her açılışta yönetici onayı sorulmaz. Görev kaydedilemezse uygulama doğrudan
-`Run` anahtarına düşer — o durumda onay istenir. İstemiyorsanız Windows Başlangıç
+kayıt, **normal kullanıcı** olarak çalışan `DpiBypass-Autostart` görevini tetikler.
+Ağ işlemi gerektiğinde ayrı motor helper'ı için yönetici onayı istenir. Görev
+kaydedilemezse uygulama doğrudan `Run` anahtarına düşer. İstemiyorsanız Windows Başlangıç
 Uygulamaları'ndan veya **DNS ve ayarlar** sekmesinden kapatabilirsiniz.
 
 **Görev artık kendi oturum açma tetikleyicisine sahiptir.** Önceden tek başlatma
@@ -1006,7 +1006,7 @@ kalır.
 | `dns-snapshot.json` | Değiştirilmeden önceki DNS ayarlarınız |
 | `latency-snapshot.json` | Ping düşürmenin değiştirdiği NIC özelliklerinin tam özgün değerleri ve işlem durumu |
 | `latency-profiles.json` | Ağ + bağdaştırıcı + sürücü + hedef başına doğrulanmış ölçüm sonuçları (yalnız yerel, hash'li) |
-| `logs\` | Günlük kayıtları (14 gün saklanır) |
+| `logs\` | Yönetici motor helper'ının günlükleri (14 gün saklanır); GUI günlükleri `%LocalAppData%\DPI Bypass\logs` altındadır |
 
 ## Kaldırma
 
@@ -1098,11 +1098,11 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 
 | Belirti | Bakılacak yer |
 | --- | --- |
-| Kısayola tıklıyorum, pencere açılmıyor | Uygulama zaten tepside çalışıyordur; kısayolu yeniden çalıştırmak çalışan kopyanın penceresini öne getirir. Yine açılmıyorsa `%ProgramData%\DPI Bypass\logs\crash.log` ve o günün `.log` dosyasındaki "Açılış kararı" / "Görünürlük denetimi" satırlarına bakın |
-| Uygulama çalışıyor ama hiçbir yerde görünmüyor | Bildirim alanı simgesi **^** okunun altında olabilir. `DpiBypass.exe --show` pencereyi her koşulda açar. Görev çubuğunda düğme var ama pencere yoksa `DpiBypass.exe --ui-selftest` neyin eksik olduğunu (ilk kare, DWM gizlemesi, ekran dışı konum) söyler ve `%ProgramData%\DPI Bypass\logs\ui-diagnostics.log` dosyasına yazar |
+| Kısayola tıklıyorum, pencere açılmıyor | Uygulama zaten tepside çalışıyordur; kısayolu yeniden çalıştırmak çalışan kopyanın penceresini öne getirir. Yine açılmıyorsa `%LocalAppData%\DPI Bypass\logs\crash.log` ve o günün `.log` dosyasındaki "Açılış kararı" / "Görünürlük denetimi" satırlarına bakın |
+| Uygulama çalışıyor ama hiçbir yerde görünmüyor | Bildirim alanı simgesi **^** okunun altında olabilir. `DpiBypass.exe --show` pencereyi her koşulda açar. Görev çubuğunda düğme var ama pencere yoksa `DpiBypass.exe --ui-selftest` neyin eksik olduğunu (ilk kare, DWM gizlemesi, ekran dışı konum) söyler ve `%LocalAppData%\DPI Bypass\logs\ui-diagnostics.log` dosyasına yazar |
 | Görev çubuğunda düğme var, pencere hiç görünmüyor | Uygulama artık bunu kendisi fark ediyor: ilk kare çizilene kadar pencere "açıldı" sayılmaz, sınırlı sayıda kurtarma denemesi yapılır (öne getir → ekrana taşı → arka planı düz renge al → gerekirse pencereyi bir kez yeniden oluştur) ve hepsi başarısız olursa günlük klasörünü gösteren bir ileti çıkar. Günlükte "Pencere erişilemiyor" ve "Açılış izlemesi" satırlarına bakın |
 | Kurulum bitince pencere bir an açılıp hemen kapanıyor | v1.0.0.51 ve öncesinde kurulum uygulamayı başlatıyor, tek satırlık komut da bir saniye sonra ikinci bir kopya başlatıyordu. Henüz açılmakta olan ilk kopya "buradayım" diyemediği için ikinci kopya onu kapalı sayıp kapatıyordu — ekranda görülen tam olarak budur. Sonraki sürümlerde açılmakta olan kopya durumunu baştan bildiriyor ve beklenip kapatılmıyor. Sürümü güncelleyin; sürerse günlükteki "Çalışan kopya henüz açılıyor" satırlarını bildirin |
-| Uygulama açılırken donuyor, yaklaşık 40 saniye sonra kayboluyor | Aynı arızanın devamıydı: açılış hatasında uygulama, hatayı yazmadan önce DNS'i geri almak için 38 saniyeye kadar bekliyordu. Artık önce `%ProgramData%\DPI Bypass\logs\crash.log` yazılıp hata gösteriliyor, DNS kurtarma ayrı `DpiBypass.Recovery.exe` sürecine devrediliyor. Bu dosyanın içeriğini bildirin |
+| Uygulama açılırken donuyor, yaklaşık 40 saniye sonra kayboluyor | GUI açılış hataları `%LocalAppData%\DPI Bypass\logs\crash.log` dosyasına yazılır. DNS işlemleri ve kurtarma ayrı yönetici motor helper'ına aittir; GUI ilk pencereyi çizmek için DNS geri almasını beklemez. Bu günlük dosyasının içeriğini bildirin |
 | Kurulumdan hemen sonra "yol bulunamadı" gibi bir hata çıkıyor | Kurulum, uygulamayı silmek üzere olduğu geçici klasörden başlatıyordu; uygulama artık her başlangıçta kendi klasörüne geçiyor ve yardımcı programları tam yolla çağırıyor. Güncel sürümde görülmemeli — görülüyorsa o günün günlüğündeki ilk iki satırı (sürüm, klasör, komut satırı) bildirin |
 | `Kurulum 1 kodu ile sonlandı` | Inno Setup'ın "kurulum başlatılamadı" kodudur: kurulum betiği daha ilk adımda durmuştur. v1.0.0.47'de kurulum betiği, sihirbaz klasörü seçmeden önce `{app}` sabitini genişlettiği için hiçbir makinede kurulamıyordu; sonraki sürümlerde giderildi, tek satırlık komutu yeniden çalıştırmak yeter. Yine görürseniz komutun yazdırdığı `%TEMP%\dpibypass-setup-*.log` dosyasının son satırlarını bildirin |
 | Kurulum "Installing / Please wait while Setup installs..." ekranında, ilerleme çubuğu bomboşken takılı kalıyor | Kurulum, ilk dosyayı yazmadan önce makinedeki kopyayı kapatır: uygulamayı DNS'i ve ağ kartı ayarlarını geri alsın diye birkaç kez çalıştırır ve her birinin bitmesini **süresiz** beklerdi. Bu çalıştırmalar gizli başlatıldığından ekrana gelen herhangi bir pencere — eski sürümlerde `--restore-hosts` komutuna işin yerine ana pencereyle yanıt verilmesi, yarım kaldırılmış bir kurulumda .NET'in "çalışma zamanı bulunamadı" kutusu, açılış hatası iletisi — kimsenin göremediği, kapatamadığı sonsuz bir bekleme demekti; görüntü de tam olarak budur: sıfırda duran bir çubuk. Artık her adımın bir süre sınırı var, sınırı aşan adım bırakılıp kuruluma devam edilir, ne beklendiği de çubuğun üstünde yazar; uygulama kurulum adına çalışırken hiçbir iletişim kutusu göstermez ve kendi süresi dolduğunda kendini sonlandırır. Sürerse `%TEMP%\dpibypass-setup-*.log` dosyasındaki "Gave up after" satırlarını bildirin |
@@ -1112,7 +1112,7 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Durum uzun süre "Başlatılıyor…" kalıyor | Her ağ bağdaştırıcısının DNS değişikliği ayrı bir `powershell.exe` idi; birkaç bağdaştırıcısı olan makinede bu tek başına bir dakikaya yaklaşıyordu. Artık hepsi tek çağrıda uygulanır ve durum satırı hangi adımda olduğunu yazar ("Ad çözümleme ayarlanıyor…", "Ağ sürücüsü açılıyor…"). Yine uzun sürüyorsa o günün günlüğündeki `DNS set to` satırının zaman damgasını bildirin |
 | Fare tekerleği sayfayı kaydırmıyor / açılır liste kendiliğinden değişiyor | Liste veya açılır kutu üzerindeyken tekerlek sayfaya ulaşmıyordu, açılır kutular ise tekerleği seçim değiştirmek için kullanıyordu. Artık liste sonuna geldiğinde tekerlek sayfaya devredilir ve açılır kutu, listesi açık değilken tekerleğe hiç dokunmaz |
 | "Başka bir kullanıcı oturumunda çalışıyor" | Koruma bilgisayar başına tek kopyadır. Diğer Windows oturumunda açık olan kopyayı kapatın |
-| "Yönetici hakları gerekiyor" | Uygulamayı yönetici olarak çalıştırın; sürücü aksi hâlde açılamaz |
+| "Yönetici hakları gerekiyor" | Ağ işlemi için motor helper'ının yönetici onayını kabul edin; sürücü bu ayrı süreçte açılır |
 | Durum "engel sürüyor" diyor | **Ağ ve yöntem** → *Yeniden tara*. Çalışan bulunmazsa DNS modunu veya kapsamı değiştirip yeniden deneyin |
 | Tarayıcıda açılmıyor, uygulamada açılıyor | Kapsamı **Engelli siteler + tarayıcılar** yapın ve QUIC engellemesini açık bırakın |
 | DNS bozuk kaldı | Uygulamayı bir kez çalıştırıp kapatın; `DpiBypass.exe restore-dns` de ayarları geri yükler |
@@ -1125,7 +1125,7 @@ sürüm (`1.0.0.42` gibi) olarak otomatik yayınlanır.
 | Bağlantı arada bir kesiliyor, sonra kendiliğinden düzeliyor | Paket süzgeci bir sürücü hatasıyla kapanmış olabilir. Artık 15 saniyede bir denetlenip yeniden açılıyor ve kapalı olduğu sürece başlık **"Koruma duraklatıldı, yeniden açılıyor"** diyor. Günlükte "paket süzgeci" geçen satırlara bakın; sürekli tekrarlıyorsa o satırları bildirin |
 | Uykudan sonra internet birkaç saniye açılmıyor | Uyanma artık algılanıyor: şifreli DNS bağlantı havuzu tazeleniyor, ad önbelleği boşaltılıyor ve ağ yeniden yoklanıyor. Sürüyorsa günlükteki "Uyanma algılandı" satırının olup olmadığını bildirin |
 | Hiçbir site adı çözülmüyor | Yerel DNS sunucusu durmuş olabilir. Uygulama bunu fark edip yeniden kuruyor; kuramazsa şifreli DNS'i bırakıp ağın kendi çözümleyicilerini geri yüklüyor (günlükte "makinenin kendi çözümleyicileri geri yükleniyor"). Uygulama hiç çalışmıyorsa `DpiBypass.exe restore-dns` aynı işi yapar |
-| Günlükler | **Günlük** sekmesi → *Klasörü aç* (`C:\ProgramData\DPI Bypass\logs`) |
+| Günlükler | **Günlük** sekmesi → *Klasörü aç*; GUI `%LocalAppData%\DPI Bypass\logs`, motor helper'ı `%ProgramData%\DPI Bypass\logs` |
 
 ## Yasal not
 

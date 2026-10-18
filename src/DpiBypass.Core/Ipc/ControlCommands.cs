@@ -15,9 +15,9 @@ namespace DpiBypass.Core.Ipc;
 /// </remarks>
 public sealed class ControlCommands
 {
-    private readonly ProtectionService _service;
+    private readonly IProtectionController _service;
 
-    public ControlCommands(ProtectionService service) => _service = service;
+    public ControlCommands(IProtectionController service) => _service = service;
 
     public async Task<ControlResponse> HandleAsync(ControlRequest request, CancellationToken cancellationToken = default)
     {

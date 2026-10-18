@@ -5,8 +5,8 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- The packet driver cannot be opened without this. -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <!-- Only the headless driver adapter requests elevation at runtime. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>
