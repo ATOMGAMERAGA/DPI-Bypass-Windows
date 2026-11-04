@@ -192,14 +192,32 @@ public sealed class DpiFastPathTests
     }
 
     /// <summary>
-    /// Packets injected by another WFP callout stay on the kernel path. Capturing and
-    /// re-injecting them again can create a driver loop and eventually exhaust the
-    /// packet's TTL, which WinDivert reports as ERROR_HOST_UNREACHABLE.
+    /// Loopback never reaches the operator's inspector, and a game booster's local
+    /// proxy lives there: a decoy ClientHello delivered over loopback is accepted and
+    /// corrupts the stream, so no filter may take loopback traffic.
     /// </summary>
     [Fact]
-    public void PacketsInjectedByAnotherDriverNeverEnterTheDpiEngine()
+    public void LoopbackTrafficNeverEntersTheDpiEngine()
         => Assert.All(
             AllFilters(),
+            filter => Assert.Contains("!loopback", filter, StringComparison.Ordinal));
+
+    /// <summary>
+    /// With ExitLag or GearUP running, Discord's handshake arrives already re-injected by
+    /// the booster's driver - an impostor. The TCP filters must still take it, or Discord
+    /// is not protected at all while a booster runs. Loops are broken in user mode.
+    /// </summary>
+    [Fact]
+    public void HandshakesPassedOnByABoosterDriverAreStillProtected()
+        => Assert.All(
+            BypassEngine.TcpFilterLadder,
+            filter => Assert.DoesNotContain("impostor", filter, StringComparison.Ordinal));
+
+    /// <summary>The QUIC side only drops; it has no reason to see another driver's packets.</summary>
+    [Fact]
+    public void QuicFiltersIgnorePacketsAnotherDriverInjected()
+        => Assert.All(
+            BypassEngine.QuicFilterLadder,
             filter => Assert.Contains("!impostor", filter, StringComparison.Ordinal));
 
     /// <summary>

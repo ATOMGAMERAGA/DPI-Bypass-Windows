@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 using DpiBypass.Core.Ipc;
@@ -25,7 +26,14 @@ public sealed class ProtectionTransportTests
             Assert.True(ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, 0x14, out text, out _));
             var sddl = Marshal.PtrToStringUni(text)!;
             Assert.True(sddl.Contains("(ML;;NW;;;ME)", StringComparison.Ordinal), sddl);
-            Assert.Contains(";;;" + WindowsIdentity.GetCurrent().User!.Value + ")", sddl);
+            // SDDL abbreviates well-known accounts (the built-in Administrator a CI
+            // runner uses comes back as "LA", not its SID), so compare the parsed ACEs
+            // rather than the text.
+            var dacl = new RawSecurityDescriptor(sddl).DiscretionaryAcl;
+            Assert.NotNull(dacl);
+            Assert.NotEmpty(dacl!);
+            var user = WindowsIdentity.GetCurrent().User!;
+            Assert.All(dacl!.Cast<GenericAce>(), ace => Assert.Equal(user, Assert.IsAssignableFrom<KnownAce>(ace).SecurityIdentifier));
             Assert.DoesNotContain(";;;WD)", sddl);
             Assert.DoesNotContain(";;;BU)", sddl);
         }

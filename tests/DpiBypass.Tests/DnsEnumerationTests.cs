@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using DpiBypass.Core.Dns;
 using DpiBypass.Core.Interop;
+using DpiBypass.Core.Net;
 using Xunit;
 
 namespace DpiBypass.Tests;
@@ -40,6 +41,60 @@ public sealed class DnsEnumerationTests
              new Adapter("Tunnel", 4, 4, []) { Type = NetworkInterfaceType.Tunnel }], UnexpectedProbe);
         Assert.Empty(snapshots);
     }
+
+    /// <summary>
+    /// A game booster's or VPN client's adapter belongs to that program; pointing it at
+    /// the loopback resolver is what broke ExitLag and GearUP routing.
+    /// </summary>
+    [Fact]
+    public async Task BoosterAndVpnAdaptersAreLeftToTheirOwners()
+    {
+        var snapshots = await new DnsConfigurator("unused").EnumerateAsync(
+            [new Adapter("Wi-Fi", 7, 7, ["1.1.1.1"]),
+             new Adapter("ExitLag Adapter", 21, 21, ["10.8.0.1"]),
+             new Adapter("GearUP Booster", 22, 22, ["10.9.0.1"]),
+             new Adapter("Wintun Userspace Tunnel", 23, 23, []),
+             new Adapter("Ethernet 3", 24, 24, []) { Type = (NetworkInterfaceType)53 }],
+            UnexpectedProbe);
+
+        Assert.Equal("Wi-Fi-id", Assert.Single(snapshots).Id);
+    }
+
+    /// <summary>The packet path asks about interface indexes; boosters' must be recognised.</summary>
+    [Fact]
+    public void TunnelInterfaceSetKnowsWhichIndexesAreBoosterTunnels()
+    {
+        using var tunnels = new TunnelInterfaceSet(() =>
+        [
+            new Adapter("Wi-Fi", 7, 9, []),
+            new Adapter("vEthernet (External)", 11, 11, []),
+            new Adapter("PPPoE Geniş Bant", 12, 12, []) { Type = NetworkInterfaceType.Ppp },
+            new Adapter("GearUP Booster", 21, 22, []),
+            new Adapter("Local Area Connection", 31, 31, []) { Type = (NetworkInterfaceType)53 },
+        ]);
+
+        Assert.False(tunnels.IsTunnel(7));
+        Assert.False(tunnels.IsTunnel(9));
+        Assert.False(tunnels.IsTunnel(11));
+        Assert.False(tunnels.IsTunnel(12));
+        Assert.True(tunnels.IsTunnel(21));
+        Assert.True(tunnels.IsTunnel(22));
+        Assert.True(tunnels.IsTunnel(31));
+        Assert.False(tunnels.IsTunnel(0));
+        Assert.False(tunnels.IsTunnel(99));
+    }
+
+    [Theory]
+    [InlineData("ExitLag", true)]
+    [InlineData("GearUP Booster Adapter", true)]
+    [InlineData("TAP-Windows Adapter V9", true)]
+    [InlineData("WireGuard Tunnel", true)]
+    [InlineData("Nord VPN", true)]
+    [InlineData("Intel(R) Wi-Fi 6 AX201 160MHz", false)]
+    [InlineData("Realtek PCIe GbE Family Controller", false)]
+    [InlineData("Hyper-V Virtual Ethernet Adapter", false)]
+    public void AdapterNamesAreClassifiedConservatively(string description, bool tunnel)
+        => Assert.Equal(tunnel, TunnelAdapters.IsTunnel("Ethernet", description, NetworkInterfaceType.Ethernet));
 
     [Fact]
     public async Task NativeReadFailureUsesOneFallbackAndRetainsOtherAdapters()

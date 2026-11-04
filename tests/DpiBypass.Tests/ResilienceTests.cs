@@ -182,6 +182,120 @@ public sealed class TransientSendErrorTests
         Assert.Contains(messages, message => message.Contains($"error={error}", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A packet a game booster's driver injected and that WinDivert then refuses is a
+    /// packet looping between drivers. Dropping it breaks the loop; releasing the whole
+    /// filter took Discord's protection down every few seconds while ExitLag/GearUP ran.
+    /// </summary>
+    [Theory]
+    [InlineData(1232)]
+    [InlineData(87)]
+    [InlineData(1450)]
+    public void ARefusedImpostorIsDroppedWithoutReleasingTheFilter(int error)
+    {
+        var messages = new List<string>();
+        using var engine = new BypassEngine(new TargetMatcher(), log: messages.Add);
+        var sender = new FakePacketSender(succeeds: false, error);
+        var packet = PacketFactory.BuildIPv4Tcp(FakePayloadFactory.CreateTlsClientHello("discord.com"));
+        var address = new WinDivertAddress { Outbound = true, Impostor = true };
+
+        Assert.True(engine.ForwardPacket(packet, ref address, sender.Send, sender.Shutdown));
+        Assert.True(engine.ForwardPacket(packet, ref address, sender.Send, sender.Shutdown));
+
+        Assert.Equal(0, sender.ShutdownCount);
+        Assert.False(engine.FilterFaulted);
+        Assert.Single(messages, message => message.Contains($"error={error}", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The booster can hand our own split segments back to us; an impostor handshake for
+    /// a connection rewritten moments ago must not be split again.
+    /// </summary>
+    [Fact]
+    public void AConnectionIsOnlyRewrittenOnceWhileABoosterHandsItBack()
+    {
+        using var engine = new BypassEngine(new TargetMatcher());
+
+        Assert.False(engine.WasRecentlyRewritten(50123, 443));
+        engine.RememberRewrite(50123, 443);
+
+        Assert.True(engine.WasRecentlyRewritten(50123, 443));
+        Assert.False(engine.WasRecentlyRewritten(50124, 443));
+        Assert.False(engine.WasRecentlyRewritten(50123, 80));
+    }
+
+    /// <summary>
+    /// Traffic leaving through a booster's tunnel adapter is invisible to the inspector,
+    /// and decoys tuned for the real line can reach the server through it.
+    /// </summary>
+    [Fact]
+    public void TrafficLeavingThroughABoosterTunnelIsLeftAlone()
+    {
+        var messages = new List<string>();
+        using var engine = new BypassEngine(new TargetMatcher { Scope = ProtectionScope.DiscordOnly }, log: messages.Add)
+        {
+            BlockQuicHandshakes = true,
+        };
+        engine.Tunnels = new TunnelInterfaceSet(() => [], watchChanges: false);
+        Assert.False(engine.LeavesThroughTunnel(21));
+
+        using var tunnels = new TunnelInterfaceSet(() => [new TunnelNic("GearUP Booster", 21)], watchChanges: false);
+        engine.Tunnels = tunnels;
+
+        Assert.True(engine.LeavesThroughTunnel(21));
+        Assert.True(engine.LeavesThroughTunnel(21));
+        Assert.False(engine.LeavesThroughTunnel(7));
+        Assert.Single(messages, message => message.Contains("tunnel", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private sealed class TunnelNic(string name, int index) : System.Net.NetworkInformation.NetworkInterface
+    {
+        public override string Id => name;
+        public override string Name => name;
+        public override string Description => name;
+        public override bool IsReceiveOnly => false;
+        public override bool SupportsMulticast => true;
+        public override long Speed => 0;
+        public override System.Net.NetworkInformation.OperationalStatus OperationalStatus
+            => System.Net.NetworkInformation.OperationalStatus.Up;
+        public override System.Net.NetworkInformation.NetworkInterfaceType NetworkInterfaceType
+            => System.Net.NetworkInformation.NetworkInterfaceType.Ethernet;
+        public override bool Supports(System.Net.NetworkInformation.NetworkInterfaceComponent component) => true;
+        public override System.Net.NetworkInformation.IPInterfaceProperties GetIPProperties() => new Properties(index);
+        public override System.Net.NetworkInformation.IPv4InterfaceStatistics GetIPv4Statistics()
+            => throw new NotSupportedException();
+        public override System.Net.NetworkInformation.PhysicalAddress GetPhysicalAddress()
+            => System.Net.NetworkInformation.PhysicalAddress.None;
+
+        private sealed class Properties(int index) : System.Net.NetworkInformation.IPInterfaceProperties
+        {
+            public override System.Net.NetworkInformation.IPv4InterfaceProperties GetIPv4Properties() => new V4(index);
+            public override System.Net.NetworkInformation.IPv6InterfaceProperties GetIPv6Properties()
+                => throw new System.Net.NetworkInformation.NetworkInformationException();
+            public override bool IsDnsEnabled => false;
+            public override bool IsDynamicDnsEnabled => false;
+            public override string DnsSuffix => "";
+            public override System.Net.NetworkInformation.IPAddressCollection DnsAddresses => throw new NotSupportedException();
+            public override System.Net.NetworkInformation.IPAddressInformationCollection AnycastAddresses => throw new NotSupportedException();
+            public override System.Net.NetworkInformation.IPAddressCollection DhcpServerAddresses => throw new NotSupportedException();
+            public override System.Net.NetworkInformation.GatewayIPAddressInformationCollection GatewayAddresses => throw new NotSupportedException();
+            public override System.Net.NetworkInformation.MulticastIPAddressInformationCollection MulticastAddresses => throw new NotSupportedException();
+            public override System.Net.NetworkInformation.UnicastIPAddressInformationCollection UnicastAddresses => throw new NotSupportedException();
+            public override System.Net.NetworkInformation.IPAddressCollection WinsServersAddresses => throw new NotSupportedException();
+        }
+
+        private sealed class V4(int index) : System.Net.NetworkInformation.IPv4InterfaceProperties
+        {
+            public override int Index => index;
+            public override int Mtu => 1500;
+            public override bool IsAutomaticPrivateAddressingActive => false;
+            public override bool IsAutomaticPrivateAddressingEnabled => false;
+            public override bool IsDhcpEnabled => true;
+            public override bool IsForwardingEnabled => false;
+            public override bool UsesWins => false;
+        }
+    }
+
     [Fact]
     public void AQuicOnlyFaultMarksTheWholeEngineForRecovery()
     {

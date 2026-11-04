@@ -30,8 +30,10 @@ internal readonly record struct TcpHandshakeDecision(
 /// because they never enter this process.
 /// </para>
 /// <para>
-/// No per-connection state is kept either. A ClientHello is self-identifying, so
-/// there is nothing to look up, nothing to expire and nothing to grow.
+/// Almost no per-connection state is kept either. A ClientHello is self-identifying,
+/// so the only memory is a short, bounded list of connections rewritten in the last
+/// few seconds - which is what stops a game booster's packet driver and this engine
+/// from handing the same handshake back and forth.
 /// </para>
 /// </remarks>
 public sealed class BypassEngine : IDisposable
@@ -41,7 +43,7 @@ public sealed class BypassEngine : IDisposable
     /// established HTTP/HTTPS payload does not cross the user-mode packet path.
     /// </summary>
     private const string HandshakeFilter =
-        "outbound and !impostor and tcp and ("
+        "outbound and !loopback and tcp and ("
         + "(tcp.DstPort == 443 and tcp.PayloadLength >= 6 and tcp.Payload[0] == 0x16 and tcp.Payload[5] == 0x01)"
         + " or (tcp.DstPort == 80 and tcp.PayloadLength >= 5 and ("
         + "tcp.Payload[0] == 0x47 or tcp.Payload[0] == 0x50 or tcp.Payload[0] == 0x48 or tcp.Payload[0] == 0x44"
@@ -50,10 +52,10 @@ public sealed class BypassEngine : IDisposable
 
     /// <summary>Fallbacks for WinDivert builds that reject payload indexing.</summary>
     private const string TcpFilter =
-        "outbound and !impostor and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+        "outbound and !loopback and ip and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
     private const string TcpFilterV6 =
-        "outbound and !impostor and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
+        "outbound and !loopback and tcp and (tcp.DstPort == 443 or tcp.DstPort == 80) and tcp.PayloadLength > 0";
 
     internal static IReadOnlyList<string> TcpFilterLadder => [HandshakeFilter, TcpFilter, TcpFilterV6];
 
@@ -64,12 +66,12 @@ public sealed class BypassEngine : IDisposable
     /// video over QUIC costs nothing even when suppression is switched on.
     /// </summary>
     private const string QuicFilter =
-        "outbound and !impostor and udp and udp.DstPort == 443 and udp.PayloadLength > 32 "
+        "outbound and !loopback and !impostor and udp and udp.DstPort == 443 and udp.PayloadLength > 32 "
         + "and ((udp.Payload[0] >= 0xC0 and udp.Payload[0] <= 0xCF) "
         + "or (udp.Payload[0] >= 0xD0 and udp.Payload[0] <= 0xDF))";
 
     /// <summary>Used if the driver rejects payload indexing in a filter.</summary>
-    private const string QuicFilterFallback = "outbound and !impostor and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
+    private const string QuicFilterFallback = "outbound and !loopback and !impostor and udp and udp.DstPort == 443 and udp.PayloadLength > 32";
 
     /// <summary>
     /// Exposed so the fast-path tests can pin how narrow the UDP side stays.
@@ -115,6 +117,31 @@ public sealed class BypassEngine : IDisposable
     private readonly Lock _lifecycleGate = new();
     private readonly List<Thread> _workers = [];
 
+    /// <summary>
+    /// Connections whose handshake was rewritten in the last few seconds, keyed by
+    /// local and remote port, with the time it happened.
+    /// </summary>
+    /// <remarks>
+    /// Game boosters (ExitLag, GearUP…) run their own packet drivers, and Discord's
+    /// handshake reaches this engine having already been re-injected by one of them -
+    /// WinDivert flags it an impostor. Those have to be taken, or Discord is simply not
+    /// protected while a booster runs. But the booster can also pick up the segments
+    /// this engine injects and re-inject them in turn, and a split first segment still
+    /// looks like a ClientHello. Without this memory each round trip would be split
+    /// again until WinDivert's TTL guard killed the packet. An impostor handshake for a
+    /// connection rewritten moments ago is therefore passed through untouched.
+    /// </remarks>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<uint, long> _recentRewrites = new();
+
+    private static readonly long RecentRewriteTicks = TimeSpan.FromSeconds(10).Ticks;
+
+    private const int MaxRecentRewrites = 4096;
+
+    private TunnelInterfaceSet? _tunnels;
+    private bool _ownsTunnels;
+    private int _tunnelNoticeLogged;
+    private int _impostorDropLogged;
+
     private CancellationTokenSource _stopping = new();
     private WinDivertHandle? _tcpHandle;
     private WinDivertHandle? _quicHandle;
@@ -131,6 +158,20 @@ public sealed class BypassEngine : IDisposable
     }
 
     public EngineStatistics Stats { get; } = new();
+
+    /// <summary>
+    /// Which interfaces are booster or VPN tunnels. Created on first start when nobody
+    /// supplied one; tests hand in their own.
+    /// </summary>
+    internal TunnelInterfaceSet? Tunnels
+    {
+        get => _tunnels;
+        set
+        {
+            _tunnels = value;
+            _ownsTunnels = false;
+        }
+    }
 
     public bool IsRunning => _tcpHandle?.IsOpen == true;
 
@@ -190,6 +231,24 @@ public sealed class BypassEngine : IDisposable
         }
 
         Interlocked.Exchange(ref _filterFaulted, 0);
+
+        if (_tunnels is null)
+        {
+            try
+            {
+                _tunnels = new TunnelInterfaceSet();
+                _ownsTunnels = true;
+                if (_tunnels.TunnelCount > 0)
+                {
+                    _log?.Invoke(
+                        $"{_tunnels.TunnelCount} booster/VPN tunnel interface(s) found; traffic leaving through them is left untouched.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.Invoke($"Tunnel adapter detection unavailable: {ex.Message}");
+            }
+        }
 
         if (_stopping.IsCancellationRequested)
         {
@@ -639,6 +698,24 @@ public sealed class BypassEngine : IDisposable
 
         Stats.AddError();
 
+        if (address.Impostor)
+        {
+            // Another packet driver (a game booster, a VPN client) injected this packet
+            // before we saw it. WinDivert refuses to re-inject such a packet when it is
+            // looping between drivers (ERROR_HOST_UNREACHABLE once its TTL runs out), and
+            // dropping it is exactly what breaks the loop. Releasing the whole filter
+            // instead used to take protection down - and with it Discord - every few
+            // seconds for as long as the booster ran.
+            if (Interlocked.Exchange(ref _impostorDropLogged, 1) == 0)
+            {
+                _log?.Invoke(
+                    $"WinDivert refused a packet another driver injected ({DescribeSendFailure(packet, error, address)}); "
+                    + "dropping that packet and keeping the filter.");
+            }
+
+            return true;
+        }
+
         _log?.Invoke(
             $"WinDivert refused a pass-through packet ({DescribeSendFailure(packet, error, address)}); "
             + "releasing the filter so retransmission uses the normal kernel path.");
@@ -699,8 +776,9 @@ public sealed class BypassEngine : IDisposable
     /// <summary>Returns true when the packet was replaced (and must not be forwarded as-is).</summary>
     private bool TryRewrite(WinDivertHandle handle, Span<byte> packet, byte[] scratch, ref WinDivertAddress address)
     {
-        // Packets we injected come back around; forward them untouched or we loop forever.
-        if (address.Impostor)
+        // Leaving through a booster or VPN tunnel: the operator's inspector never sees
+        // inside it, and decoys tuned for the real line can reach the server through it.
+        if (LeavesThroughTunnel(address.IfIdx))
         {
             return false;
         }
@@ -722,6 +800,17 @@ public sealed class BypassEngine : IDisposable
         }
 
         var parsed = decision.Packet;
+
+        // Another driver injected this one. Rewrite it the first time - that is a
+        // booster passing Discord's handshake along, and it still has to get past the
+        // inspector - but never twice in a row for the same connection, or our own
+        // segments would be split again each time the booster hands them back.
+        if (address.Impostor && WasRecentlyRewritten(parsed.SourcePort, parsed.DestinationPort))
+        {
+            Stats.AddPassedThrough();
+            return false;
+        }
+
         var payload = packet.Slice(parsed.PayloadOffset, parsed.PayloadLength);
         var isTls = decision.IsTls;
         var hostName = decision.HostName;
@@ -875,9 +964,11 @@ public sealed class BypassEngine : IDisposable
                 Stats.AddError();
             }
 
+            RememberRewrite(parsed.SourcePort, parsed.DestinationPort);
             return true;
         }
 
+        RememberRewrite(parsed.SourcePort, parsed.DestinationPort);
         Stats.AddRewritten();
         Stats.AddSegments(sent);
         Stats.AddDecoys(decoys);
@@ -898,6 +989,53 @@ public sealed class BypassEngine : IDisposable
 
         return true;
     }
+
+    /// <summary>True when a packet on <paramref name="interfaceIndex"/> leaves through a booster or VPN tunnel.</summary>
+    internal bool LeavesThroughTunnel(uint interfaceIndex)
+    {
+        if (_tunnels is not { } tunnels || !tunnels.IsTunnel(interfaceIndex))
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _tunnelNoticeLogged, 1) == 0)
+        {
+            _log?.Invoke(
+                $"Traffic is leaving through a booster/VPN tunnel (interface {interfaceIndex}); "
+                + "handshakes on it are passed through untouched.");
+        }
+
+        return true;
+    }
+
+    private static uint FlowKey(ushort sourcePort, ushort destinationPort)
+        => ((uint)sourcePort << 16) | destinationPort;
+
+    internal void RememberRewrite(ushort sourcePort, ushort destinationPort)
+    {
+        var now = DateTime.UtcNow.Ticks;
+        if (_recentRewrites.Count >= MaxRecentRewrites)
+        {
+            foreach (var (key, at) in _recentRewrites)
+            {
+                if (now - at >= RecentRewriteTicks)
+                {
+                    _recentRewrites.TryRemove(key, out _);
+                }
+            }
+
+            if (_recentRewrites.Count >= MaxRecentRewrites)
+            {
+                _recentRewrites.Clear();
+            }
+        }
+
+        _recentRewrites[FlowKey(sourcePort, destinationPort)] = now;
+    }
+
+    internal bool WasRecentlyRewritten(ushort sourcePort, ushort destinationPort)
+        => _recentRewrites.TryGetValue(FlowKey(sourcePort, destinationPort), out var at)
+            && DateTime.UtcNow.Ticks - at < RecentRewriteTicks;
 
     /// <summary>
     /// Parses the first TCP data packet and applies the configured scope. The result is
@@ -959,7 +1097,7 @@ public sealed class BypassEngine : IDisposable
 
                 var packet = buffer.AsSpan(0, length);
 
-                if (address.Impostor || !ShouldDropQuic(packet))
+                if (address.Impostor || LeavesThroughTunnel(address.IfIdx) || !ShouldDropQuic(packet))
                 {
                     if (!Forward(handle, packet, ref address))
                     {
@@ -1087,6 +1225,10 @@ public sealed class BypassEngine : IDisposable
             _disposed = true;
             StopCore();
             _stopping.Dispose();
+            if (_ownsTunnels)
+            {
+                _tunnels?.Dispose();
+            }
         }
     }
 }
