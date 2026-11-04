@@ -191,6 +191,57 @@ public class HotspotTtlFixTests
         Assert.Null(HotspotTtlFix.Rewrite(packet, offset: 8, TtlFixSettings.Default));
     }
 
+    /// <summary>
+    /// A packet a game booster's driver injected loses one hop when WinDivert re-injects
+    /// it, so it is written one higher to still reach the operator at 64.
+    /// </summary>
+    [Fact]
+    public void APacketABoosterInjectedIsWrittenOneHigherToCancelTheReinjectionHop()
+    {
+        Span<byte> packet = stackalloc byte[20];
+        packet[8] = 128;
+
+        var change = HotspotTtlFix.Rewrite(packet, offset: 8, TtlFixSettings.Default, impostor: true);
+
+        Assert.Equal((8, (byte)128), change);
+        Assert.Equal(TtlFixSettings.DefaultTimeToLive + 1, packet[8]);
+
+        // The decrement WinDivert applies, then the phone's: 64 on the wire.
+        Assert.Equal(64, packet[8] - 1 - 1);
+    }
+
+    [Fact]
+    public void ABoosterPacketStillRespectsTheDecoyGuard()
+    {
+        Span<byte> packet = stackalloc byte[20];
+        packet[8] = 5;
+
+        Assert.Null(HotspotTtlFix.Rewrite(packet, offset: 8, TtlFixSettings.Default, impostor: true));
+        Assert.Equal(5, packet[8]);
+    }
+
+    [Fact]
+    public void TheCompensatedTtlNeverWrapsPast255()
+        => Assert.Equal(255, HotspotTtlFix.TargetTimeToLive(new TtlFixSettings { TimeToLive = 255 }, impostor: true));
+
+    [Fact]
+    public void TryFixCompensatesBoosterPacketsOnBothFamilies()
+    {
+        using var fix = new HotspotTtlFix();
+
+        var v4 = new byte[20];
+        v4[0] = 0x45;
+        v4[8] = 128;
+        Assert.True(fix.TryFix(v4, out _, impostor: true));
+        Assert.Equal(TtlFixSettings.DefaultTimeToLive + 1, v4[8]);
+
+        var ordinary = new byte[20];
+        ordinary[0] = 0x45;
+        ordinary[8] = 128;
+        Assert.True(fix.TryFix(ordinary, out _));
+        Assert.Equal(TtlFixSettings.DefaultTimeToLive, ordinary[8]);
+    }
+
     [Fact]
     public void ApplyingWithoutAnAdapterFails()
     {

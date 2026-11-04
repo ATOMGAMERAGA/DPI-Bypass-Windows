@@ -291,7 +291,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
 
                 // TryFix counts what it drops and what it deliberately forwards; here a
                 // false simply means the packet is not to be sent.
-                if (!TryFix(packet, out var change))
+                if (!TryFix(packet, out var change, address.Impostor))
                 {
                     continue;
                 }
@@ -409,7 +409,14 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     /// packets survive this method is the difference between a disguised connection and
     /// one that resolves no names, and it is not something to discover on a user's laptop.
     /// </remarks>
-    internal bool TryFix(Span<byte> packet, out (int Offset, byte Previous)? change)
+    /// <param name="impostor">
+    /// The packet was injected by another driver - a game booster (ExitLag, GearUP…) or a
+    /// VPN client. WinDivert takes one off the TTL of such a packet when it is re-injected
+    /// (its guard against driver loops), so writing the configured value would put it on
+    /// the wire one lower: 64 after our send, 63 after the phone - exactly the tethering
+    /// tell this mode exists to hide. One more is written to cancel that out.
+    /// </param>
+    internal bool TryFix(Span<byte> packet, out (int Offset, byte Previous)? change, bool impostor = false)
     {
         change = null;
 
@@ -452,7 +459,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
             // This one does leave the phone, so it is rewritten like any other packet: an
             // exempt query still carrying the routed-once value would be a tell of exactly
             // the kind the rest of this class exists to remove.
-            change = Rewrite(packet, offset: 7, settings);
+            change = Rewrite(packet, offset: 7, settings, impostor);
             return true;
         }
 
@@ -461,7 +468,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
             return true;
         }
 
-        change = Rewrite(packet, offset: 8, settings);
+        change = Rewrite(packet, offset: 8, settings, impostor);
         return true;
     }
 
@@ -510,8 +517,10 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     internal static (int Offset, byte Previous)? Rewrite(
         Span<byte> packet,
         int offset,
-        TtlFixSettings settings)
+        TtlFixSettings settings,
+        bool impostor = false)
     {
+        var target = TargetTimeToLive(settings, impostor);
         var current = packet[offset];
 
         // Second half of the guard: a strategy's low-TTL decoy must reach the wire
@@ -523,14 +532,25 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
 
         // Already ours. Re-injected packets can come back around, and rewriting a
         // value to itself forever would be a loop rather than a fix.
-        if (current == settings.TimeToLive)
+        if (current == target)
         {
             return null;
         }
 
-        packet[offset] = settings.TimeToLive;
+        packet[offset] = target;
         return (offset, current);
     }
+
+    /// <summary>
+    /// The value to write so the packet leaves the machine at the configured TTL.
+    /// </summary>
+    /// <remarks>
+    /// Re-injecting an impostor costs it one hop inside WinDivert, so it is written one
+    /// higher. Without this every packet a game booster's driver hands on - which while
+    /// it runs is the game's whole connection - reached the operator at 63.
+    /// </remarks>
+    internal static byte TargetTimeToLive(TtlFixSettings settings, bool impostor)
+        => impostor ? (byte)Math.Min(255, settings.TimeToLive + 1) : settings.TimeToLive;
 
     public void Dispose() => Clear();
 }
