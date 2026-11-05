@@ -112,6 +112,10 @@ public class HotspotTtlFixTests
         Assert.Contains("outbound", filter, StringComparison.Ordinal);
         Assert.Contains($"ip.TTL >= {TtlFixSettings.DefaultGuard}", filter, StringComparison.Ordinal);
 
+        // Packets the stack already sends at the right value stay in the kernel: with
+        // the adapter's hop limit set natively, game traffic is never diverted.
+        Assert.Contains($"ip.TTL != {TtlFixSettings.DefaultTimeToLive}", filter, StringComparison.Ordinal);
+
         // This lower-priority handle must still see packets injected by the DPI engine;
         // the engine itself is the boundary that excludes packets injected upstream.
         Assert.DoesNotContain("impostor", filter, StringComparison.OrdinalIgnoreCase);
@@ -240,6 +244,112 @@ public class HotspotTtlFixTests
         ordinary[8] = 128;
         Assert.True(fix.TryFix(ordinary, out _));
         Assert.Equal(TtlFixSettings.DefaultTimeToLive, ordinary[8]);
+    }
+
+    /// <summary>
+    /// A Minecraft join handshake already at the right TTL must still reach the splitter,
+    /// and the clause must not pull HTTPS into user mode.
+    /// </summary>
+    [Fact]
+    public void MinecraftHandshakesAreStillDivertedWhenTheTtlIsAlreadyRight()
+    {
+        var filter = HotspotTtlFix.BuildFilter(5, TtlFixSettings.Default);
+        Assert.Contains("tcp.Payload[1] == 0", filter, StringComparison.Ordinal);
+        Assert.Contains("tcp.DstPort != 443", filter, StringComparison.Ordinal);
+
+        var fallback = HotspotTtlFix.BuildFilter(5, TtlFixSettings.Default, includeMinecraft: false);
+        Assert.DoesNotContain("Payload", fallback, StringComparison.Ordinal);
+        Assert.Contains($"ip.TTL != {TtlFixSettings.DefaultTimeToLive}", fallback, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheNativeHopLimitIsAppliedAndPutBack()
+    {
+        var backend = new FakeHopLimitBackend();
+        using var native = new NativeHopLimit(backend);
+
+        await native.Set(12, 65);
+        Assert.Equal((12, (byte)65), native.Applied);
+        Assert.Equal([(12, (byte)65)], backend.Applied);
+
+        await native.Clear();
+        Assert.Equal((0, (byte)0), native.Applied);
+        var restored = Assert.Single(backend.Restored);
+        Assert.Equal(new HopLimitSnapshot(12, 128, 64), restored);
+    }
+
+    /// <summary>A remove-and-reapply on the same adapter costs no PowerShell run.</summary>
+    [Fact]
+    public async Task AQuickClearAndReapplyConvergesWithoutChurn()
+    {
+        var backend = new FakeHopLimitBackend();
+        using var native = new NativeHopLimit(backend);
+        await native.Set(12, 65);
+
+        _ = native.Clear();
+        await native.Set(12, 65);
+
+        Assert.Single(backend.Applied);
+        Assert.Empty(backend.Restored);
+    }
+
+    [Fact]
+    public async Task MovingAdaptersRestoresTheOldOneFirst()
+    {
+        var backend = new FakeHopLimitBackend();
+        using var native = new NativeHopLimit(backend);
+        await native.Set(12, 65);
+        await native.Set(14, 65);
+
+        Assert.Equal(12, Assert.Single(backend.Restored).InterfaceIndex);
+        Assert.Equal((14, (byte)65), native.Applied);
+    }
+
+    [Fact]
+    public async Task ARefusedNativeChangeLeavesTheFilterInCharge()
+    {
+        var backend = new FakeHopLimitBackend { Refuse = true };
+        using var native = new NativeHopLimit(backend);
+        await native.Set(12, 65);
+        Assert.Equal((0, (byte)0), native.Applied);
+    }
+
+    [Theory]
+    [InlineData("IPv4=128;IPv6=64", 128u, 64u)]
+    [InlineData("IPv4=128\r\n", 128u, null)]
+    [InlineData("IPv6=255", null, 255u)]
+    public void HopLimitOutputIsParsed(string output, uint? v4, uint? v6)
+    {
+        var snapshot = PowerShellHopLimitBackend.Parse(3, output);
+        Assert.Equal(new HopLimitSnapshot(3, v4, v6), snapshot);
+    }
+
+    [Fact]
+    public void EmptyHopLimitOutputMeansNothingWasChanged()
+        => Assert.Null(PowerShellHopLimitBackend.Parse(3, "  "));
+
+    private sealed class FakeHopLimitBackend : IHopLimitBackend
+    {
+        public bool Refuse { get; init; }
+        public List<(int, byte)> Applied { get; } = [];
+        public List<HopLimitSnapshot> Restored { get; } = [];
+
+        public Task<HopLimitSnapshot?> ApplyAsync(int interfaceIndex, byte hopLimit, CancellationToken cancellationToken)
+        {
+            if (Refuse)
+            {
+                return Task.FromResult<HopLimitSnapshot?>(null);
+            }
+
+            Applied.Add((interfaceIndex, hopLimit));
+            return Task.FromResult<HopLimitSnapshot?>(new HopLimitSnapshot(interfaceIndex, 128, 64));
+        }
+
+        public Task RestoreAsync(HopLimitSnapshot snapshot, CancellationToken cancellationToken)
+        {
+            Restored.Add(snapshot);
+            return Task.CompletedTask;
+        }
     }
 
     [Fact]

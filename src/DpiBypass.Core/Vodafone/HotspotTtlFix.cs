@@ -93,7 +93,13 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     private int _minecraftSplitLogged;
     private int _minecraftSplitFailureLogged;
 
-    public HotspotTtlFix(Action<string>? log = null) => _log = log;
+    private readonly NativeHopLimit _native;
+
+    public HotspotTtlFix(Action<string>? log = null, NativeHopLimit? native = null)
+    {
+        _log = log;
+        _native = native ?? new NativeHopLimit(log: log);
+    }
 
     public bool IsActive { get; private set; }
 
@@ -146,11 +152,9 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
         {
             Clear();
 
-            var filter = BuildFilter(interfaceIndex, settings);
-
             try
             {
-                _handle = WinDivertHandle.Open(filter, WinDivertLayer.Network, FilterPriority, WinDivertFlags.None);
+                _handle = OpenFilter(interfaceIndex, settings);
             }
             catch (WinDivertException ex)
             {
@@ -200,7 +204,38 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
             };
 
             _worker.Start();
+
+            // Hand the TTL to the network stack as well. Once it takes, ordinary packets
+            // already leave at the right value and the filter above stops diverting them -
+            // which is what keeps ExitLag's WFP routing (and every game's latency) intact.
+            _ = _native.Set(interfaceIndex, settings.TimeToLive);
+
             _log?.Invoke($"Hotspot TTL fix active on adapter {interfaceIndex} (ttl={settings.TimeToLive}, guard={settings.Guard}).");
+        }
+    }
+
+    /// <summary>
+    /// Opens the rule, falling back to the TTL-only filter on a driver build that rejects
+    /// payload indexing - which costs the Minecraft clause and nothing else.
+    /// </summary>
+    private WinDivertHandle OpenFilter(int interfaceIndex, TtlFixSettings settings)
+    {
+        string[] filters =
+        [
+            BuildFilter(interfaceIndex, settings),
+            BuildFilter(interfaceIndex, settings, includeMinecraft: false),
+        ];
+
+        for (var i = 0; ; i++)
+        {
+            try
+            {
+                return WinDivertHandle.Open(filters[i], WinDivertLayer.Network, FilterPriority, WinDivertFlags.None);
+            }
+            catch (WinDivertException ex) when (ex.NativeErrorCode == 87 && i + 1 < filters.Length)
+            {
+                _log?.Invoke("TTL filter with the Minecraft clause was rejected; using the TTL-only filter.");
+            }
         }
     }
 
@@ -212,6 +247,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
             if (_handle is null)
             {
                 IsActive = false;
+                _ = _native.Clear();
                 return;
             }
 
@@ -235,6 +271,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
 
             IsActive = false;
             InterfaceIndex = 0;
+            _ = _native.Clear();
             _log?.Invoke("Hotspot TTL fix removed.");
         }
     }
@@ -243,9 +280,12 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     /// The kernel filter. Doing the guard here as well as in the loop means the
     /// low-TTL decoy packets are never even copied to user mode.
     /// </summary>
-    internal static string BuildFilter(int interfaceIndex, TtlFixSettings settings)
+    internal static string BuildFilter(int interfaceIndex, TtlFixSettings settings, bool includeMinecraft = true)
     {
-        var ipv4 = $"(ip and ip.TTL >= {settings.Guard})";
+        // Packets already carrying the value are left on the kernel path. With the
+        // adapter's own hop limit set (NativeHopLimit) that is nearly every packet, so
+        // game traffic - and a game booster's WFP routing of it - is never diverted.
+        var ipv4 = $"(ip and ip.TTL >= {settings.Guard} and ip.TTL != {settings.TimeToLive})";
 
         // Tethering hands the laptop its own global IPv6 address, so the operator can
         // see two distinct sources from one subscriber no matter what the hop limit
@@ -258,9 +298,20 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
         // solicitation or a DNS query has to reach that decision to be let through.
         var ipv6 = settings.DropIPv6
             ? "ipv6"
-            : $"(ipv6 and ipv6.HopLimit >= {settings.Guard})";
+            : $"(ipv6 and ipv6.HopLimit >= {settings.Guard} and ipv6.HopLimit != {settings.TimeToLive})";
 
-        return $"outbound and ifIdx == {interfaceIndex} and ({ipv4} or {ipv6})";
+        // A Minecraft Java join handshake still has to be segmented when its TTL is
+        // already right. Its first frame is a VarInt length then packet id 0, so the
+        // id sits at payload[1] (or [2] for a long frame); only small, ACK-carrying
+        // first segments are taken, and everything else in this clause is forwarded.
+        var minecraft = "(tcp and tcp.Ack and !tcp.Syn and !tcp.Fin and !tcp.Rst "
+            + "and tcp.DstPort != 443 and tcp.DstPort != 80 "
+            + "and tcp.PayloadLength >= 8 and tcp.PayloadLength <= 1100 "
+            + "and (tcp.Payload[1] == 0 or tcp.Payload[2] == 0))";
+
+        return includeMinecraft
+            ? $"outbound and ifIdx == {interfaceIndex} and ({ipv4} or {ipv6} or {minecraft})"
+            : $"outbound and ifIdx == {interfaceIndex} and ({ipv4} or {ipv6})";
     }
 
     private void Loop(WinDivertHandle handle, CancellationToken stopping)
@@ -552,5 +603,9 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
     internal static byte TargetTimeToLive(TtlFixSettings settings, bool impostor)
         => impostor ? (byte)Math.Min(255, settings.TimeToLive + 1) : settings.TimeToLive;
 
-    public void Dispose() => Clear();
+    public void Dispose()
+    {
+        Clear();
+        _native.Dispose();
+    }
 }
