@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using DpiBypass.Core.Interop;
+using DpiBypass.Core.Net;
 
 namespace DpiBypass.Core.Dns;
 
@@ -459,7 +460,11 @@ public sealed class DnsConfigurator
         var live = interfaces
             .Where(nic => nic.OperationalStatus == OperationalStatus.Up
                 && nic.NetworkInterfaceType != NetworkInterfaceType.Loopback
-                && nic.NetworkInterfaceType != NetworkInterfaceType.Tunnel)
+                && nic.NetworkInterfaceType != NetworkInterfaceType.Tunnel
+                // A game booster's or VPN client's adapter is configured by that
+                // program. Pointing it at our loopback resolver broke ExitLag/GearUP
+                // routing, and restoring it later wrote stale settings over theirs.
+                && !TunnelAdapters.IsTunnel(nic))
             .ToList();
 
         // GetAdaptersAddresses already supplies DNS servers and both interface

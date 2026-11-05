@@ -3,6 +3,7 @@ using System.Net.NetworkInformation;
 using System.Security.Cryptography;
 using System.Text;
 using DpiBypass.Core.Interop;
+using DpiBypass.Core.Net;
 
 namespace DpiBypass.Core.Network;
 
@@ -186,7 +187,12 @@ public sealed record NetworkFingerprint
         {
             if (nic.OperationalStatus != OperationalStatus.Up
                 || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback
-                || nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel)
+                || nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel
+                // A game booster's or VPN client's adapter has a gateway and, while a
+                // game runs, the most traffic. Taking it for the network in front of us
+                // made a registered Vodafone hotspot look like an unknown network the
+                // moment ExitLag/GearUP started - and the TTL rule came down with it.
+                || TunnelAdapters.IsTunnel(nic))
             {
                 continue;
             }
