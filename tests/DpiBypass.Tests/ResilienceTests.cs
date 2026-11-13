@@ -878,3 +878,31 @@ public sealed class DnsProxyResilienceTests
         }
     }
 }
+
+/// <summary>
+/// A handshake a game booster's driver passed on is an impostor, and WinDivert takes one
+/// off the TTL of every impostor it injects. A decoy is tuned to die at a given hop, so it
+/// has to be written one higher or it never reaches the inspector.
+/// </summary>
+public sealed class ImpostorDecoyTtlTests
+{
+    [Theory]
+    [InlineData(3, false, 3)]
+    [InlineData(8, false, 8)]
+    [InlineData(3, true, 4)]
+    [InlineData(8, true, 9)]
+    [InlineData(255, true, 255)]
+    public void ADecoyFromABoosterHandshakeIsWrittenOneHigher(byte ttl, bool impostor, byte expected)
+        => Assert.Equal(expected, BypassEngine.DecoyTimeToLive(ttl, impostor));
+
+    /// <summary>Even compensated, a decoy stays below the Vodafone rule's guard.</summary>
+    [Fact]
+    public void ACompensatedDecoyIsStillUnderTheTtlGuard()
+    {
+        var highest = StrategyLibrary.All
+            .Where(strategy => strategy.Fake == FakeMode.ExpiredTtl)
+            .Max(strategy => (int)strategy.FakeTtl);
+
+        Assert.True(BypassEngine.DecoyTimeToLive((byte)highest, impostor: true) < DpiBypass.Core.Vodafone.TtlFixSettings.DefaultGuard);
+    }
+}

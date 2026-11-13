@@ -59,6 +59,7 @@ public sealed class NativeHopLimit : IDisposable
     private (int Index, byte HopLimit) _applied;
     private HopLimitSnapshot? _original;
     private Task _work = Task.CompletedTask;
+    private bool _reassert;
     private bool _disposed;
 
     public NativeHopLimit(IHopLimitBackend? backend = null, Action<string>? log = null)
@@ -98,19 +99,56 @@ public sealed class NativeHopLimit : IDisposable
 
     public Task Clear() => Set(0, 0);
 
+    /// <summary>
+    /// Writes the wanted value again even though it was applied once already.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The value lives in the active store, and Windows rebuilds that store whenever the
+    /// adapter restarts: a phone hotspot dropping and coming back, a driver reset, a
+    /// "network optimisation" in a game booster that toggles an adapter property. Every
+    /// one of those quietly puts the adapter back on 128 while this class still believes
+    /// 65 is in force - and from then on the TTL rule is diverting every game packet
+    /// again, which is exactly the state that took Valorant down under ExitLag's WFP
+    /// routing. The rule notices the flood and calls this.
+    /// </para>
+    /// <para>
+    /// The original values are not read again: what is on the adapter now is the reset,
+    /// not what the user had, and it is the first snapshot that gets put back.
+    /// </para>
+    /// </remarks>
+    public Task Reassert()
+    {
+        lock (_gate)
+        {
+            if (_disposed || _wanted.Index == 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            _reassert = true;
+            _work = _work.ContinueWith(_ => ReconcileAsync(), CancellationToken.None,
+                TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+            return _work;
+        }
+    }
+
     private async Task ReconcileAsync()
     {
         (int Index, byte HopLimit) wanted;
         (int Index, byte HopLimit) applied;
         HopLimitSnapshot? original;
+        bool reassert;
         lock (_gate)
         {
             wanted = _wanted;
             applied = _applied;
             original = _original;
+            reassert = _reassert && wanted.Index != 0;
+            _reassert = false;
         }
 
-        if (wanted == applied)
+        if (wanted == applied && !reassert)
         {
             return;
         }
@@ -149,7 +187,9 @@ public sealed class NativeHopLimit : IDisposable
 
             _log?.Invoke(snapshot is null
                 ? $"Vodafone: adapter {wanted.Index} hop limit could not be set natively; the packet filter keeps rewriting."
-                : $"Vodafone: adapter {wanted.Index} sends at TTL {wanted.HopLimit} natively; game traffic is no longer diverted.");
+                : reassert && wanted == applied
+                    ? $"Vodafone: adapter {wanted.Index} had lost its TTL {wanted.HopLimit} (adapter restarted?); set again natively."
+                    : $"Vodafone: adapter {wanted.Index} sends at TTL {wanted.HopLimit} natively; game traffic is no longer diverted.");
         }
         catch (Exception ex)
         {
