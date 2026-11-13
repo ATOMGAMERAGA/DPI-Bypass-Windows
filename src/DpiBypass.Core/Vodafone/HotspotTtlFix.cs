@@ -95,6 +95,9 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
 
     private readonly NativeHopLimit _native;
 
+    /// <summary>Only ever touched by the worker, and reset before a new one starts.</summary>
+    private readonly HopLimitDriftDetector _drift = new(DateTime.UtcNow.Ticks);
+
     public HotspotTtlFix(Action<string>? log = null, NativeHopLimit? native = null)
     {
         _log = log;
@@ -189,6 +192,7 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
             Interlocked.Exchange(ref _checksumFailureLogged, 0);
             Interlocked.Exchange(ref _minecraftSplitLogged, 0);
             Interlocked.Exchange(ref _minecraftSplitFailureLogged, 0);
+            _drift.Reset(DateTime.UtcNow.Ticks);
 
             // Handed over rather than read from the fields later, so the worker stays
             // pinned to the rule and the stop signal it was started for even once
@@ -304,10 +308,21 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
         // already right. Its first frame is a VarInt length then packet id 0, so the
         // id sits at payload[1] (or [2] for a long frame); only small, ACK-carrying
         // first segments are taken, and everything else in this clause is forwarded.
+        //
+        // The length byte(s) are pinned too, to the range MinecraftHandshakeSplit
+        // accepts (7-1030), and so is the first byte of the protocol version, which is
+        // never zero. "A zero at byte 1 or 2" alone matched most length-prefixed binary
+        // protocols - SMB, every big-endian length header - and each of those packets
+        // took a user-mode round trip and came back re-injected by another driver,
+        // which is the very thing a game booster's routing does not survive.
+        var minecraftFrame =
+            "((tcp.Payload[0] >= 7 and tcp.Payload[0] <= 127 and tcp.Payload[1] == 0 and tcp.Payload[2] != 0)"
+            + " or (tcp.Payload[0] >= 128 and tcp.Payload[1] >= 1 and tcp.Payload[1] <= 8"
+            + " and tcp.Payload[2] == 0 and tcp.Payload[3] != 0))";
         var minecraft = "(tcp and tcp.Ack and !tcp.Syn and !tcp.Fin and !tcp.Rst "
             + "and tcp.DstPort != 443 and tcp.DstPort != 80 "
             + "and tcp.PayloadLength >= 8 and tcp.PayloadLength <= 1100 "
-            + "and (tcp.Payload[1] == 0 or tcp.Payload[2] == 0))";
+            + $"and {minecraftFrame})";
 
         return includeMinecraft
             ? $"outbound and ifIdx == {interfaceIndex} and ({ipv4} or {ipv6} or {minecraft})"
@@ -352,6 +367,15 @@ public sealed class HotspotTtlFix : IHotspotTtlFix
                     if (RecalculateIpChecksum(packet, ref address))
                     {
                         Interlocked.Increment(ref _rewritten);
+
+                        // A stream of these means the adapter is no longer sending at the
+                        // value natively and every game packet is being diverted again.
+                        if (!address.Impostor && _drift.NoteRewrite(DateTime.UtcNow.Ticks))
+                        {
+                            _log?.Invoke("Vodafone: ordinary packets are leaving at the wrong TTL again; "
+                                + "re-applying the adapter's hop limit.");
+                            _ = _native.Reassert();
+                        }
                     }
                     else
                     {

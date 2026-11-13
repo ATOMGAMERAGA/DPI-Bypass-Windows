@@ -894,7 +894,7 @@ public sealed class BypassEngine : IDisposable
 
             if (segment.TimeToLive is { } ttl)
             {
-                TcpIpPacket.SetTimeToLive(view, parsed.IsIPv6, ttl);
+                TcpIpPacket.SetTimeToLive(view, parsed.IsIPv6, DecoyTimeToLive(ttl, address.Impostor));
             }
             else
             {
@@ -989,6 +989,22 @@ public sealed class BypassEngine : IDisposable
 
         return true;
     }
+
+    /// <summary>
+    /// The TTL to write on a low-TTL decoy so it expires where the strategy meant it to.
+    /// </summary>
+    /// <remarks>
+    /// A handshake a game booster's driver (ExitLag, GearUP…) passed on reaches us as a
+    /// WinDivert impostor, and every segment built from it is sent with that flag kept -
+    /// which is what lets WinDivert break a loop between the two drivers. The price is
+    /// that WinDivert takes one off the TTL of each impostor it injects. For the real
+    /// segments that is invisible, but a decoy is tuned to die at a particular hop: one
+    /// hop short and it never reaches the inspector, so the fake-packet recipes quietly
+    /// stopped working for Discord the moment a booster was switched on. One is added
+    /// back to cancel the driver's decrement.
+    /// </remarks>
+    internal static byte DecoyTimeToLive(byte timeToLive, bool impostor)
+        => impostor ? (byte)Math.Min(255, timeToLive + 1) : timeToLive;
 
     /// <summary>True when a packet on <paramref name="interfaceIndex"/> leaves through a booster or VPN tunnel.</summary>
     internal bool LeavesThroughTunnel(uint interfaceIndex)

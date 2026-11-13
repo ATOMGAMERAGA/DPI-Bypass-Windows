@@ -314,6 +314,112 @@ public class HotspotTtlFixTests
         Assert.Equal((0, (byte)0), native.Applied);
     }
 
+    /// <summary>
+    /// Windows rebuilds the active store when the adapter restarts, so the value has to be
+    /// written again - without putting the reset back as if it were the user's own.
+    /// </summary>
+    [Fact]
+    public async Task AReassertWritesTheValueAgainAndKeepsTheFirstOriginal()
+    {
+        var backend = new FakeHopLimitBackend();
+        using var native = new NativeHopLimit(backend);
+        await native.Set(12, 65);
+
+        await native.Reassert();
+
+        Assert.Equal([(12, (byte)65), (12, (byte)65)], backend.Applied);
+        Assert.Empty(backend.Restored);
+        Assert.Equal((12, (byte)65), native.Applied);
+
+        await native.Clear();
+        Assert.Equal(new HopLimitSnapshot(12, 128, 64), Assert.Single(backend.Restored));
+    }
+
+    [Fact]
+    public async Task AReassertWithNothingWantedDoesNothing()
+    {
+        var backend = new FakeHopLimitBackend();
+        using var native = new NativeHopLimit(backend);
+
+        await native.Reassert();
+        await native.Set(12, 65);
+        await native.Clear();
+        await native.Reassert();
+
+        Assert.Single(backend.Applied);
+    }
+
+    // --- noticing that Windows dropped the native value -------------------------
+
+    private static readonly long T0 = new DateTime(2026, 11, 13, 12, 0, 0, DateTimeKind.Utc).Ticks;
+
+    private static bool Flood(HopLimitDriftDetector drift, long at, int packets)
+    {
+        var fired = false;
+        for (var i = 0; i < packets; i++)
+        {
+            fired |= drift.NoteRewrite(at + i);
+        }
+
+        return fired;
+    }
+
+    /// <summary>Right after the rule goes up the native change is still in flight.</summary>
+    [Fact]
+    public void ADriftIsNotReportedWhileTheFirstNativeChangeIsInFlight()
+    {
+        var drift = new HopLimitDriftDetector(T0);
+        Assert.False(Flood(drift, T0 + TimeSpan.FromSeconds(2).Ticks, 500));
+    }
+
+    [Fact]
+    public void AFloodOfOrdinaryRewritesAsksForTheNativeValueAgain()
+    {
+        var drift = new HopLimitDriftDetector(T0);
+        var later = T0 + HopLimitDriftDetector.InitialBackoff.Ticks + TimeSpan.FromSeconds(1).Ticks;
+
+        Assert.True(Flood(drift, later, HopLimitDriftDetector.Threshold));
+    }
+
+    /// <summary>A program that picks its own TTL now and then is not a lost adapter value.</summary>
+    [Fact]
+    public void AnOccasionalRewriteIsNotADrift()
+    {
+        var drift = new HopLimitDriftDetector(T0);
+        var start = T0 + HopLimitDriftDetector.InitialBackoff.Ticks;
+
+        for (var i = 0; i < 1000; i++)
+        {
+            Assert.False(drift.NoteRewrite(start + i * TimeSpan.FromSeconds(1).Ticks));
+        }
+    }
+
+    /// <summary>A re-apply runs PowerShell, so one that does not stop the flood backs off.</summary>
+    [Fact]
+    public void AFloodThatDoesNotStopBacksOff()
+    {
+        var drift = new HopLimitDriftDetector(T0);
+        var second = TimeSpan.FromSeconds(1).Ticks;
+        var at = T0 + HopLimitDriftDetector.InitialBackoff.Ticks;
+
+        Assert.True(Flood(drift, at, HopLimitDriftDetector.Threshold));
+
+        // Continuous flood, packet every 10 ms: the next request waits the first backoff,
+        // the one after that twice as long.
+        var fired = new List<long>();
+        for (var t = at; t < at + 200 * second; t += second / 100)
+        {
+            if (drift.NoteRewrite(t))
+            {
+                fired.Add(t);
+            }
+        }
+
+        Assert.Equal(2, fired.Count);
+        Assert.InRange(fired[0] - at, HopLimitDriftDetector.InitialBackoff.Ticks, HopLimitDriftDetector.InitialBackoff.Ticks + 2 * second);
+        Assert.InRange(fired[1] - fired[0], 2 * HopLimitDriftDetector.InitialBackoff.Ticks, 2 * HopLimitDriftDetector.InitialBackoff.Ticks + 2 * second);
+    }
+
     [Theory]
     [InlineData("IPv4=128;IPv6=64", 128u, 64u)]
     [InlineData("IPv4=128\r\n", 128u, null)]
