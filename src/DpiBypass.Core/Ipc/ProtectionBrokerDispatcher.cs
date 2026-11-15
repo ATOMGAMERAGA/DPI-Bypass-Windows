@@ -137,6 +137,9 @@ public sealed class ProtectionBrokerDispatcher : IDisposable
                 OperationCanceledException => "REQUEST_CANCELLED",
                 JsonException or ArgumentException => "INVALID_ARGUMENTS",
                 UnauthorizedAccessException => "ACCESS_DENIED",
+                // A fixed, user-facing sentence the window shows as is. Matched by value
+                // so nothing an implementation happened to put in a message can leak.
+                InvalidOperationException { Message: ProtectionService.NotOnlineMessage } => ProtectionService.NotOnlineMessage,
                 _ => "OPERATION_FAILED",
             }, NullResult, request.AfterEvent);
         }
@@ -164,15 +167,24 @@ public sealed class ProtectionBrokerDispatcher : IDisposable
 
     private ProtectionResponse Respond(bool ok, string? error, JsonElement result, long afterEvent)
     {
+        // The sequence is taken first, so snapshots stay ordered by when they were read,
+        // but the capture itself runs outside the event lock. The engine raises its
+        // events from the packet path, and holding the lock across a full capture - the
+        // settings copy, the protected-host list - made a handshake wait behind every
+        // status poll the desktop sent.
+        var snapshot = ProtectionSnapshot.Capture(_service, Interlocked.Increment(ref _sequence));
+        ProtectionEvent[] events;
         lock (_eventGate)
         {
-            return new ProtectionResponse
-            {
-                Ok = ok, Error = error, Result = result,
-                Snapshot = ProtectionSnapshot.Capture(_service, ++_sequence),
-                Events = _events.Where(item => item.Sequence > afterEvent).ToArray(),
-            };
+            events = _events.Where(item => item.Sequence > afterEvent).ToArray();
         }
+
+        return new ProtectionResponse
+        {
+            Ok = ok, Error = error, Result = result,
+            Snapshot = snapshot,
+            Events = events,
+        };
     }
 
     private static ProtectionResponse Failure(string error)
@@ -185,7 +197,7 @@ public sealed class ProtectionBrokerDispatcher : IDisposable
             : JsonSerializer.SerializeToElement(argument, argument.GetType(), ProtectionWireJson.Options)).ToArray();
         lock (_eventGate)
         {
-            _events.Enqueue(new ProtectionEvent(++_sequence, name, values));
+            _events.Enqueue(new ProtectionEvent(Interlocked.Increment(ref _sequence), name, values));
             while (_events.Count > EventCapacity) _events.Dequeue();
         }
     }

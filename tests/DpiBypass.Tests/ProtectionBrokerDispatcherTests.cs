@@ -130,6 +130,39 @@ public sealed class ProtectionBrokerDispatcherTests
         Assert.Equal("OPERATION_FAILED", response.Error);
     }
 
+    [Fact]
+    public async Task TheFixedNotOnlineSentenceReachesTheWindowVerbatim()
+    {
+        var (controller, fake) = ControllerProxy.Create();
+        fake.Handlers[nameof(controller.EnableVodafoneModeHere)] = _ =>
+            throw new InvalidOperationException(ProtectionService.NotOnlineMessage);
+        fake.Handlers[nameof(controller.DisableVodafoneMode)] = _ =>
+            throw new InvalidOperationException("secret C:/private/file");
+        using var dispatcher = new ProtectionBrokerDispatcher(controller);
+
+        var notOnline = await dispatcher.HandleAsync(Request(nameof(controller.EnableVodafoneModeHere)), default);
+        var other = await dispatcher.HandleAsync(Request(nameof(controller.DisableVodafoneMode)), default);
+
+        Assert.Equal(ProtectionService.NotOnlineMessage, notOnline.Error);
+        Assert.Equal("OPERATION_FAILED", other.Error);
+    }
+
+    [Fact]
+    public async Task SnapshotSettingsAreDetachedFromTheLiveObject()
+    {
+        var (controller, _) = ControllerProxy.Create();
+        controller.Settings.ExtraDomains.Add("before.example");
+        using var dispatcher = new ProtectionBrokerDispatcher(controller);
+
+        var response = await dispatcher.HandleAsync(Request("__snapshot"), default);
+        controller.Settings.ExtraDomains.Add("after.example");
+
+        // The reply is serialised after the handler returns, while the engine keeps
+        // editing its settings; it must not be holding the live lists.
+        Assert.NotSame(controller.Settings, response.Snapshot!.Settings);
+        Assert.Equal(["before.example"], response.Snapshot.Settings.ExtraDomains);
+    }
+
     private static ProtectionRequest Request(string method, params object[] arguments) => new()
     {
         Id = Guid.NewGuid().ToString("N"), Method = method,

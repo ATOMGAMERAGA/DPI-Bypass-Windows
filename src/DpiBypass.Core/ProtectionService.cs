@@ -320,6 +320,12 @@ public sealed partial class ProtectionService : IProtectionController
         ApplySettingsToMatcher();
     }
 
+    /// <summary>
+    /// Shown to the user as it stands, so the helper passes it across the process boundary
+    /// verbatim; every other failure travels as a bare code.
+    /// </summary>
+    public const string NotOnlineMessage = "Şu anda bir ağa bağlı değilsiniz.";
+
     public AppSettings Settings { get; }
 
     public ProtectionState State { get; private set; } = ProtectionState.Stopped;
@@ -2401,7 +2407,7 @@ public sealed partial class ProtectionService : IProtectionController
 
         if (!network.IsOnline)
         {
-            throw new InvalidOperationException("Şu anda bir ağa bağlı değilsiniz.");
+            throw new InvalidOperationException(NotOnlineMessage);
         }
 
         Network = network;
@@ -2489,7 +2495,7 @@ public sealed partial class ProtectionService : IProtectionController
         var network = NetworkFingerprint.Capture();
         if (!network.IsOnline)
         {
-            throw new InvalidOperationException("Şu anda bir ağa bağlı değilsiniz.");
+            throw new InvalidOperationException(NotOnlineMessage);
         }
 
         Network = network;

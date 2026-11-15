@@ -23,6 +23,10 @@ public sealed partial class RemoteProtectionClient
     private AppSettings _lastSettings;
     private long _eventSequence;
     private bool _disposed;
+    private volatile bool _connectionLost;
+    /// <summary>Consecutive status polls that may fail before the helper is declared gone.</summary>
+    private const int SnapshotFailureLimit = 3;
+    private const string EngineUnavailable = "Ayrıcalıklı motor bağlantısı kesildi; yeniden başlatın.";
     private readonly bool _isolatedUiTest;
     private Task _saving = Task.CompletedTask;
     private WindowsSocialRuntime? _social;
@@ -53,6 +57,11 @@ public sealed partial class RemoteProtectionClient
 
     private async Task<ProtectionRpcClient> ConnectionAsync(CancellationToken token)
     {
+        // A helper that is known to be gone fails at once. Trying its pipe again cost every
+        // later click a five second connect timeout on the UI thread - a frozen window
+        // after the helper had already said goodbye - and a silent new UAC launch is
+        // exactly what the update loop below promises never to do.
+        if (_connectionLost) throw new InvalidOperationException(EngineUnavailable);
         if (_rpc is not null) return _rpc;
         if (_disposed || _isolatedUiTest) throw new ObjectDisposedException(nameof(RemoteProtectionClient));
         await _connectionGate.WaitAsync(token).ConfigureAwait(false);
@@ -68,21 +77,36 @@ public sealed partial class RemoteProtectionClient
 
     private async Task UpdateLoopAsync()
     {
+        var failures = 0;
         while (!_stopping.IsCancellationRequested)
         {
             try
             {
                 var response = await _rpc!.SendAsync(Request("__snapshot", []), _stopping.Token).ConfigureAwait(false);
                 Accept(response);
+                failures = 0;
                 await Task.Delay(1000, _stopping.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { return; }
+            catch (Exception) when (++failures < SnapshotFailureLimit)
+            {
+                // One poll that collided with a busy pipe or a reply that could not be
+                // written is not a dead helper. Declaring it lost on the first miss told
+                // the user to restart an engine that was still running fine.
+                try { await Task.Delay(500 * failures, _stopping.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+            }
             catch (Exception)
             {
                 // A missing helper is never replaced with a local engine or a silent new UAC launch.
-                if (_social is not null) await _social.Coordinator.StopAsync("ENGINE_UNAVAILABLE").ConfigureAwait(false);
+                _connectionLost = true;
+                try
+                {
+                    if (_social is not null) await _social.Coordinator.StopAsync("ENGINE_UNAVAILABLE").ConfigureAwait(false);
+                }
+                catch (Exception) { /* The engine is gone either way; the state below must still be published. */ }
                 lock (_snapshotGate)
-                    _snapshot = _snapshot with { State = ProtectionState.Stopped, StatusDetail = "Ayrıcalıklı motor bağlantısı kesildi; yeniden başlatın." };
+                    _snapshot = _snapshot with { State = ProtectionState.Stopped, StatusDetail = EngineUnavailable };
                 Changed?.Invoke();
                 return;
             }
@@ -102,8 +126,7 @@ public sealed partial class RemoteProtectionClient
         if (method is not (nameof(TryAcquireExperiment) or nameof(TryWriteExperiment)
             or nameof(TryReleaseExperiment) or nameof(CanProtectHost)))
             await _saving.WaitAsync(token).ConfigureAwait(false);
-        if (_social is not null && (method is nameof(StopAsync) or nameof(ApplyScope) or nameof(ApplyManualStrategy)
-            or nameof(ApplyManualIsp) or nameof(ApplyQuicSetting) or nameof(OnSystemResumed)
+        if (_social is not null && (InvalidatesSocialContext(method)
             || method == nameof(SaveSettings) && (Settings.DnsMode != _lastSettings.DnsMode || Settings.Scope != _lastSettings.Scope)))
             await _social.Coordinator.StopAsync("CONTEXT_CHANGED").ConfigureAwait(false);
         var rpc = await ConnectionAsync(token).ConfigureAwait(false);
@@ -123,6 +146,87 @@ public sealed partial class RemoteProtectionClient
         }
         catch (Exception) { }
     }
+    private static bool InvalidatesSocialContext(string method) => method is nameof(StopAsync) or nameof(ApplyScope)
+        or nameof(ApplyManualStrategy) or nameof(ApplyManualIsp) or nameof(ApplyQuicSetting) or nameof(OnSystemResumed);
+
+    /// <summary>
+    /// Sends a fire-and-forget setting change in order, without making the caller wait.
+    /// </summary>
+    /// <remarks>
+    /// These are called from property setters on the UI thread. Waiting there for the
+    /// helper meant waiting for whatever was ahead of it - a queued settings save, a
+    /// social experiment being rolled back, or the helper's own UAC prompt on the first
+    /// connection - and every one of those froze the window until it finished. The change
+    /// is mirrored onto <see cref="Settings"/> straight away so the control that made it
+    /// reads back what the user chose, and it joins the same queue as settings saves so
+    /// every later command still sees it applied first. A change the helper refuses is
+    /// put back to the helper's value and reported, rather than left showing as applied.
+    /// </remarks>
+    private void Post(string method, object?[] arguments, Action<AppSettings>? mirror = null, params string[] touched)
+    {
+        lock (_snapshotGate)
+        {
+            mirror?.Invoke(Settings);
+            if (_isolatedUiTest) return;
+            var previous = _saving;
+            _saving = Task.Run(async () =>
+            {
+                try { await previous.ConfigureAwait(false); }
+                catch (Exception) { /* Each queued item reports its own failure. */ }
+                try
+                {
+                    if (_social is not null && InvalidatesSocialContext(method))
+                        await _social.Coordinator.StopAsync("CONTEXT_CHANGED").ConfigureAwait(false);
+                    var rpc = await ConnectionAsync(_stopping.Token).ConfigureAwait(false);
+                    var response = await rpc.SendAsync(Request(method, arguments), _stopping.Token).ConfigureAwait(false);
+                    Accept(response);
+                    if (!response.Ok) throw new InvalidOperationException(response.Error ?? "HELPER_OPERATION_FAILED");
+                }
+                catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+                catch (Exception)
+                {
+                    lock (_snapshotGate)
+                    {
+                        foreach (var property in SettingProperties)
+                        {
+                            if (Array.IndexOf(touched, property.Name) < 0) continue;
+                            var serverValue = JsonSerializer.SerializeToUtf8Bytes(
+                                property.GetValue(_lastSettings), property.PropertyType, ProtectionWireJson.Options);
+                            property.SetValue(Settings, JsonSerializer.Deserialize(serverValue, property.PropertyType, ProtectionWireJson.Options));
+                        }
+                        _snapshot = _snapshot with
+                        {
+                            StatusDetail = _connectionLost ? EngineUnavailable : "Ayar koruma motoruna iletilemedi; tekrar deneyin.",
+                        };
+                    }
+                    Changed?.Invoke();
+                }
+            });
+        }
+    }
+
+    /// <summary>
+    /// Sends a cancellation straight to the helper, ahead of anything queued.
+    /// </summary>
+    /// <remarks>
+    /// A stop button that first waited for the settings queue - or, worse, held the UI
+    /// thread while it did - is a stop button that does not stop. There is nothing to
+    /// cancel when no helper is connected, so that case is a no-op.
+    /// </remarks>
+    private void SendNow(string method)
+    {
+        if (_isolatedUiTest || _connectionLost || _rpc is not { } rpc) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var response = await rpc.SendAsync(Request(method, []), _stopping.Token).ConfigureAwait(false);
+                Accept(response);
+            }
+            catch (Exception) { /* The next status poll reports whatever the helper is doing. */ }
+        });
+    }
+
     private async Task CallAsync(string method, object?[] arguments, CancellationToken token)
         => await InvokeAsync(method, arguments, token).ConfigureAwait(false);
     private async Task<T> CallAsync<T>(string method, object?[] arguments, CancellationToken token)
