@@ -58,40 +58,54 @@ public sealed partial class RemoteProtectionClient : IProtectionController
     public IReadOnlyList<string> ProtectedDomains() => _snapshot.ProtectedHosts;
     public Task<ProbeResult> ProbeAsync(string host, CancellationToken cancellationToken = default) => CallAsync<ProbeResult>(nameof(ProbeAsync), [host], cancellationToken);
     public Task StartIndependentFeaturesAsync(CancellationToken cancellationToken = default) => CallAsync(nameof(StartIndependentFeaturesAsync), [], cancellationToken);
-    public void StartNetworkWatch() => CallAsync(nameof(StartNetworkWatch), [], default).GetAwaiter().GetResult();
+    public void StartNetworkWatch() => Post(nameof(StartNetworkWatch), []);
     public Task RunStartupHotspotCheckAsync(CancellationToken cancellationToken = default) => CallAsync(nameof(RunStartupHotspotCheckAsync), [], cancellationToken);
     public Task<LatencyOptimizationResult> SetLowLatencyModeAsync( bool enabled, CancellationToken cancellationToken = default) => CallAsync<LatencyOptimizationResult>(nameof(SetLowLatencyModeAsync), [enabled], cancellationToken);
     public Task<LatencyOptimizationResult> TestLatencyAsync(CancellationToken cancellationToken = default) => CallAsync<LatencyOptimizationResult>(nameof(TestLatencyAsync), [], cancellationToken);
     public Task<LatencyOptimizationResult> RunLoadedLatencyTestAsync(CancellationToken cancellationToken = default) => CallAsync<LatencyOptimizationResult>(nameof(RunLoadedLatencyTestAsync), [], cancellationToken);
-    public void CancelLoadedLatencyTest() => CallAsync(nameof(CancelLoadedLatencyTest), [], default).GetAwaiter().GetResult();
-    public void CancelLatencyRun() => CallAsync(nameof(CancelLatencyRun), [], default).GetAwaiter().GetResult();
+    public void CancelLoadedLatencyTest() => SendNow(nameof(CancelLoadedLatencyTest));
+    public void CancelLatencyRun() => SendNow(nameof(CancelLatencyRun));
     public Task<IReadOnlyList<string>> ListConnectedProcessesAsync(CancellationToken cancellationToken = default) => CallAsync<IReadOnlyList<string>>(nameof(ListConnectedProcessesAsync), [], cancellationToken);
     public string LatencyLoadInstruction(LoadDirection direction) => CallAsync<string>(nameof(LatencyLoadInstruction), [direction], default).GetAwaiter().GetResult();
     public Task<IReadOnlyList<string>> ListBulkApplicationsAsync(CancellationToken cancellationToken = default) => CallAsync<IReadOnlyList<string>>(nameof(ListBulkApplicationsAsync), [], cancellationToken);
     public Task<LatencyOptimizationResult> RetestLatencyAsync(CancellationToken cancellationToken = default) => CallAsync<LatencyOptimizationResult>(nameof(RetestLatencyAsync), [], cancellationToken);
-    public void SetLatencyPreferences(LatencyPreferences preferences) => CallAsync(nameof(SetLatencyPreferences), [preferences], default).GetAwaiter().GetResult();
-    public void SetValorantCaptureRegion(ScreenCaptureRegion region) => CallAsync(nameof(SetValorantCaptureRegion), [region], default).GetAwaiter().GetResult();
+    public void SetLatencyPreferences(LatencyPreferences preferences)
+    {
+        ArgumentNullException.ThrowIfNull(preferences);
+        Post(nameof(SetLatencyPreferences), [preferences], s => s.Latency = preferences, nameof(AppSettings.Latency));
+    }
+    public void SetValorantCaptureRegion(ScreenCaptureRegion region)
+    {
+        ArgumentNullException.ThrowIfNull(region);
+        if (!region.IsValid) throw new ArgumentOutOfRangeException(nameof(region));
+        Post(nameof(SetValorantCaptureRegion), [region], s => s.Latency = s.Latency with { ValorantRttRegion = region }, nameof(AppSettings.Latency));
+    }
     public Task<LatencyOptimizationResult> RestoreLatencyAsync(CancellationToken cancellationToken = default) => CallAsync<LatencyOptimizationResult>(nameof(RestoreLatencyAsync), [], cancellationToken);
     public bool ClearLatencyProfiles() => CallAsync<bool>(nameof(ClearLatencyProfiles), [], default).GetAwaiter().GetResult();
     public Task StartAsync(CancellationToken cancellationToken = default) => CallAsync(nameof(StartAsync), [], cancellationToken);
-    public void OnSystemResumed(string reason) => CallAsync(nameof(OnSystemResumed), [reason], default).GetAwaiter().GetResult();
+    public void OnSystemResumed(string reason) => Post(nameof(OnSystemResumed), [reason]);
     public Task<HotspotDiagnosticResult> RunHotspotDiagnosticsAsync(CancellationToken cancellationToken = default) => CallAsync<HotspotDiagnosticResult>(nameof(RunHotspotDiagnosticsAsync), [], cancellationToken);
-    public void SetHotspotDiagnostics(bool enabled) => CallAsync(nameof(SetHotspotDiagnostics), [enabled], default).GetAwaiter().GetResult();
+    public void SetHotspotDiagnostics(bool enabled) => Post(nameof(SetHotspotDiagnostics), [enabled], s => s.HotspotDiagnostics = enabled, nameof(AppSettings.HotspotDiagnostics));
     public void EnableVodafoneModeHere() => CallAsync(nameof(EnableVodafoneModeHere), [], default).GetAwaiter().GetResult();
-    public void DisableVodafoneMode() => CallAsync(nameof(DisableVodafoneMode), [], default).GetAwaiter().GetResult();
-    public void SetVodafoneTtl(int ttl) => CallAsync(nameof(SetVodafoneTtl), [ttl], default).GetAwaiter().GetResult();
-    public void SetVodafoneDropIPv6(bool drop) => CallAsync(nameof(SetVodafoneDropIPv6), [drop], default).GetAwaiter().GetResult();
+    public void DisableVodafoneMode() => Post(nameof(DisableVodafoneMode), [], s => { s.VodafoneModeEnabled = false; s.HotspotDiagnostics = false; },
+        nameof(AppSettings.VodafoneModeEnabled), nameof(AppSettings.HotspotDiagnostics));
+    public void SetVodafoneTtl(int ttl)
+    {
+        TtlFixSettings.ValidateTimeToLive(ttl);
+        Post(nameof(SetVodafoneTtl), [ttl], s => s.VodafoneTtl = ttl, nameof(AppSettings.VodafoneTtl));
+    }
+    public void SetVodafoneDropIPv6(bool drop) => Post(nameof(SetVodafoneDropIPv6), [drop], s => s.VodafoneDropIPv6 = drop, nameof(AppSettings.VodafoneDropIPv6));
     public bool RememberCurrentVodafoneNetwork() => CallAsync<bool>(nameof(RememberCurrentVodafoneNetwork), [], default).GetAwaiter().GetResult();
-    public void ForgetVodafoneNetwork(string key) => CallAsync(nameof(ForgetVodafoneNetwork), [key], default).GetAwaiter().GetResult();
+    public void ForgetVodafoneNetwork(string key) => Post(nameof(ForgetVodafoneNetwork), [key], s => s.ForgetVodafoneNetwork(key), nameof(AppSettings.VodafoneModeNetworks));
     public HotspotMigrationResult CleanUpLegacyHotspotConfiguration() => CallAsync<HotspotMigrationResult>(nameof(CleanUpLegacyHotspotConfiguration), [], default).GetAwaiter().GetResult();
     public Task<ProbeResult> VerifyAsync(CancellationToken cancellationToken = default) => CallAsync<ProbeResult>(nameof(VerifyAsync), [], cancellationToken);
     public Task<IReadOnlyList<(string Host, ProbeResult Result)>> VerifyAllAsync(CancellationToken cancellationToken = default) => CallAsync<IReadOnlyList<(string Host, ProbeResult Result)>>(nameof(VerifyAllAsync), [], cancellationToken);
     public Task<TuningResult?> RetuneAsync(bool measureThroughput, CancellationToken cancellationToken = default) => CallAsync<TuningResult?>(nameof(RetuneAsync), [measureThroughput], cancellationToken);
     public Task<TuningResult?> RetuneAsync(CancellationToken cancellationToken = default) => CallAsync<TuningResult?>(nameof(RetuneAsync), [], cancellationToken);
-    public void ApplyScope(ProtectionScope scope) => CallAsync(nameof(ApplyScope), [scope], default).GetAwaiter().GetResult();
-    public void ApplyManualStrategy(string? strategyId) => CallAsync(nameof(ApplyManualStrategy), [strategyId], default).GetAwaiter().GetResult();
-    public void ApplyManualIsp(string? ispProfileId) => CallAsync(nameof(ApplyManualIsp), [ispProfileId], default).GetAwaiter().GetResult();
-    public void ApplyQuicSetting(bool blockQuic) => CallAsync(nameof(ApplyQuicSetting), [blockQuic], default).GetAwaiter().GetResult();
+    public void ApplyScope(ProtectionScope scope) => Post(nameof(ApplyScope), [scope], s => s.Scope = scope, nameof(AppSettings.Scope));
+    public void ApplyManualStrategy(string? strategyId) => Post(nameof(ApplyManualStrategy), [strategyId], s => s.ManualStrategyId = strategyId, nameof(AppSettings.ManualStrategyId));
+    public void ApplyManualIsp(string? ispProfileId) => Post(nameof(ApplyManualIsp), [ispProfileId], s => s.ManualIspProfileId = ispProfileId, nameof(AppSettings.ManualIspProfileId));
+    public void ApplyQuicSetting(bool blockQuic) => Post(nameof(ApplyQuicSetting), [blockQuic], s => s.BlockQuicHandshakes = blockQuic, nameof(AppSettings.BlockQuicHandshakes));
     public Task<LunarAdBlockState> ApplyLunarAdBlockAsync( bool enabled, CancellationToken cancellationToken = default) => CallAsync<LunarAdBlockState>(nameof(ApplyLunarAdBlockAsync), [enabled], cancellationToken);
     public LunarAdBlockState SyncLunarAdBlock() => CallAsync<LunarAdBlockState>(nameof(SyncLunarAdBlock), [], default).GetAwaiter().GetResult();
     public LunarAdBlockState DescribeLunarAdBlock() => _snapshot.LunarAdBlock;
@@ -102,8 +116,8 @@ public sealed partial class RemoteProtectionClient : IProtectionController
     public bool AddDomain(string domain) => CallAsync<bool>(nameof(AddDomain), [domain], default).GetAwaiter().GetResult();
     public bool RemoveDomain(string domain) => CallAsync<bool>(nameof(RemoveDomain), [domain], default).GetAwaiter().GetResult();
     public bool RestoreDomain(string domain) => CallAsync<bool>(nameof(RestoreDomain), [domain], default).GetAwaiter().GetResult();
-    public void ApplyDiscoverySetting(bool enabled) => CallAsync(nameof(ApplyDiscoverySetting), [enabled], default).GetAwaiter().GetResult();
-    public void ApplyRecheckInterval(int seconds) => CallAsync(nameof(ApplyRecheckInterval), [seconds], default).GetAwaiter().GetResult();
+    public void ApplyDiscoverySetting(bool enabled) => Post(nameof(ApplyDiscoverySetting), [enabled], s => s.AutoDiscoverBlockedSites = enabled, nameof(AppSettings.AutoDiscoverBlockedSites));
+    public void ApplyRecheckInterval(int seconds) => Post(nameof(ApplyRecheckInterval), [seconds], s => s.RecheckIntervalSeconds = seconds < 0 ? 0 : seconds, nameof(AppSettings.RecheckIntervalSeconds));
     public bool CanProtectHost(string host, string processName) => CallAsync<bool>(nameof(CanProtectHost), [host, processName], default).GetAwaiter().GetResult();
     public bool TryAcquireExperiment(string operationId, string expectedBeforeId) => CallAsync<bool>(nameof(TryAcquireExperiment), [operationId, expectedBeforeId], default).GetAwaiter().GetResult();
     public bool TryWriteExperiment(string operationId, string strategyId) => CallAsync<bool>(nameof(TryWriteExperiment), [operationId, strategyId], default).GetAwaiter().GetResult();
@@ -114,7 +128,10 @@ public sealed partial class RemoteProtectionClient : IProtectionController
         switch(item.Name)
         {
             case nameof(LatencyStageChanged): LatencyStageChanged?.Invoke(a[0].Deserialize<LoadedLaneProgress>(ProtectionWireJson.Options)!); break;
-            case nameof(Changed): Changed?.Invoke(); break;
+            // Accept raises Changed once for the whole reply. Raising it again for every
+            // queued Changed event as well meant one poll could hand the window dozens of
+            // identical full refreshes to run back to back.
+            case nameof(Changed): break;
             case nameof(HostRewritten): HostRewritten?.Invoke(a[0].Deserialize<string>(ProtectionWireJson.Options)!, a[1].Deserialize<string>(ProtectionWireJson.Options)!); break;
             case nameof(TuningProgress): TuningProgress?.Invoke(a[0].Deserialize<string>(ProtectionWireJson.Options)!, a[1].Deserialize<int>(ProtectionWireJson.Options)!, a[2].Deserialize<int>(ProtectionWireJson.Options)!); break;
             case nameof(DomainLearned): DomainLearned?.Invoke(a[0].Deserialize<string>(ProtectionWireJson.Options)!); break;

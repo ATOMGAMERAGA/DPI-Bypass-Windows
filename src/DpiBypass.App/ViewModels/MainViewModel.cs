@@ -394,7 +394,7 @@ public sealed partial class MainViewModel : ObservableObject
         LatencyDeepTestCommand = new AsyncRelayCommand(RunLatencyDeepTestAsync, CanRunLatency);
         LatencyRetestCommand = new AsyncRelayCommand(RetestLatencyAsync, CanRunLatency);
         LatencyRestoreCommand = new AsyncRelayCommand(RestoreLatencyAsync, () => !_isLatencyBusy);
-        LatencyClearProfilesCommand = new RelayCommand(ClearLatencyProfiles);
+        LatencyClearProfilesCommand = new AsyncRelayCommand(ClearLatencyProfilesAsync);
         RefreshLatencyProcessesCommand = new AsyncRelayCommand(RefreshLatencyProcessesAsync);
         LatencyPrimaryCommand = new AsyncRelayCommand(RunLatencyPrimaryActionAsync, CanRunLatency);
 
@@ -405,18 +405,18 @@ public sealed partial class MainViewModel : ObservableObject
             CancelLatencyRun,
             () => _service.CanCancelLatencyRun);
         OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
-        AddDomainCommand = new RelayCommand(AddDomain, () => !string.IsNullOrWhiteSpace(_newDomain));
-        RemoveDomainCommand = new RelayCommand(RemoveSelectedDomain, () => _selectedDomain is not null);
+        AddDomainCommand = new AsyncRelayCommand(AddDomainAsync, () => !string.IsNullOrWhiteSpace(_newDomain));
+        RemoveDomainCommand = new AsyncRelayCommand(RemoveSelectedDomainAsync, () => _selectedDomain is not null);
         HotspotDiagnoseCommand = new AsyncRelayCommand(RunHotspotDiagnosticsAsync, () => !_isHotspotBusy);
-        HotspotCleanupCommand = new RelayCommand(CleanUpLegacyHotspot);
-        RememberVodafoneNetworkCommand = new RelayCommand(
-            RememberCurrentVodafoneNetwork,
+        HotspotCleanupCommand = new AsyncRelayCommand(CleanUpLegacyHotspotAsync);
+        RememberVodafoneNetworkCommand = new AsyncRelayCommand(
+            RememberCurrentVodafoneNetworkAsync,
             () => _hotspotView.CanRememberThisNetwork);
         ForgetVodafoneNetworkCommand = new RelayCommand(
             ForgetSelectedVodafoneNetwork,
             () => _selectedVodafoneNetwork is not null);
         ClearDomainFilterCommand = new RelayCommand(() => DomainFilter = string.Empty, () => HasFilter);
-        RetrySaveCommand = new RelayCommand(RetrySettingsSave, () => SettingsSaveFailed);
+        RetrySaveCommand = new AsyncRelayCommand(RetrySettingsSaveAsync, () => SettingsSaveFailed);
         SaveDiagnosticReportCommand = new AsyncRelayCommand(SaveDiagnosticReportAsync);
         CopyLogCommand = new RelayCommand(CopyLogToClipboard);
         ClearLogCommand = new RelayCommand(ClearLogView);
@@ -595,7 +595,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     public AsyncRelayCommand LatencyRestoreCommand { get; }
 
-    public RelayCommand LatencyClearProfilesCommand { get; }
+    public AsyncRelayCommand LatencyClearProfilesCommand { get; }
 
     /// <summary>Stops a running deep test. The run puts everything back on its way out.</summary>
     public RelayCommand LatencyCancelCommand { get; }
@@ -641,23 +641,23 @@ public sealed partial class MainViewModel : ObservableObject
 
     public RelayCommand OpenLogFolderCommand { get; }
 
-    public RelayCommand AddDomainCommand { get; }
+    public AsyncRelayCommand AddDomainCommand { get; }
 
-    public RelayCommand RemoveDomainCommand { get; }
+    public AsyncRelayCommand RemoveDomainCommand { get; }
 
     public AsyncRelayCommand HotspotDiagnoseCommand { get; }
 
-    public RelayCommand HotspotCleanupCommand { get; }
+    public AsyncRelayCommand HotspotCleanupCommand { get; }
 
     public RelayCommand ForgetVodafoneNetworkCommand { get; }
 
     /// <summary>Adds the network we are on now to the remembered list, in place.</summary>
-    public RelayCommand RememberVodafoneNetworkCommand { get; }
+    public AsyncRelayCommand RememberVodafoneNetworkCommand { get; }
 
     public RelayCommand ClearDomainFilterCommand { get; }
 
     /// <summary>Re-attempts a settings write the app already told the user about.</summary>
-    public RelayCommand RetrySaveCommand { get; }
+    public AsyncRelayCommand RetrySaveCommand { get; }
 
     /// <summary>Writes a masked diagnostics archive the user can attach to a message.</summary>
     public AsyncRelayCommand SaveDiagnosticReportCommand { get; }
@@ -1923,11 +1923,18 @@ public sealed partial class MainViewModel : ObservableObject
         };
     }
 
-    private void ClearLatencyProfiles()
+    private async Task ClearLatencyProfilesAsync()
     {
-        LatencyStatusLine = _service.ClearLatencyProfiles()
-            ? "Kayıtlı gecikme sonuçları silindi; sonraki ölçüm baştan yapılacak."
-            : "Silinecek kayıtlı gecikme sonucu yoktu.";
+        try
+        {
+            LatencyStatusLine = await Task.Run(() => _service.ClearLatencyProfiles()).ConfigureAwait(true)
+                ? "Kayıtlı gecikme sonuçları silindi; sonraki ölçüm baştan yapılacak."
+                : "Silinecek kayıtlı gecikme sonucu yoktu.";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.IO.IOException or UnauthorizedAccessException)
+        {
+            LatencyStatusLine = $"Kayıtlı gecikme sonuçları silinemedi: {ex.Message}";
+        }
     }
 
     private async Task RunLatencyDeepTestAsync()
@@ -2280,11 +2287,25 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private void AddDomain()
+    private async Task AddDomainAsync()
     {
         var domain = _newDomain;
+        bool added;
 
-        if (!_service.AddDomain(domain))
+        // Off the UI thread: the list lives in the elevated helper, and a round trip that
+        // waits behind a queued save is not something the window should stop drawing for.
+        try
+        {
+            added = await Task.Run(() => _service.AddDomain(domain)).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.IO.IOException or UnauthorizedAccessException)
+        {
+            DomainStatusSeverity = "error";
+            DomainStatus = $"'{domain.Trim()}' eklenemedi: {ex.Message}";
+            return;
+        }
+
+        if (!added)
         {
             DomainStatusSeverity = "error";
             DomainStatus = $"'{domain.Trim()}' zaten korunuyor ya da geçerli bir alan adı değil.";
@@ -2297,14 +2318,24 @@ public sealed partial class MainViewModel : ObservableObject
         RefreshDomains();
     }
 
-    private void RemoveSelectedDomain()
+    private async Task RemoveSelectedDomainAsync()
     {
         if (_selectedDomain is not { } entry)
         {
             return;
         }
 
-        var removed = _service.RemoveDomain(entry.Domain);
+        bool removed;
+        try
+        {
+            removed = await Task.Run(() => _service.RemoveDomain(entry.Domain)).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.IO.IOException or UnauthorizedAccessException)
+        {
+            AppLog.Error("Alan adı çıkarılamadı", ex);
+            removed = false;
+        }
+
         DomainStatusSeverity = removed ? "ok" : "error";
         DomainStatus = removed
             ? $"'{entry.Domain}' artık korunmuyor."
@@ -2519,13 +2550,13 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>Remembers the network we are on, without switching the mode off and on.</summary>
-    private void RememberCurrentVodafoneNetwork()
+    private async Task RememberCurrentVodafoneNetworkAsync()
     {
         try
         {
-            _service.RememberCurrentVodafoneNetwork();
+            await Task.Run(() => _service.RememberCurrentVodafoneNetwork()).ConfigureAwait(true);
         }
-        catch (InvalidOperationException ex)
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.IO.IOException or UnauthorizedAccessException)
         {
             HotspotSuggestion = ex.Message;
             return;
@@ -2620,9 +2651,19 @@ public sealed partial class MainViewModel : ObservableObject
         private set => Set(ref _hotspotReport, value);
     }
 
-    private void CleanUpLegacyHotspot()
+    private async Task CleanUpLegacyHotspotAsync()
     {
-        var migration = _service.CleanUpLegacyHotspotConfiguration();
+        HotspotMigrationResult migration;
+        try
+        {
+            migration = await Task.Run(() => _service.CleanUpLegacyHotspotConfiguration()).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.IO.IOException or UnauthorizedAccessException)
+        {
+            HotspotSuggestion = $"Eski hotspot ayarları temizlenemedi: {ex.Message}";
+            return;
+        }
+
         Raise(nameof(HotspotDiagnostics));
         Raise(nameof(VodafoneModeEnabled));
         Raise(nameof(VodafoneDropIPv6));
@@ -2830,14 +2871,40 @@ public sealed partial class MainViewModel : ObservableObject
         ? $"{host}: erişilebilir · {result.Elapsed.TotalMilliseconds:F0} ms{(result.HttpStatus is null ? string.Empty : $" · HTTP {result.HttpStatus}")}"
         : $"{host}: {ProtectionService.DescribeOutcome(result.Outcome)}";
 
+    /// <summary>1 while a refresh is queued on the dispatcher and has not started yet.</summary>
+    private int _serviceRefreshQueued;
+
+    /// <summary>
+    /// Schedules one refresh of everything the service state feeds, however many times
+    /// the service says it changed before the dispatcher gets to it.
+    /// </summary>
+    /// <remarks>
+    /// The helper reports a change on every status poll, on every reply and for every
+    /// change event it queued in between, and the refresh below rebuilds most of the
+    /// window. One dispatcher operation per notification let a busy second - a sweep, a
+    /// network change, a burst of learned domains - stack up dozens of identical full
+    /// refreshes in front of input and rendering, which is a window that stutters or
+    /// stops answering. Only the latest state matters, so a refresh that is already
+    /// waiting absorbs the rest.
+    /// </remarks>
     private void OnServiceChanged()
     {
-        if (!_dispatcher.CheckAccess())
+        if (Interlocked.Exchange(ref _serviceRefreshQueued, 1) != 0)
         {
-            _dispatcher.BeginInvoke(OnServiceChanged);
             return;
         }
 
+        _dispatcher.BeginInvoke(() =>
+        {
+            // Cleared before the refresh runs, so a change that lands while it is reading
+            // the service queues the next one instead of being lost.
+            Volatile.Write(ref _serviceRefreshQueued, 0);
+            RefreshFromService();
+        });
+    }
+
+    private void RefreshFromService()
+    {
         IsRunning = _service.State is ProtectionState.Running or ProtectionState.Degraded;
         ProtectionState = _service.State;
         SyncConnectionWithService();
@@ -2971,9 +3038,20 @@ public sealed partial class MainViewModel : ObservableObject
     /// space - one button puts their settings on disk without them having to set each one
     /// again.
     /// </remarks>
-    private void RetrySettingsSave()
+    private async Task RetrySettingsSaveAsync()
     {
-        if (_service.RetrySave())
+        bool saved;
+        try
+        {
+            saved = await Task.Run(() => _service.RetrySave()).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.IO.IOException or UnauthorizedAccessException)
+        {
+            SettingsSaveWarning = $"Ayarlar hâlâ kaydedilemiyor: {ex.Message}";
+            return;
+        }
+
+        if (saved)
         {
             SettingsSaveWarning = string.Empty;
             SettingsSaveFailed = false;
@@ -3025,7 +3103,7 @@ public sealed partial class MainViewModel : ObservableObject
         DiagnosticSnapshot snapshot;
         try
         {
-            snapshot = _service.CaptureDiagnostics();
+            snapshot = await Task.Run(() => _service.CaptureDiagnostics()).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -3222,7 +3300,7 @@ public sealed partial class MainViewModel : ObservableObject
 
         _refreshTimer.Start();
         RefreshPresentation();
-        OnServiceChanged();
+        RefreshFromService();
 
         // Everything that was queued rather than posted while the window was away now
         // has somewhere to go.

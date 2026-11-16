@@ -52,12 +52,42 @@ public sealed record ProtectionSnapshot
     public long ThroughputCostBytes { get; init; } = default!;
     public string? DnsRestorePending { get; init; } = default!;
     public ConfigSaveResult? LastSaveFailure { get; init; } = default!;
-    public static ProtectionSnapshot Capture(IProtectionController service, long sequence) => new()
+    /// <summary>
+    /// Captures the service's state for one reply, detached from the live objects.
+    /// </summary>
+    /// <remarks>
+    /// The reply is serialised after this returns, on the pipe thread, while up to eight
+    /// other requests and the engine's own background work keep mutating the live
+    /// settings (domain lists, per-network profiles). Handing the live object to the
+    /// serialiser let a concurrent <c>List.Add</c> throw "collection was modified" in the
+    /// middle of the write, which dropped the reply and made the desktop declare the
+    /// helper lost for the rest of the session. The settings are therefore copied here,
+    /// and a capture that collides with a mutation is simply taken again.
+    /// </remarks>
+    public static ProtectionSnapshot Capture(IProtectionController service, long sequence)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return CaptureOnce(service, sequence);
+            }
+            catch (InvalidOperationException) when (attempt < 4)
+            {
+                Thread.Yield();
+            }
+        }
+    }
+
+    private static AppSettings Detach(AppSettings settings) => System.Text.Json.JsonSerializer.Deserialize<AppSettings>(
+        System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(settings, ProtectionWireJson.Options), ProtectionWireJson.Options)!;
+
+    private static ProtectionSnapshot CaptureOnce(IProtectionController service, long sequence) => new()
     {
         Sequence = sequence,
         ProtectedHosts = service.ProtectedDomains(),
         LunarAdBlock = service.DescribeLunarAdBlock(),
-        Settings = service.Settings,
+        Settings = Detach(service.Settings),
         State = service.State,
         Stats = service.Stats,
         Network = service.Network,
